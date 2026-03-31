@@ -9,7 +9,6 @@ dependencies = [
     "numpy",
     "bluesky-simulator>=1.0.7",
 ]
-
 authors = [
   { name="Jan Groot", email="d.j.groot@tudelft.nl" },
   { name="Joost Ellerbroek", email="j.ellerbroek@tudelft.nl" },
@@ -25,14 +24,10 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-
     "Development Status :: 4 - Beta",
-
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
-
     "License :: OSI Approved :: MIT License",
-
     "Operating System :: OS Independent",
 ]
 
@@ -47,7 +42,13 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 source = "vcs"
 
+[tool.hatch.build.targets.wheel]
+packages = ["bluesky_gym"]  # Forces Hatch to find this specific folder
+
 [tool.hatch.build.targets.sdist]
 include = [
   "bluesky_gym/*",
 ]
+
+[tool.uv.workspace]
+members = ["../path_planning"]

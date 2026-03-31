@@ -1,0 +1,11 @@
+[project]
+name = "path-planning"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "bluesky-gym",
+]
+
+[tool.uv.sources]
+bluesky-gym = { workspace = true }
+
