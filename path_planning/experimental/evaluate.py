@@ -25,7 +25,7 @@ Output
 ------
   Console  - formatted summary table (overall + per group)
   CSV      - one row per episode     → <save_path>/eval_<run_id>_<ts>.csv
-  JSON     - aggregated metrics      → <save_path>/eval_<run_id>_<ts>.json
+  YAML     - aggregated metrics      → <save_path>/eval_<run_id>_<ts>.yaml
 
 Usage
 -----
@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
+import yaml
 import os
 from datetime import datetime
 from typing import Callable, Optional, TypedDict, cast
@@ -334,7 +334,7 @@ def save_csv(records: list[EpisodeRecord], path: str) -> None:
     print(f"📄 Episode CSV  → {path}")
 
 
-def save_json(overall: dict, per_group: dict[str, dict], path: str) -> None:
+def save_yaml(overall: dict, per_group: dict[str, dict], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     def _clean(d: dict) -> dict:
@@ -346,8 +346,8 @@ def save_json(overall: dict, per_group: dict[str, dict], path: str) -> None:
         "per_group": {g: _clean(m) for g, m in per_group.items()},
     }
     with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
-    print(f"📊 Metrics JSON → {path}")
+        yaml.dump(payload, f, default_flow_style=False, sort_keys=False)
+    print(f"📊 Metrics YAML → {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -404,8 +404,7 @@ def main() -> None:
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"eval_{cfg.run_id}_{ts}"
     save_csv(records,             os.path.join(cfg.save_path, f"{stem}.csv"))
-    save_json(overall, per_group, os.path.join(cfg.save_path, f"{stem}.json"))
-
+    save_yaml(overall, per_group, os.path.join(cfg.save_path, f"{stem}.yaml"))
 
 if __name__ == "__main__":
     main()
