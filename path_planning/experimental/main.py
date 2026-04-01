@@ -82,6 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Existing run ID to load config from (used with --no-train).",
     )
 
+    p.add_argument(
+        "--config", type=str, default=None,
+        metavar="PATH",
+        help="Path to a YAML config file.  CLI flags override individual "
+             "fields on top of whatever the YAML sets.",
+    )
+
     return p
 
 

@@ -14,7 +14,7 @@ Design notes
 ------------
 - `ExperimentConfig` is the single object passed around everywhere.
 - Paths are derived lazily in __post_init__ so they are consistent.
-- save() / load() round-trip through JSON so enjoy.py can reconstruct
+- save() / load() round-trip through YAML so enjoy.py can reconstruct
   the exact config from a run_id without any hardcoded defaults.
 - from_args() wires argparse directly onto the dataclass fields so
   main.py stays a thin entry point.
@@ -22,7 +22,7 @@ Design notes
 
 from __future__ import annotations
 
-import json
+import yaml
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -113,7 +113,7 @@ class ExperimentConfig:
         models/<run_id>/
             final_model.zip
             checkpoint_model.zip
-            config.json          ← written by save(); read by load()
+            config.yaml          ← written by save(); read by load()
     """
 
     model:   ModelConfig   = field(default_factory=ModelConfig)
@@ -127,13 +127,13 @@ class ExperimentConfig:
     # Derived paths (set in __post_init__)                                #
     # ------------------------------------------------------------------ #
     # These are NOT dataclass fields (no type annotation) so they are not
-    # included in asdict() / JSON serialisation automatically.  We expose
+    # included in asdict() / YAML serialisation automatically.  We expose
     # them as plain attributes instead.
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         self._build_paths()
 
-    def _build_paths(self) -> None:
+    def _build_paths(self):
         base = (
             f"./experiments"
             f"/{self.session.env_name}"
@@ -172,7 +172,7 @@ class ExperimentConfig:
     # ------------------------------------------------------------------ #
 
     def _to_dict(self) -> dict:
-        """Serialise to a plain dict suitable for JSON.
+        """Serialise to a plain dict suitable for YAML.
 
         `algorithm` is a class object — we store its name and reconstruct
         on load.  Everything else is a primitive or a nested dict/list.
@@ -182,30 +182,90 @@ class ExperimentConfig:
         d["model"]["algorithm"] = self.model.algorithm.__name__
         return d
 
-    def save(self) -> None:
-        """Write config.json next to the model files."""
-        path = os.path.join(self.save_path, "config.json")
+    def save(self):
+        """Write config.yaml next to the model files."""
+        path = os.path.join(self.save_path, "config.yaml")
         with open(path, "w") as f:
-            json.dump(self._to_dict(), f, indent=2)
+            # default_flow_style=False ensures nested blocks instead of inline braces
+            # sort_keys=False preserves the order of your dataclass fields
+            yaml.dump(self._to_dict(), f, default_flow_style=False, sort_keys=False)
+
+    @classmethod
+    def from_yaml(cls, yaml_path: str) -> "ExperimentConfig":
+        """Load an ExperimentConfig from a YAML file.
+ 
+        The YAML structure mirrors the dataclass hierarchy:
+ 
+            model:
+              algorithm: SAC
+              learning_rate: 3e-4
+              ...
+            session:
+              env_name: PathPlanningGoalEnv-v0
+              total_timesteps: 500000
+              ...
+            env:
+              action_mode: hdg
+              ...
+ 
+        Only the keys you want to override need to be present — missing
+        sections and fields fall back to their dataclass defaults.
+        """
+        with open(yaml_path) as f:
+            d = yaml.safe_load(f) or {}
+        return cls._from_yaml_dict(d)
+    
+    @classmethod
+    def _from_yaml_dict(cls, d: dict) -> "ExperimentConfig":
+        """Construct from a (possibly partial) YAML-sourced dict.
+ 
+        Unlike _from_dict() (which expects a fully populated dict from a
+        saved run), this method merges the provided values onto the
+        dataclass defaults so partial YAML files work correctly.
+        """
+        _ALGO_MAP: Dict[str, Type] = {"SAC": SAC}
+ 
+        # ── model ──────────────────────────────────────────────────────────
+        model_d  = d.get("model", {})
+        algo_cls = _ALGO_MAP.get(model_d.pop("algorithm", "SAC"), SAC)
+        model_cfg = ModelConfig(algorithm=algo_cls, **model_d)
+ 
+        # ── session ────────────────────────────────────────────────────────
+        session_cfg = SessionConfig(**d.get("session", {}))
+ 
+        # ── env ────────────────────────────────────────────────────────────
+        env_cfg = EnvKwargsConfig(**d.get("env", {}))
+  
+        # run_id: use value from YAML if present (re-run scenario),
+        # otherwise generate a fresh one (new experiment from template).
+        run_id = d.get("run_id", datetime.now().strftime("%Y%m%d_%H%M%S"))
+ 
+        obj = cls.__new__(cls)
+        object.__setattr__(obj, "model",   model_cfg)
+        object.__setattr__(obj, "session", session_cfg)
+        object.__setattr__(obj, "env",     env_cfg)
+        object.__setattr__(obj, "run_id",  run_id)
+        obj.__post_init__()
+        return obj
 
     @classmethod
     def load(cls, run_id: str) -> "ExperimentConfig":
         """Reconstruct an ExperimentConfig from a previously saved run.
 
-        Searches for the config.json under all known algorithm/env
+        Searches for the config.yaml under all known algorithm/env
         combinations.  Raises FileNotFoundError with a helpful message
         if the run cannot be located.
         """
         import glob
-        pattern = f"./experiments/*/*/models/{run_id}/config.json"
+        pattern = f"./experiments/*/*/models/{run_id}/config.yaml"
         matches = glob.glob(pattern)
         if not matches:
             raise FileNotFoundError(
-                f"No config.json found for run_id='{run_id}'.\n"
+                f"No config.yaml found for run_id='{run_id}'.\n"
                 f"Searched: {pattern}"
             )
         with open(matches[0]) as f:
-            d = json.load(f)
+            d = yaml.safe_load(f)
         return cls._from_dict(d)
 
     @classmethod
@@ -239,36 +299,45 @@ class ExperimentConfig:
 
     @classmethod
     def from_args(cls, args) -> "ExperimentConfig":
-        """Build an ExperimentConfig from a parsed argparse Namespace.
-
-        Only overrides fields that were explicitly passed on the command
-        line; everything else keeps its dataclass default.  This keeps
-        main.py free of config logic.
+        """Build an ExperimentConfig following the priority chain:
+ 
+            dataclass defaults  →  YAML file  →  CLI args
+ 
+        If ``args.config`` points to a YAML file, it is loaded first.
+        Any explicit CLI flags then override individual fields on top of
+        whatever the YAML set.  Fields not present in either source keep
+        their dataclass defaults.
         """
-        cfg = cls()
-
-        # Session overrides
-        if args.timesteps is not None:
+        # Layer 1: YAML (or plain defaults if no --config given)
+        if getattr(args, "config", None):
+            cfg = cls.from_yaml(args.config)
+        else:
+            cfg = cls()
+ 
+        # Layer 2: CLI overrides — only applied when explicitly passed
+        # Session
+        if getattr(args, "timesteps", None) is not None:
             cfg.session.total_timesteps = args.timesteps
-        if args.train_runways is not None:
+        if getattr(args, "train_runways", None) is not None:
             cfg.session.train_runways = args.train_runways
-        if args.eval_runways is not None:
+        if getattr(args, "eval_runways", None) is not None:
             cfg.session.eval_runways = args.eval_runways
-        if args.eval_episodes is not None:
+        if getattr(args, "eval_episodes", None) is not None:
             cfg.session.eval_episodes = args.eval_episodes
-        if args.no_train:
+        if getattr(args, "no_train", False):
             cfg.session.do_train = False
-        if args.no_eval:
+        if getattr(args, "no_eval", False):
             cfg.session.do_evaluate = False
-
-        # Model overrides
-        if args.lr is not None:
+ 
+        # Model
+        if getattr(args, "lr", None) is not None:
             cfg.model.learning_rate = args.lr
-
-        # Env overrides
-        if args.action_mode is not None:
+ 
+        # Env
+        if getattr(args, "action_mode", None) is not None:
             cfg.env.action_mode = args.action_mode
-
-        # Paths must be rebuilt after any change that affects them
+ 
+        # Paths depend on session.env_name, model.algorithm, and run_id —
+        # rebuild after all overrides are applied.
         cfg._build_paths()
         return cfg

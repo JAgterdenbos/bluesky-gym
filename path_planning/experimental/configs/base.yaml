@@ -1,0 +1,55 @@
+# configs/base.yaml
+# -----------------
+# Fully annotated reference configuration for PathPlanningGoalEnv experiments.
+#
+# Usage
+# -----
+#   python main.py --config configs/base.yaml
+#   python main.py --config configs/base.yaml --timesteps 100000   # CLI override
+#
+# All fields shown here are optional — omitting a field uses the dataclass
+# default.  You only need to include what you want to change.
+#
+# Priority chain:  dataclass defaults  →  this file  →  CLI flags
+
+# ── Model ──────────────────────────────────────────────────────────────────
+model:
+  algorithm: SAC                    # Only SAC supported currently
+
+  # Actor / critic network architecture
+  net_arch:
+    pi: [256, 256, 256]             # Policy (actor) hidden layers
+    qf: [256, 256, 256]             # Q-function (critic) hidden layers
+
+  learning_rate: 0.0003             # 3e-4
+
+  # HER (Hindsight Experience Replay) settings
+  her_n_sampled_goal: 4             # Virtual goals sampled per real transition
+  her_goal_selection_strategy: future  # "future" | "final" | "random"
+
+  verbose: 1                        # SB3 verbosity: 0 = silent, 1 = info, 2 = debug
+
+# ── Session ─────────────────────────────────────────────────────────────────
+session:
+  env_name: PathPlanningGoalEnv-v0
+
+  total_timesteps: 250000
+
+  # Runways used during training.  null = all available runways.
+  train_runways: null
+
+  # Runways used during evaluation.
+  eval_runways:
+    - "27"
+    - "18R"
+
+  eval_episodes: 10                 # Episodes per evaluation run
+  eval_freq: 5000                   # EvalCallback frequency (env steps)
+
+  do_train: true
+  do_evaluate: true
+
+# ── Environment kwargs ───────────────────────────────────────────────────────
+env:
+  action_mode: hdg                  # "hdg" (heading) | "wpt" (waypoint)
+  use_rta: false                    # Required Time of Arrival (not yet implemented)

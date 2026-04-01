@@ -22,7 +22,6 @@ from bluesky_gym.utils import logger
 
 bluesky_gym.register_envs()
 
-
 # ── config ────────────────────────────────────────────────────────────────────
 
 ENV_NAME  = "PathPlanningGoalEnv-v0"
@@ -209,7 +208,6 @@ class DiagnosticsCallback(BaseCallback):
             f"  |  action  mean={actions.mean():.3f}  std={actions.std():.3f}"
         )
         return True
-
 
 def make_callbacks(
     save_path:   str,
