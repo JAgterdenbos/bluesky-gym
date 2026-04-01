@@ -12,7 +12,6 @@ def parse_args():
     parser.add_argument("--record", action="store_true", help="Record episodes to video")
     return parser.parse_args()
 
-
 def enjoy(run_id: str, episodes: int = 5, record: bool = False):
     bluesky_gym.register_envs()
 

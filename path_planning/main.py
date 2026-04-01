@@ -10,7 +10,11 @@ from callbacks import get_callbacks
 
 #TODO: Find a way to make learn log frequency be dynamic based on the number of timesteps and not too many logs. Maybe we can have it log every 1% of the total timesteps or something like that.
 
+#TODO: Maybe we should make it cli friendly and allow passing in the config parameters via command line arguments. This would make it easier to run different experiments without having to change the code. We can use argparse for this. For now, we can just change the config in the code and run it, which is fine for our current needs.
+
 DO_EVALUATE = True  # Set to False if you want to skip evaluation after training. Evaluation can be time-consuming, so this allows for quicker iterations during development.
+
+
 
 def make_env(env_id, runways=None, render_mode=None):
     env = gym.make(env_id, render_mode=render_mode, runways=runways, action_mode="hdg")
@@ -81,6 +85,8 @@ def main():
     # Instantiate the master config
     cfg = ExperimentConfig()
     print(f"▶️ Starting Experiment: {cfg.run_id}")
+
+    cfg.session.total_timesteps = 500_000 #
 
     # Train the model
     if cfg.session.do_train:

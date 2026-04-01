@@ -78,7 +78,7 @@ IAF_ANGLE    = 60   # degrees
 MIN_DISTANCE = FAF_DISTANCE + IAF_DISTANCE
 MAX_DISTANCE = 300
 
-MAX_TIME = 3600 * 5 # 5 hours in seconds
+MAX_TIME = 3600 * 6 # 6 hours in seconds, Note: This is just a random choice but it should be long enough!
 
 MAX_DIS_NEXT_WPT = 15  # km
 MIN_DIS_NEXT_WPT = 15  # km
@@ -382,6 +382,7 @@ class PathPlanningGoalEnv(GoalEnv):
 
         return {
             "is_success":         is_success,   # required by GoalSuccessLoggerCallback
+            "sim_time":           self.simt,
             "total_reward":       self.total_reward,
             "average_path_rew":   self.average_path,
             "average_noise_rew":  self.average_noise,

@@ -13,7 +13,7 @@ class CheckpointCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         if self.n_calls % self.save_freq == 0:
-            self.model.save(f"{self.save_path}/model_step_{self.n_calls}")
+            self.model.save(f"{self.save_path}/model_checkpoint.zip")
         return True
 
 class SuccessRateLogger(BaseCallback):
