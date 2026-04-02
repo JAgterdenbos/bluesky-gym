@@ -24,8 +24,8 @@ model:
   learning_rate: 0.0003             # 3e-4
 
   # HER (Hindsight Experience Replay) settings
-  her_n_sampled_goal: 4             # Virtual goals sampled per real transition
-  her_goal_selection_strategy: future  # "future" | "final" | "random"
+  her_n_sampled_goal: 4                # Virtual goals sampled per real transition
+  her_goal_selection_strategy: final    # "future" | "final" | "random"
 
   verbose: 1                        # SB3 verbosity: 0 = silent, 1 = info, 2 = debug
 
@@ -44,7 +44,7 @@ session:
     - "18R"
 
   eval_episodes: 10                 # Episodes per evaluation run
-  eval_freq: 5000                   # EvalCallback frequency (env steps)
+  eval_freq: 50000                   # EvalCallback frequency (env steps)
 
   do_train: true
   do_evaluate: true

@@ -26,6 +26,8 @@ Changes vs. pathplanning_goal_env.py
 5. Everything else (bluesky sim, action modes, rendering) is unchanged.
 """
 
+#TODO: Make sure this env is compatible with agents that use HER or not and check if HER here actually uses all of the rewards (which it should) or only the sparse reward from compute_reward().
+
 #TODO: Add RTA (Required Time of Arrival) to the goal vector, so that the agent can plan to arrive on time. Add a flag to specify whether to use RTA or keep it constant at 0.0. This will allow us to train agents that can not only reach the goal location, but also learn to time their arrival, which is crucial for real-world applications. 
 
 import numpy as np
@@ -41,9 +43,11 @@ from bluesky.traffic import Route
 import gymnasium as gym
 from gymnasium import spaces
 
+from typing import List
+
 class GoalEnv(gym.Env):
     """Abstract GoalEnv contract.  Subclasses must implement compute_reward() and _get_obs()."""
-    def compute_reward(self, achieved_goal, desired_goal, info):
+    def compute_reward(self, achieved_goal, desired_goal, infos):
         raise NotImplementedError
 
 # ── shared constants ──────────────────────────────────────────────────────────
@@ -89,11 +93,11 @@ SIM_DT   = 5     # s
 ACTION_TIME = 120 
 
 ACTION_FREQUENCY = int(ACTION_TIME / SIM_DT)
-DISTANCE_MARGIN  = 4.5  # km
+DISTANCE_MARGIN  = 1  # km
 
 # Sparse-reward threshold: how close (in normalised units) counts as "reached".
-# FAF_DISTANCE / MAX_DISTANCE ≈ 0.083; use slightly larger for tolerance.
-GOAL_DISTANCE_THRESHOLD = (FAF_DISTANCE + DISTANCE_MARGIN) / MAX_DISTANCE
+#TODO: update this, because we switched to the IAF
+GOAL_DISTANCE_THRESHOLD = DISTANCE_MARGIN / MAX_DISTANCE
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -103,11 +107,11 @@ class PathPlanningGoalEnv(GoalEnv):
 
     observation_space layout (required by HerReplayBuffer):
       {
-        "observation"   : Box(2,)  — normalised (x, y) of the aircraft
-        "achieved_goal" : Box(2,)  — same encoding as desired_goal, computed
-                                     from current aircraft (x, y)
-        "desired_goal"  : Box(2,)  — FAF position of the target runway,
-                                     encoded as (sin_brg*dist, cos_brg*dist)
+        "observation"   : Box(3,)  — normalised (x, y, t) of the aircraft
+        "achieved_goal" : Box(3,)  — same encoding as desired_goal, computed
+                                     from current aircraft (x, y, t)
+        "desired_goal"  : Box(3,)  — FAF position of the target runway,
+                                     encoded as (sin_brg*dist, cos_brg*dist, rta)
       }
 
     Parameters
@@ -138,7 +142,7 @@ class PathPlanningGoalEnv(GoalEnv):
 
         # ── observation space (GoalEnv layout) ────────────────────────────────
         obs_shape  = (3,)  # (x, y, t)
-        goal_shape = (3,)  # (goal_x, goal_y, rta)  — same encoding for both goals
+        goal_shape = (3,)  # (goal_x, goal_y, rta)
         act_shape  = (2,)
 
         # Both goals use the same normalised encoding, so give them the same bounds
@@ -176,6 +180,7 @@ class PathPlanningGoalEnv(GoalEnv):
         self.projection_size = 30
 
         # ── bookkeeping ────────────────────────────────────────────────────────
+        self.step_reward   = 0
         self.segment_reward = 0
         self.total_reward   = 0
         self.segment_noise  = 0
@@ -194,6 +199,7 @@ class PathPlanningGoalEnv(GoalEnv):
         self.lat_list = []
         self.lon_list = []
         self.simt = 0
+        self.death_cause = None
 
         # ── current goal (set properly in reset) ──────────────────────────────
         self.current_runway = self.runways[0]
@@ -207,30 +213,29 @@ class PathPlanningGoalEnv(GoalEnv):
     # ──────────────────────────────────────────────────────────────────────────
     # GoalEnv contract
     # ──────────────────────────────────────────────────────────────────────────
-
     def compute_reward(
         self,
         achieved_goal: np.ndarray,
         desired_goal: np.ndarray,
-        info: dict,
-    ) -> float:
-        """
-        Sparse reward used by HER when relabelling transitions.
-
-        Returns 0.0 if the achieved goal is within GOAL_DISTANCE_THRESHOLD of
-        the desired goal (Euclidean distance in normalised space), else -1.0.
-
-        Both goals are 2-D vectors in the same normalised coordinate system as
-        the agent's (x, y) observation, so Euclidean distance is meaningful.
-
-        Note: this method must be *vectorisable* — SB3 calls it with batches
-        of shape (B, goal_dim), so we use np operations throughout.
-        """
+        infos: List[dict],
+    ) -> np.ndarray:
         if self.use_rta:
-            raise NotImplementedError("RTA-based reward not implemented yet.")
+            raise NotImplementedError("RTA-based reward is not implemented yet. Set use_rta=False or implement the RTA logic in compute_reward().")
+        
+        success = np.array([
+            i.get("death_cause") in ("success", "wrong_runway") 
+            for i in infos
+        ])
 
-        distance = np.linalg.norm(achieved_goal - desired_goal, axis=-1)
-        return (distance < GOAL_DISTANCE_THRESHOLD).astype(np.float32) - 1.0
+        terminal_failure = np.array([
+            i.get("death_cause") in ("restrict", "timeout", "out_of_bounds") 
+            for i in infos
+        ])
+
+        step_rewards = np.array([i.get("step_reward", 0.0) for i in infos], dtype=np.float32)
+        goal_reward = np.where(success, 10.0, 0.0)
+        fail_penalty = np.where(terminal_failure, -1.0, 0.0)
+        return (goal_reward + step_rewards + fail_penalty).astype(np.float32)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Core Gymnasium API
@@ -244,10 +249,12 @@ class PathPlanningGoalEnv(GoalEnv):
         self.average_path   = 0
         self.total_reward   = 0
         self.segment_reward = 0
+        self.step_reward    = 0
         self.terminated     = False
         self.truncated      = False
         self.wpt_reach      = False
         self.simt           = 0
+        self.death_cause    = None
 
         # ── sample goal ────────────────────────────────────────────────────────
         self.current_runway = self.np_random.choice(self.runways)
@@ -275,6 +282,7 @@ class PathPlanningGoalEnv(GoalEnv):
         return observation, info
 
     def step(self, action):
+        self.step_reward    = 0
         self.segment_reward = 0
         self._set_action(action)
 
@@ -338,51 +346,50 @@ class PathPlanningGoalEnv(GoalEnv):
 
         x = np.sin(brg) * dis
         y = np.cos(brg) * dis
+        t = 0.0 
 
-        if self.use_rta:
-            raise NotImplementedError("RTA not implemented yet.")
-        else:
-            t = 0.0
+        obs_vec = np.array([x, y, t], dtype=np.float64)
 
         return {
-            "observation":   np.array([x, y, t], dtype=np.float64),
-            "achieved_goal": np.array([x, y, t], dtype=np.float64),  # same encoding
+            "observation":   obs_vec,
+            "achieved_goal": obs_vec.copy(),
             "desired_goal":  self.goal_vector.copy(),
         }
 
     def _compute_goal_vector(self, runway: str) -> np.ndarray:
-        """Encodes the runway FAF as a normalised 2-D vector (goal_x, goal_y)."""
+        """Encodes the runway IAF as a 4-D vector (x, y, t, heading)."""
         rwy_info = RUNWAYS_SCHIPHOL_FAF[runway]
-        faf_lat, faf_lon = fn.get_point_at_distance(
+        
+        # Target the IAF (Initial Approach Fix)
+        # Note: IAF is usually further out than FAF. 
+        # Here we use FAF_DISTANCE + IAF_DISTANCE to find the entry point.
+        iaf_lat, iaf_lon = fn.get_point_at_distance(
             rwy_info["lat"], rwy_info["lon"],
-            FAF_DISTANCE,
+            FAF_DISTANCE + IAF_DISTANCE,
             rwy_info["track"] - 180,
         )
 
         brg, dis = bs.tools.geo.kwikqdrdist(
-            SCHIPHOL[0], SCHIPHOL[1], faf_lat, faf_lon
+            SCHIPHOL[0], SCHIPHOL[1], iaf_lat, iaf_lon
         )
         brg = np.radians(brg)
         dis = dis * NM2KM / MAX_DISTANCE
 
         x = np.sin(brg) * dis
         y = np.cos(brg) * dis
-
-        if self.use_rta:
-            raise NotImplementedError("RTA not implemented yet.")
-        else:
-            t = 0.0
+        t = 0.0 # Placeholder for RTA
 
         return np.array([x, y, t], dtype=np.float64)
 
     def _get_info(self) -> dict:
         obs = self._get_obs()
-        distance = np.linalg.norm(obs["achieved_goal"] - obs["desired_goal"])
-        is_success = bool(distance < GOAL_DISTANCE_THRESHOLD)
+        is_success = self.death_cause == "success"
 
         return {
             "is_success":         is_success,   # required by GoalSuccessLoggerCallback
+            "death_cause":        self.death_cause,
             "sim_time":           self.simt,
+            "step_reward":        self.step_reward,
             "total_reward":       self.total_reward,
             "average_path_rew":   self.average_path,
             "average_noise_rew":  self.average_noise,
@@ -404,40 +411,42 @@ class PathPlanningGoalEnv(GoalEnv):
         population_exposure = self._get_population_exposure() * self.population_weight
         self.average_path  += path_length
         self.average_noise += population_exposure
-        self.segment_reward += path_length + population_exposure
+        
+        tick_reward = path_length + population_exposure
+        self.step_reward    += tick_reward
+        self.segment_reward += tick_reward
 
     # ──────────────────────────────────────────────────────────────────────────
     # Terminal conditions
     # ──────────────────────────────────────────────────────────────────────────
-
     def _get_terminated(self):
         self.terminated = False
-        shapes  = bs.tools.areafilter.basic_shapes
-        line_ac = Path(
-            np.array([[self.lat, self.lon], [bs.traf.lat[0], bs.traf.lon[0]]])
-        )
+        shapes = bs.tools.areafilter.basic_shapes
+        line_ac = Path(np.array([[self.lat, self.lon], [bs.traf.lat[0], bs.traf.lon[0]]]))
 
-        rwy           = self.current_runway
-        line_sink     = Path(
-            np.reshape(
-                shapes[f"SINK{rwy}"].coordinates,
-                (len(shapes[f"SINK{rwy}"].coordinates) // 2, 2),
-            )
-        )
-        line_restrict = Path(
-            np.reshape(
-                shapes[f"RESTRICT{rwy}"].coordinates,
-                (len(shapes[f"RESTRICT{rwy}"].coordinates) // 2, 2),
-            )
-        )
+        # Check ALL runways in the pool
+        for rwy in self.runways:
+            line_sink = Path(np.reshape(shapes[f"SINK{rwy}"].coordinates, (-1, 2)))
+            line_restrict = Path(np.reshape(shapes[f"RESTRICT{rwy}"].coordinates, (-1, 2)))
 
-        if line_sink.intersects_path(line_ac):
-            self.segment_reward += 10
-            self.terminated = True
+            # Did we hit a landing zone?
+            if line_sink.intersects_path(line_ac):
+                self.terminated = True
+                if rwy == self.current_runway:
+                    self.segment_reward += 10.0
+                    self.death_cause = "success"
+                else:
+                    # Penalize hitting the WRONG runway
+                    self.segment_reward -= 1.0 
+                    self.death_cause = "wrong_runway"
+                return True
 
-        if line_restrict.intersects_path(line_ac):
-            self.segment_reward += -1
-            self.terminated = True
+            # Did we hit a restricted zone? (Usually specific to the approach path)
+            if line_restrict.intersects_path(line_ac):
+                self.segment_reward -= 1.0
+                self.terminated = True
+                self.death_cause = "restrict"
+                return True
 
         self.lat = bs.traf.lat[0]
         self.lon = bs.traf.lon[0]
@@ -447,6 +456,7 @@ class PathPlanningGoalEnv(GoalEnv):
         if self.simt >= MAX_TIME:
             self.truncated = True
             self.segment_reward += -1
+            self.death_cause = "timeout"
             return self.truncated
 
         dis_origin = (
@@ -458,6 +468,7 @@ class PathPlanningGoalEnv(GoalEnv):
         if dis_origin > MAX_DISTANCE * 1.05:
             self.truncated = True
             self.segment_reward += -1
+            self.death_cause = "out_of_bounds"
         return self.truncated
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -515,8 +526,8 @@ class PathPlanningGoalEnv(GoalEnv):
         )
 
     def _get_spawn(self):
-        spawn_bearing  = np.random.uniform(0, 360)
-        spawn_distance = max(np.random.uniform(0, 0.9) * MAX_DISTANCE, MIN_DISTANCE)
+        spawn_bearing  = self.np_random.uniform(0, 360)
+        spawn_distance = max(self.np_random.uniform(0, 0.9) * MAX_DISTANCE, MIN_DISTANCE)
         spawn_lat, spawn_lon = fn.get_point_at_distance(
             SCHIPHOL[0], SCHIPHOL[1], spawn_distance, spawn_bearing
         )

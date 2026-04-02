@@ -249,13 +249,19 @@ class PathPlanningExperiment(BaseExperiment):
             render_mode=render_mode,
             **env_kwargs,
         )
+
+        if self.cfg.session.eval_runways is None:
+            self.cfg.session.eval_runways = env.runways  # default to all runways if not specified
+
         return Monitor(env)
 
     def make_model(self, env: gym.Env):
         """SAC + HER with the architecture from ModelConfig."""
         cfg   = self.cfg
         mcfg  = cfg.model
-        return mcfg.algorithm(
+
+        if mcfg.use_her:
+            return mcfg.algorithm(
             "MultiInputPolicy",
             env,
             learning_rate=mcfg.learning_rate,
@@ -264,6 +270,15 @@ class PathPlanningExperiment(BaseExperiment):
             replay_buffer_kwargs=dict(
                 n_sampled_goal=mcfg.her_n_sampled_goal,
                 goal_selection_strategy=mcfg.her_goal_selection_strategy,
+                copy_info_dict = True, # Ensure info dict is copied to HER for reward computation
             ),
             verbose=mcfg.verbose,
         )
+        else:
+            return mcfg.algorithm(
+                "MultiInputPolicy",
+                env,
+                learning_rate=mcfg.learning_rate,
+                policy_kwargs=mcfg.policy_kwargs,
+                verbose=mcfg.verbose,
+            )

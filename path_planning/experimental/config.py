@@ -54,22 +54,26 @@ class EnvKwargsConfig:
 @dataclass
 class ModelConfig:
     """Algorithm choice, network architecture, and HER hyper-parameters."""
-
+ 
     algorithm: Type = SAC
-
-    # Network architecture - shared format understood by SB3's policy_kwargs
+ 
+    # Network architecture – shared format understood by SB3's policy_kwargs
     net_arch: Dict[str, List[int]] = field(
         default_factory=lambda: dict(pi=[256, 256, 256], qf=[256, 256, 256])
     )
     learning_rate: float = 3e-4
-
-    # HER-specific
-    her_n_sampled_goal: int        = 4
-    her_goal_selection_strategy: str = "future"
-
+ 
+    # HER (Hindsight Experience Replay)
+    # Set use_her=False to train with a standard replay buffer instead.
+    # Note: the env observation space must match — GoalEnv dict obs requires
+    # HER + MultiInputPolicy; a flat Box obs requires a standard buffer + MlpPolicy.
+    use_her: bool = True
+    her_n_sampled_goal: int          = 4
+    her_goal_selection_strategy: str = "final"  # "future" | "final" | "episode"
+ 
     # Convenience: verbose level passed to model.learn()
     verbose: int = 1
-
+ 
     @property
     def policy_kwargs(self) -> Dict[str, Any]:
         return dict(net_arch=self.net_arch)
@@ -97,6 +101,10 @@ class SessionConfig:
 
     # How often EvalCallback runs (in env steps)
     eval_freq: int = 5_000
+
+    # When True, each EvalCallback trigger writes a row to training_evals.csv
+    # so you can plot and compare training curves across runs later.
+    track_training_evals: bool = False
 
 # ---------------------------------------------------------------------------
 # Root experiment config
@@ -322,6 +330,9 @@ class ExperimentConfig:
             cfg.session.train_runways = args.train_runways
         if getattr(args, "eval_runways", None) is not None:
             cfg.session.eval_runways = args.eval_runways
+        else:
+            # If eval_runways is not explicitly set, default to the same as train_runways
+            cfg.session.eval_runways = cfg.session.train_runways
         if getattr(args, "eval_episodes", None) is not None:
             cfg.session.eval_episodes = args.eval_episodes
         if getattr(args, "no_train", False):

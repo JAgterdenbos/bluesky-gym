@@ -113,6 +113,5 @@ def main() -> None:
     experiment = PathPlanningExperiment(cfg)
     experiment.run()
 
-
 if __name__ == "__main__":
     main()

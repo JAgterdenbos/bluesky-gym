@@ -7,6 +7,7 @@ Classes
 -------
   CheckpointCallback   - periodic model save
   SuccessRateLogger    - per-runway win/loss tracking printed at end of training
+  TrainingEvalLogger   - logs evaluation metrics directly to CSV without file reading
 
 Factories
 ---------
@@ -14,6 +15,10 @@ Factories
 """
 
 from __future__ import annotations
+
+import csv
+import os
+import numpy as np
 
 from stable_baselines3.common.callbacks import (
     BaseCallback,
@@ -100,6 +105,77 @@ class SuccessRateLogger(BaseCallback):
 
 
 # ---------------------------------------------------------------------------
+# Training eval logger
+# ---------------------------------------------------------------------------
+
+class TrainingEvalLogger(EvalCallback):
+    """Writes one CSV row per evaluation trigger during training.
+
+    Inherits directly from SB3's EvalCallback to perform evaluations and
+    pulls results directly from memory, avoiding the need to parse the
+    evaluations.npz file on disk.
+
+    CSV columns
+    -----------
+      timestep        - env steps at the time of evaluation
+      mean_reward     - mean episode return across eval episodes
+      std_reward      - std of episode returns
+      success_rate    - fraction of episodes where is_success == True
+                        (only meaningful if the env sets this info key)
+    """
+
+    def __init__(self, eval_env, csv_filename: str = "training_evals.csv", **kwargs) -> None:
+        super().__init__(eval_env, **kwargs)
+        self._csv_path = os.path.join(self.log_path, csv_filename) if self.log_path else f"./{csv_filename}"
+        self._last_logged_timestep = -1
+
+    def _on_step(self) -> bool:
+        # Let the parent EvalCallback run evaluations and save files
+        continue_training = super()._on_step()
+
+        # Check if an evaluation was actually performed this step
+        if len(self.evaluations_timesteps) <= 0:
+            return continue_training
+    
+        last_eval_step = self.evaluations_timesteps[-1]
+        
+        # Write to CSV if this is a fresh evaluation cycle
+        if last_eval_step <= self._last_logged_timestep:
+            return continue_training
+        
+        self._last_logged_timestep = last_eval_step
+        
+        # Grab the most recent in-memory results 
+        recent_results = self.evaluations_results[-1]
+        mean_r = np.mean(recent_results)
+        std_r = np.std(recent_results)
+
+        # success_rate will only populate if the env supports `is_success`
+        if len(self.evaluations_successes) > 0:
+            success_rate = np.mean(self.evaluations_successes[-1])
+        else:
+            success_rate = float("nan")
+
+        row = {
+            "timestep": last_eval_step,
+            "mean_reward": round(float(mean_r), 4),
+            "std_reward": round(float(std_r), 4),
+            "success_rate": round(float(success_rate), 4),
+        }
+        self._append_csv(row)
+
+        return continue_training
+
+    def _append_csv(self, row: dict) -> None:
+        write_header = not os.path.exists(self._csv_path)
+        with open(self._csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -117,13 +193,21 @@ def get_callbacks(cfg: ExperimentConfig, eval_env) -> tuple[CallbackList, Succes
     checkpoint     = CheckpointCallback(cfg.save_freq, cfg.save_path)
     success_logger = SuccessRateLogger()
 
-    eval_cb = EvalCallback(
-        eval_env,
-        best_model_save_path=cfg.save_path,
-        log_path=cfg.log_dir,
-        eval_freq=cfg.session.eval_freq,
-        deterministic=True,
-        verbose=0,   # suppresses per-eval spam; summary still logged to CSV
-    )
+    # Shared kwargs for both EvalCallback and TrainingEvalLogger
+    eval_kwargs = {
+        "eval_env": eval_env,
+        "best_model_save_path": cfg.save_path,
+        "log_path": cfg.log_dir,
+        "eval_freq": cfg.session.eval_freq,
+        "deterministic": True,
+        "verbose": 0,
+    }
+
+    # Opt-in check for the custom CSV logger
+    if cfg.session.track_training_evals:
+        eval_cb = TrainingEvalLogger(**eval_kwargs)
+    else:
+        # Fall back to the standard SB3 EvalCallback
+        eval_cb = EvalCallback(**eval_kwargs)
 
     return CallbackList([csv_logger, checkpoint, success_logger, eval_cb]), success_logger
