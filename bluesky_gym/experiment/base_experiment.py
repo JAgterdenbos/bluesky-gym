@@ -98,8 +98,7 @@ class BaseExperiment(abc.ABC):
         Delegates to callbacks.get_callbacks() by default.  Override to add
         experiment-specific callbacks.
         """
-        callbacks, _ = get_callbacks(self.cfg, eval_env)
-        return callbacks
+        return get_callbacks(self.cfg, eval_env)
 
     def evaluate(self, model) -> dict[str, list[bool]]:
         """Run eval episodes and print per-group success rates.
