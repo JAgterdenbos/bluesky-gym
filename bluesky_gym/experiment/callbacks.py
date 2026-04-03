@@ -90,6 +90,7 @@ class CheckpointCallback(BaseCallback):
 # Per-group success tracking
 # ---------------------------------------------------------------------------
 
+@callback_registry.register("success_rate")
 class SuccessRateLogger(BaseCallback):
     """Tracks per-group success rates across all training episodes.
 
@@ -151,7 +152,7 @@ class SuccessRateLogger(BaseCallback):
 class StandardEval(EvalCallback):
     """Simple wrapper for standard SB3 EvalCallback."""
     @classmethod
-    def from_config(cls, cfg: ExperimentConfig, eval_env=None, **kwargs) -> EvalCallback:
+    def from_config(cls, cfg: ExperimentConfig, eval_env, **kwargs) -> EvalCallback:
         return cls(
             eval_env=eval_env,
             log_path=cfg.log_dir,
@@ -170,7 +171,7 @@ class TrainingEvalLogger(EvalCallback):
         self._last_logged_timestep = -1
 
     @classmethod
-    def from_config(cls, cfg: ExperimentConfig, eval_env=None, **kwargs) -> TrainingEvalLogger:
+    def from_config(cls, cfg: ExperimentConfig, eval_env, **kwargs) -> TrainingEvalLogger:
         return cls(
             eval_env=eval_env,
             log_path=cfg.log_dir,
@@ -224,7 +225,7 @@ class Eval:
     """
     #NOTE: This is a factory method and I know it's not the cleanest solution but for now it works
     @classmethod
-    def from_config(cls, cfg: ExperimentConfig, eval_env=None, **kwargs) -> EvalCallback:
+    def from_config(cls, cfg: ExperimentConfig, eval_env, **kwargs) -> EvalCallback:
         if cfg.session.track_training_evals:
             return TrainingEvalLogger.from_config(cfg, eval_env=eval_env)
         return StandardEval.from_config(cfg, eval_env=eval_env)
@@ -239,28 +240,20 @@ class CSVLogger(b_logger.CSVLoggerCallback):
 # Factory
 # ---------------------------------------------------------------------------
 
-#TODO: We should probably now always return success_logger
-
 def get_callbacks(
     cfg: ExperimentConfig,
     eval_env,
-) -> tuple[CallbackList, SuccessRateLogger]:
+) -> CallbackList:
     """Assemble and return the full callback list for a training run.
 
     Returns
     -------
     callbacks      : CallbackList       — pass to model.learn()
-    success_logger : SuccessRateLogger  — inspect stats after training
     """
+    callbacks = set(cfg.session.callbacks or [])
 
-    callbacks = cfg.session.callbacks or [] 
+    cb_list = [
+        callback_registry.get(cb).from_config(cfg, eval_env=eval_env) for cb in callbacks
+    ]
 
-    success_logger = SuccessRateLogger.from_config(cfg)
-
-    cb_list = []
-
-    for callback in callbacks:
-        cb = callback_registry.get(callback)(cfg, eval_env)
-        cb_list.append(cb.from_config(cfg, eval_env=eval_env))
-
-    return CallbackList(cb_list), success_logger
+    return CallbackList(cb_list)
