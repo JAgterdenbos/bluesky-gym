@@ -93,11 +93,9 @@ SIM_DT   = 5     # s
 ACTION_TIME = 120 
 
 ACTION_FREQUENCY = int(ACTION_TIME / SIM_DT)
-DISTANCE_MARGIN  = 1  # km
 
-# Sparse-reward threshold: how close (in normalised units) counts as "reached".
-#TODO: update this, because we switched to the IAF
-GOAL_DISTANCE_THRESHOLD = DISTANCE_MARGIN / MAX_DISTANCE
+RUNWAY_GRACE_LENGTH = 1000 * (IAF_DISTANCE - FAF_DISTANCE)
+WRONG_RUNWAY_GRACE = RUNWAY_GRACE_LENGTH / SPEED  # seconds, tune based on overlap width / SPEED
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -200,6 +198,7 @@ class PathPlanningGoalEnv(GoalEnv):
         self.lon_list = []
         self.simt = 0
         self.death_cause = None
+        self.wrong_runway_timestamp = None
 
         # ── current goal (set properly in reset) ──────────────────────────────
         self.current_runway = self.runways[0]
@@ -255,6 +254,7 @@ class PathPlanningGoalEnv(GoalEnv):
         self.wpt_reach      = False
         self.simt           = 0
         self.death_cause    = None
+        self.wrong_runway_timestamp = None
 
         # ── sample goal ────────────────────────────────────────────────────────
         self.current_runway = self.np_random.choice(self.runways)
@@ -424,33 +424,48 @@ class PathPlanningGoalEnv(GoalEnv):
         shapes = bs.tools.areafilter.basic_shapes
         line_ac = Path(np.array([[self.lat, self.lon], [bs.traf.lat[0], bs.traf.lon[0]]]))
 
-        # Check ALL runways in the pool
+        # Always check target runway first — success takes absolute priority
+        target_sink = Path(np.reshape(shapes[f"SINK{self.current_runway}"].coordinates, (-1, 2)))
+        if target_sink.intersects_path(line_ac):
+            self.segment_reward += 10.0
+            self.death_cause = "success"
+            self.terminated = True
+            self.lat = bs.traf.lat[0]
+            self.lon = bs.traf.lon[0]
+            return True
+        
+        if self.wrong_runway_timestamp is not None and (self.simt - self.wrong_runway_timestamp) > WRONG_RUNWAY_GRACE:
+            self.segment_reward += -1.0
+            self.death_cause = "wrong_runway"
+            self.terminated = True
+            self.lat = bs.traf.lat[0]
+            self.lon = bs.traf.lon[0]
+            return True
+
+        # Check wrong runways with grace period
         for rwy in self.runways:
             line_sink = Path(np.reshape(shapes[f"SINK{rwy}"].coordinates, (-1, 2)))
             line_restrict = Path(np.reshape(shapes[f"RESTRICT{rwy}"].coordinates, (-1, 2)))
 
-            # Did we hit a landing zone?
-            if line_sink.intersects_path(line_ac):
-                self.terminated = True
-                if rwy == self.current_runway:
-                    self.segment_reward += 10.0
-                    self.death_cause = "success"
-                else:
-                    # Penalize hitting the WRONG runway
-                    self.segment_reward -= 1.0 
-                    self.death_cause = "wrong_runway"
-                return True
+            if rwy != self.current_runway and line_sink.intersects_path(line_ac):
+                if self.wrong_runway_timestamp is None:
+                    self.wrong_runway_timestamp = self.simt
+                
+                self.lat = bs.traf.lat[0]
+                self.lon = bs.traf.lon[0]
+                return False  # still within grace period
 
-            # Did we hit a restricted zone? (Usually specific to the approach path)
-            if line_restrict.intersects_path(line_ac):
+            if line_restrict.intersects_path(line_ac) and self.wrong_runway_timestamp is None:
                 self.segment_reward -= 1.0
                 self.terminated = True
                 self.death_cause = "restrict"
+                self.lat = bs.traf.lat[0]
+                self.lon = bs.traf.lon[0]
                 return True
 
         self.lat = bs.traf.lat[0]
         self.lon = bs.traf.lon[0]
-        return self.terminated
+        return False
 
     def _get_truncated(self):
         if self.simt >= MAX_TIME:

@@ -1,25 +1,23 @@
 """
-evaluate.py
------------
+bluesky_gym/experiment/evaluate.py
+------------------------------------
 Generic evaluation script for any trained SB3 + GoalEnv model.
 
 Extension point
 ---------------
-Custom per-env metrics are injected via a MetricExtractor — a small object
-that knows how to pull named float values out of a final episode info dict,
-and how to aggregate them across episodes.
-
-The evaluator itself never knows about env-specific keys like "simt" or
-"average_path_rew".  That knowledge lives in the extractor, which is
-defined alongside the experiment class in experiment.py and passed in
-at call time.
+Custom per-env metrics are injected via a MetricExtractor — a small
+object that knows how to pull named float values out of a final episode
+info dict, and how to aggregate them across episodes.  The evaluator
+itself never imports anything env-specific; all that knowledge lives in
+the MetricExtractor returned by your experiment's metric_extractor()
+classmethod.
 
 Built-in (env-agnostic) metrics
---------------------------------
-  is_success      - from info["is_success"]
-  total_reward    - from info["total_reward"]
-
-These are always collected.  Everything else is opt-in via the extractor.
+---------------------------------
+  is_success    - from info[cfg.env.success_key]
+  total_reward  - from info["total_reward"]
+  group         - from info[cfg.env.group_key]  (or "all" if None)
+ 
 
 Output
 ------
@@ -30,7 +28,7 @@ Output
 Usage
 -----
   python evaluate.py --run-id 20260331_134059
-  python evaluate.py --run-id 20260331_134059 --episodes 50 --runways 27 18R
+  python evaluate.py --run-id 20260331_134059 --episodes 50
   python evaluate.py --run-id 20260331_134059 --no-render
 """
 
@@ -38,56 +36,41 @@ from __future__ import annotations
 
 import argparse
 import csv
-import yaml
 import os
+import yaml
 from datetime import datetime
-from typing import Callable, Optional, TypedDict, cast
-
+from typing import Callable, Optional, Type, TypedDict, cast
+ 
 import bluesky_gym
-import gymnasium as gym
 import numpy as np
-from stable_baselines3.common.monitor import Monitor
-
-from config import ExperimentConfig
-from experiment import PathPlanningExperiment
+ 
+from .config import ExperimentConfig
 
 
 # ---------------------------------------------------------------------------
-# MetricExtractor — the extension point
+# MetricExtractor — the env-specific extension point
 # ---------------------------------------------------------------------------
 
 class MetricExtractor:
-    """Declares which extra metrics to pull from an episode's final info dict,
-    and how to aggregate them across episodes.
+    """Declares which extra metrics to pull from an episode's final info dict.
 
     Parameters
     ----------
     extractors : dict[str, Callable[[dict, bool], float]]
-        Maps a metric name to a function ``(info, is_success) -> float``.
-        Receive both the info dict and the success flag so extractors can
-        return float("nan") conditionally — e.g. flight_time is only
-        meaningful on successful episodes.
+        Maps metric name → function(info, is_success) → float.
+        Return float("nan") to mark a metric as invalid for that episode
+        (e.g. flight_time on a failed episode).  nanmean is used by default
+        so nans are ignored in aggregation.
 
     aggregators : dict[str, Callable[[list[float]], float]] | None
-        Maps a metric name to an aggregation function.
-        Any metric not listed here defaults to np.nanmean.
+        Per-metric aggregation overrides.  Defaults to np.nanmean.
 
     display : list[str] | None
-        Ordered subset of metric names to show in the console table.
+        Ordered subset of metric names shown in the console table.
         Defaults to all metrics in insertion order.
-
-    Example (PathPlanning)
-    ----------------------
-    >>> extractor = MetricExtractor(
-    ...     extractors={
-    ...         "flight_time_min": lambda info, ok: info.get("simt", float("nan")) / 60,
-    ...         "path_length_km":  lambda info, ok: _path_km(info),
-    ...         "noise_reward":    lambda info, ok: float(info.get("average_noise_rew", float("nan"))),
-    ...     },
-    ...     display=["flight_time_min", "path_length_km", "noise_reward"],
-    ... )
     """
 
+    #TODO: Make extractor and aggregators return any type, not just float.  This would allow things like success-weighted flight time, which is a useful metric but doesn't fit the current float-based design.
     def __init__(
         self,
         extractors:  dict[str, Callable[[dict, bool], float]],
@@ -99,11 +82,9 @@ class MetricExtractor:
         self.display     = display or list(extractors.keys())
 
     def extract(self, info: dict, is_success: bool) -> dict[str, float]:
-        """Return ``{name: float}`` for one episode."""
         return {name: fn(info, is_success) for name, fn in self.extractors.items()}
 
     def aggregate(self, rows: list[dict[str, float]]) -> dict[str, float]:
-        """Aggregate a list of per-episode extra-metric dicts into one summary."""
         result: dict[str, float] = {}
         for name in self.extractors:
             values = [r[name] for r in rows]
@@ -116,25 +97,17 @@ class MetricExtractor:
 
 
 # ---------------------------------------------------------------------------
-# Episode record (typed dict — accommodates arbitrary extra fields)
+# Episode record
 # ---------------------------------------------------------------------------
-#
-# Guaranteed keys in every record:
-#   episode       int
-#   group         str   (runway id, or whatever groups episodes in this env)
-#   is_success    bool
-#   total_reward  float
-#   + whatever keys the MetricExtractor adds
 
 class EpisodeRecord(TypedDict):
-    episode: int
-    group: str
-    is_success: bool
+    episode:      int
+    group:        str
+    is_success:   bool
     total_reward: float
-    # Note: Type checkers won't know about extra keys, but won't block access
-    # if you use .get() or ignore specific strict-typing flags.
 
-
+#TODO: make extras more flexible so it can support non-float metrics if we want to go that route in the future
+    # Extra env-specific metrics go here; keys depend on the experiment's MetricExtractor
 def _make_record(
     episode:      int,
     group:        str,
@@ -157,57 +130,62 @@ def _make_record(
 # ---------------------------------------------------------------------------
 
 def run_evaluation(
-    cfg:        ExperimentConfig,
-    extractor:  MetricExtractor | None,
-    n_episodes: int,
-    runways:    Optional[list[str]],
-    render:     bool,
+    cfg:            ExperimentConfig,
+    experiment_cls,
+    n_episodes:     int,
+    groups:         Optional[list[str]],
+    render:         bool,
 ) -> list[EpisodeRecord]:
-    """Run ``n_episodes`` episodes; return one EpisodeRecord per episode."""
-
+    """Run n_episodes episodes; return one EpisodeRecord per episode."""
+ 
+    extractor   = experiment_cls.metric_extractor()
+    success_key = cfg.env.success_key
+    group_key   = cfg.env.group_key
+ 
     eval_kwargs = cfg.eval_env_kwargs
-    if runways is not None:
-        eval_kwargs["runways"] = runways
-
+    if groups is not None:
+        from .config import _inject_groups
+        _inject_groups(eval_kwargs, cfg.env.env_kwargs, groups)
+ 
     render_mode = "human" if render else None
-    env   = Monitor(gym.make(cfg.session.env_name, render_mode=render_mode, **eval_kwargs))
-    model = cfg.model.algorithm.load(f"{cfg.save_path}/final_model", env=env)
-
+    experiment  = experiment_cls(cfg)
+    env         = experiment.make_env(eval_kwargs, render_mode=render_mode)
+    model       = cfg.model.get_algorithm().load(f"{cfg.save_path}/final_model", env=env)
+ 
     records: list[EpisodeRecord] = []
-
+ 
     for ep in range(1, n_episodes + 1):
         obs, _ = env.reset()
         done = truncated = False
         info: dict = {}
-
+ 
         while not (done or truncated):
             action, _ = model.predict(obs, deterministic=True)
             if hasattr(action, "shape") and action.shape == ():
                 action = action[()]
             obs, _, done, truncated, info = env.step(action)
-
-        is_success   = bool(info.get("is_success", False))
+ 
+        is_success   = bool(info.get(success_key, False))
         total_reward = float(info.get("total_reward", 0.0))
-        group        = str(info.get("current_runway", "unknown"))
+        group        = str(info.get(group_key, "unknown")) if group_key else "all"
         extras       = extractor.extract(info, is_success) if extractor else {}
-
+ 
         rec = _make_record(ep, group, is_success, total_reward, extras)
         records.append(rec)
-
-        # Per-episode console line
-        status    = "✅" if is_success else "❌"            
-
+ 
+        status    = "✅" if is_success else "❌"
         extra_str = "  ".join(
-            f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}"
+            f"{k}={v:.2f}"
             for k, v in extras.items()
-            if extractor and k in extractor.display and (not np.isnan(v) if isinstance(v, float) else True)
+            if extractor and k in extractor.display
+            and not (isinstance(v, float) and np.isnan(v))
         )
         print(
             f"  Ep {ep:>3}/{n_episodes}  {status}  "
-            f"rwy={group:<4}  reward={total_reward:+.1f}"
+            f"group={group:<6}  reward={total_reward:+.1f}"
             + (f"  {extra_str}" if extra_str else "")
         )
-
+ 
     env.close()
     return records
 
@@ -223,12 +201,10 @@ def _aggregate_group(
 ) -> dict:
     n = len(recs)
     if n == 0:
-        base = {
-            "group": label, "n_episodes": 0,
-            "success_rate": 0.0,
-            "mean_total_reward": float("nan"),
-            "std_total_reward":  float("nan"),
-        }
+        base = {"group": label, "n_episodes": 0,
+                "success_rate": 0.0,
+                "mean_total_reward": float("nan"),
+                "std_total_reward":  float("nan")}
         if extractor:
             base.update({k: float("nan") for k in extractor.extractors})
         return base
@@ -241,11 +217,9 @@ def _aggregate_group(
         "mean_total_reward": float(np.mean(rewards)),
         "std_total_reward":  float(np.std(rewards)),
     }
-
     if extractor:
         extra_rows = [{k: r[k] for k in extractor.extractors} for r in recs]
         base.update(extractor.aggregate(extra_rows))
-
     return base
 
 
@@ -253,7 +227,7 @@ def aggregate_metrics(
     records:   list[EpisodeRecord],
     extractor: MetricExtractor | None,
 ) -> tuple[dict, dict[str, dict]]:
-    """Return ``(overall_summary, per_group_summary_dict)``."""
+    """Return (overall_summary, per_group_summary_dict)."""
     by_group: dict[str, list[EpisodeRecord]] = {}
     for rec in records:
         by_group.setdefault(rec["group"], []).append(rec)
@@ -271,15 +245,10 @@ def aggregate_metrics(
 # ---------------------------------------------------------------------------
 
 def _fmt_pct(v) -> str:
-    if isinstance(v, float) and np.isnan(v):
-        return "n/a"
-    return f"{v:.1%}"
-
+    return "n/a" if (isinstance(v, float) and np.isnan(v)) else f"{v:.1%}"
 
 def _fmt_f(v, decimals: int = 2) -> str:
-    if isinstance(v, float) and np.isnan(v):
-        return "n/a"
-    return f"{v:.{decimals}f}"
+    return "n/a" if (isinstance(v, float) and np.isnan(v)) else f"{v:.{decimals}f}"
 
 
 def print_summary(
@@ -287,7 +256,6 @@ def print_summary(
     per_group: dict[str, dict],
     extractor: MetricExtractor | None,
 ) -> None:
-    """Print a formatted summary table to stdout."""
     fixed_cols = ["group", "n_episodes", "success_rate",
                   "mean_total_reward", "std_total_reward"]
     extra_cols = extractor.display if extractor else []
@@ -301,14 +269,10 @@ def print_summary(
         cells = []
         for c in all_cols:
             v = m.get(c, float("nan"))
-            if c == "group":
-                cells.append(f"{str(v):>{col_w}}")
-            elif c == "n_episodes":
-                cells.append(f"{int(v):>{col_w}}")
-            elif c == "success_rate":
-                cells.append(f"{_fmt_pct(v):>{col_w}}")
-            else:
-                cells.append(f"{_fmt_f(v):>{col_w}}")
+            if   c == "group":       cells.append(f"{str(v):>{col_w}}")
+            elif c == "n_episodes":  cells.append(f"{int(v):>{col_w}}")
+            elif c == "success_rate":cells.append(f"{_fmt_pct(v):>{col_w}}")
+            else:                    cells.append(f"{_fmt_f(v):>{col_w}}")
         return "  ".join(cells)
 
     print(f"\n{sep}")
@@ -335,7 +299,7 @@ def save_csv(records: list[EpisodeRecord], path: str) -> None:
     print(f"📄 Episode CSV  → {path}")
 
 
-def save_yaml(overall: dict, per_group: dict[str, dict], path: str) -> None:
+def save_yaml_summary(overall: dict, per_group: dict[str, dict], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     def _clean(d: dict) -> dict:
@@ -352,60 +316,55 @@ def save_yaml(overall: dict, per_group: dict[str, dict], path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI entry point (called by run_experiment)
 # ---------------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
+def run_evaluate_cli(experiment_cls) -> None:
+    """Standalone evaluation CLI for a given experiment class."""
     p = argparse.ArgumentParser(
         description="Evaluate a trained model with detailed metrics.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--run-id",    type=str, required=True,
-                   help="Run ID to evaluate (e.g. 20260331_134059).")
-    p.add_argument("--episodes",  type=int, default=None,
-                   help="Episodes to run. Defaults to cfg.session.eval_episodes.")
-    p.add_argument("--runways",   nargs="+", default=None, metavar="RWY",
-                   help="Runway IDs to evaluate on.")
-    p.add_argument("--no-render", action="store_true",
-                   help="Disable renderer for faster headless evaluation.")
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
+    p.add_argument("--run-id",    type=str, required=True)
+    p.add_argument("--episodes",  type=int, default=None)
+    p.add_argument("--groups",    nargs="+", default=None, metavar="GROUP",
+                   help="Group IDs (runways, levels, …) to evaluate on.")
+    p.add_argument("--no-render", action="store_true")
+    args = p.parse_args()
+ 
     bluesky_gym.register_envs()
-    cfg = ExperimentConfig.load(args.run_id)
-
-    n_episodes = args.episodes if args.episodes is not None else cfg.session.eval_episodes
-    runways    = args.runways
+ 
+    cfg = ExperimentConfig.load(
+        args.run_id,
+        model_config_cls=experiment_cls.model_config_cls,
+        env_config_cls=experiment_cls.env_config_cls,
+    )
+ 
+    n_episodes = args.episodes or cfg.session.eval_episodes
+    groups     = args.groups
+ 
+    algo_name = cfg.model.algorithm.__name__ if cfg.model.algorithm else "Unspecified"
 
     print(f"\n🔍 Evaluating run  {cfg.run_id}")
-    print(f"   env     = {cfg.session.env_name}")
-    print(f"   algo    = {cfg.model.algorithm.__name__}")
+    print(f"   env     = {cfg.env.env_name}")
+    print(f"   algo    = {algo_name}")
     print(f"   model   = {cfg.save_path}/final_model.zip")
     print(f"   n_eps   = {n_episodes}")
-    print(f"   runways = {runways or cfg.session.eval_runways}\n")
-
-    # The extractor is a classmethod on the experiment — env-specific
-    # knowledge stays in experiment.py, not here.
-    extractor = PathPlanningExperiment.metric_extractor()
-
+    print(f"   groups  = {groups or cfg.session.eval_groups}\n")
+ 
     records = run_evaluation(
-        cfg        = cfg,
-        extractor  = extractor,
-        n_episodes = n_episodes,
-        runways    = runways,
-        render     = not args.no_render,
+        cfg=cfg,
+        experiment_cls=experiment_cls,
+        n_episodes=n_episodes,
+        groups=groups,
+        render=not args.no_render,
     )
-
+ 
+    extractor          = experiment_cls.metric_extractor()
     overall, per_group = aggregate_metrics(records, extractor)
     print_summary(overall, per_group, extractor)
-
+ 
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"eval_{cfg.run_id}_{ts}"
-    save_csv(records,             os.path.join(cfg.save_path, f"{stem}.csv"))
-    save_yaml(overall, per_group, os.path.join(cfg.save_path, f"{stem}.yaml"))
-
-if __name__ == "__main__":
-    main()
+    save_csv(records,                     os.path.join(cfg.save_path, f"{stem}.csv"))
+    save_yaml_summary(overall, per_group, os.path.join(cfg.save_path, f"{stem}.yaml"))

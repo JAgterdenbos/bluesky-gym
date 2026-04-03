@@ -1,11 +1,11 @@
-# configs/base.yaml
+# configs/long_run.yaml
 # -----------------
 # Fully annotated reference configuration for PathPlanningGoalEnv experiments.
 #
 # Usage
 # -----
-#   python main.py --config configs/base.yaml
-#   python main.py --config configs/base.yaml --timesteps 100000   # CLI override
+#   python main.py --config configs/long_run.yaml
+#   python main.py --config configs/long_run.yaml --timesteps 400000   # CLI override
 #
 # All fields shown here are optional — omitting a field uses the dataclass
 # default.  You only need to include what you want to change.
@@ -33,7 +33,7 @@ model:
 session:
   env_name: PathPlanningGoalEnv-v0
 
-  total_timesteps: 250000
+  total_timesteps: 500000
 
   # Runways used during training.  null = all available runways.
   train_runways: null
@@ -54,7 +54,7 @@ session:
     - "22"
 
   eval_episodes: 10                 # Episodes per evaluation run
-  eval_freq: 10000                   # EvalCallback frequency (env steps)
+  eval_freq: 50000                   # EvalCallback frequency (env steps)
 
   do_train: true
   do_evaluate: true

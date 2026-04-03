@@ -250,9 +250,6 @@ class PathPlanningExperiment(BaseExperiment):
             **env_kwargs,
         )
 
-        if self.cfg.session.eval_runways is None:
-            self.cfg.session.eval_runways = env.runways  # default to all runways if not specified
-
         return Monitor(env)
 
     def make_model(self, env: gym.Env):
