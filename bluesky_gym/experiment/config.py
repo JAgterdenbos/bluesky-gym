@@ -39,11 +39,6 @@ Design notes
  
 - YAML round-trips through _to_dict() / _make().  The `algorithm`
   field (a class object) is serialised as its __name__ string.
- 
-- Users can register custom algorithms via register_algorithm():
-      from bluesky_gym.experiment.config import register_algorithm
-      from my_pkg import MyAlgo
-      register_algorithm("MyAlgo", MyAlgo)
 """
 
 from __future__ import annotations

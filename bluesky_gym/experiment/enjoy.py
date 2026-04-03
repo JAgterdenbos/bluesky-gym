@@ -51,7 +51,6 @@ def run_enjoy_cli(experiment_cls) -> None:
         deterministic=args.deterministic,
     )
 
-
 def enjoy(
     experiment_cls,
     run_id:        str,

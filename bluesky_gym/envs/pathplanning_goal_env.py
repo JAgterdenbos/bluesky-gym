@@ -7,26 +7,18 @@ Changes vs. pathplanning_goal_env.py
    SB3's HerReplayBuffer requires this interface.
 
 2. observation_space is restructured into the three keys that HER expects:
-     - "observation"   : the agent's own state  (x, y)
+     - "observation"   : the agent's own state  (x, y, t)
      - "achieved_goal" : what the agent has reached so far — here we use the
-                         agent's current (x, y) position encoded identically
-                         to the goal vector so compute_reward() can compare them.
-     - "desired_goal"  : the target runway FAF encoded as (goal_x, goal_y)
+                         agent's current (x, y, t) position encoded identically
+                         to the goal vector.
+     - "desired_goal"  : the target runway FAF encoded as (goal_x, goal_y, rta)
 
 3. compute_reward(achieved_goal, desired_goal, info) is implemented.
-   HER calls this to relabel transitions with substitute goals.
-   We give a sparse +0 / -1 reward: success when the agent is within
-   GOAL_DISTANCE_THRESHOLD of the desired FAF position.
-   (You can swap in your original dense reward by returning self.segment_reward,
-   but the per-step dense reward is already emitted by step() — HER only needs
-   compute_reward for *relabelling*, so sparse works best here.)
 
 4. _get_obs() returns the new dict layout.
 
 5. Everything else (bluesky sim, action modes, rendering) is unchanged.
 """
-
-#TODO: Make sure this env is compatible with agents that use HER or not and check if HER here actually uses all of the rewards (which it should) or only the sparse reward from compute_reward().
 
 #TODO: Add RTA (Required Time of Arrival) to the goal vector, so that the agent can plan to arrive on time. Add a flag to specify whether to use RTA or keep it constant at 0.0. This will allow us to train agents that can not only reach the goal location, but also learn to time their arrival, which is crucial for real-world applications. 
 
@@ -90,12 +82,12 @@ MIN_DIS_NEXT_WPT = 15  # km
 SPEED    = 125   # m/s
 ALTITUDE = 3000  # m
 SIM_DT   = 5     # s
-ACTION_TIME = 120 
+ACTION_TIME = 120 # s
 
 ACTION_FREQUENCY = int(ACTION_TIME / SIM_DT)
 
-RUNWAY_GRACE_LENGTH = 1000 * (IAF_DISTANCE - FAF_DISTANCE)
-WRONG_RUNWAY_GRACE = RUNWAY_GRACE_LENGTH / SPEED  # seconds, tune based on overlap width / SPEED
+GOAL_GRACE_LENGTH = 1000 * (IAF_DISTANCE - FAF_DISTANCE) #/ 2 # m
+WRONG_GOAL_GRACE = GOAL_GRACE_LENGTH / SPEED  # seconds, tune based on overlap width / SPEED
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -141,7 +133,7 @@ class PathPlanningGoalEnv(GoalEnv):
         # ── observation space (GoalEnv layout) ────────────────────────────────
         obs_shape  = (3,)  # (x, y, t)
         goal_shape = (3,)  # (goal_x, goal_y, rta)
-        act_shape  = (2,)
+        act_shape  = (2,)  # (sin_hdg, cos_hdg) or (dx, dy)
 
         # Both goals use the same normalised encoding, so give them the same bounds
         goal_space = spaces.Box(-1.5, 1.5, shape=goal_shape, dtype=np.float64)
@@ -434,7 +426,7 @@ class PathPlanningGoalEnv(GoalEnv):
             self.lon = bs.traf.lon[0]
             return True
         
-        if self.wrong_runway_timestamp is not None and (self.simt - self.wrong_runway_timestamp) > WRONG_RUNWAY_GRACE:
+        if self.wrong_runway_timestamp is not None and (self.simt - self.wrong_runway_timestamp) > WRONG_GOAL_GRACE:
             self.segment_reward += -1.0
             self.death_cause = "wrong_runway"
             self.terminated = True

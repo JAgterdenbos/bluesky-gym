@@ -17,17 +17,20 @@ Import surface
       SessionConfig,
       ExperimentConfig,
 
-      # Algorithm registry
-      ALGO_MAP,
-      register_algorithm,
-
       # Evaluation extension point
       MetricExtractor,
+
+      # Plotting extension point
+      plot_training_curves,
+      plot_eval_summary,
+      plot_eval_episodes,
 
       # Standalone CLIs (rarely needed directly)
       run_evaluate_cli,
       run_enjoy_cli,
       enjoy,
+      compare_runs_main,
+      plot_main
   )
 """
 
@@ -43,6 +46,12 @@ from .config          import (
 from .evaluate        import MetricExtractor, run_evaluate_cli
 from .enjoy           import run_enjoy_cli, enjoy
 from .compare_runs    import main as compare_runs_main
+from .plot            import (
+    main as plot_main, 
+    plot_training_curves,
+    plot_eval_summary, 
+    plot_eval_episodes
+)
 
 __all__ = [
     "run_experiment",
@@ -57,4 +66,8 @@ __all__ = [
     "run_enjoy_cli",
     "enjoy",
     "compare_runs_main",
+    "plot_main",
+    "plot_training_curves",
+    "plot_eval_summary",
+    "plot_eval_episodes",
 ]
