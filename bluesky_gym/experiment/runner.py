@@ -29,28 +29,6 @@ def _print_global_help(experiment_cls: "Type[BaseExperiment]") -> None:
     """
     print(textwrap.dedent(help_text))
 
-
-def run_generate_config_cli(experiment_cls: Type[BaseExperiment]) -> None:
-    """CLI wrapper to generate and save a default configuration file."""
-    from .config import ExperimentConfig
-    
-    model_cls = experiment_cls.model_config_cls
-    env_cls   = experiment_cls.env_config_cls
-    
-    parser = ExperimentConfig._build_parser(
-        model_config_cls=model_cls,
-        env_config_cls=env_cls,
-        description=f"Generate a default config.yaml for {experiment_cls.__name__}.",
-    )
-
-    # Parse arguments (command has already been stripped by _reparse_and_run)
-    args, _ = parser.parse_known_args()
-    
-    cfg = ExperimentConfig.from_args(args, model_cls, env_cls)
-    cfg.save_path = "." 
-    cfg.save()
-    print("✅ Default config saved to ./config.yaml")
-
 def run_generate_config_cli(experiment_cls: Type[BaseExperiment]) -> None:
     """CLI wrapper to generate and save a default configuration file."""
     from .config import ExperimentConfig
