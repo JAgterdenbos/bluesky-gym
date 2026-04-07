@@ -51,7 +51,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Type, get_args, get_origin
 
 import yaml
-from stable_baselines3 import SAC, TD3, DDPG, PPO, A2C, HerReplayBuffer  # noqa: F401
+
+#TODO: add support for loading in a pre-trained model from disk for the session, we should also add a check that the model is compatible with the environment!
 
 # ---------------------------------------------------------------------------
 # Base config dataclasses
@@ -173,6 +174,21 @@ class ModelConfig:
     algorithm:     Optional[Type] = None
     learning_rate: float          = 3e-4
     verbose:       int            = 1
+
+    def __post_init__(self) -> None:
+        """Framework-controlled lifecycle hook."""
+        if isinstance(self.algorithm, str):
+            self.algorithm = self.resolve_algorithm(self.algorithm)
+
+    def resolve_algorithm(self, name: str) -> Type:
+        """
+        Hook for subclasses to convert a string name to a class Type.
+        By default, it raises an error to force the user to define the source.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} received algorithm name '{name}' but "
+            "does not implement resolve_algorithm()."
+        )
  
     def validate(self) -> None:
         """Raise a clear error if algorithm has not been set."""
@@ -188,13 +204,16 @@ class ModelConfig:
 
     def get_algorithm(self) -> Type:
         """Return the algorithm class to use. Subclasses MUST override this."""
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement get_algorithm().\n\n"
-            "Example:\n"
-            "    def get_algorithm(self) -> Type:\n"
-            "        from stable_baselines3 import SAC\n"
-            "        return SAC"
-        )
+        if self.algorithm is None:
+            raise ValueError(
+                f"{type(self).__name__}.algorithm is None.\n"
+                "Set it in your ModelConfig subclass:\n\n"
+                "    from stable_baselines3 import SAC\n\n"
+                "    @dataclass\n"
+                "    class MyModelConfig(ModelConfig):\n"
+                "        algorithm: Type = SAC\n"
+            )
+        return self.algorithm
 
 
 @dataclass
@@ -203,7 +222,10 @@ class SessionConfig:
     total_timesteps: int = 250_000
 
     # List of callback keys to load from the registry
-    callbacks: List[str] = field(default_factory=lambda: ["csv_logger", "checkpoint", "training_eval"])
+    callbacks: List[str] = field(default_factory=lambda: ["csv_logger", "checkpoint", "eval", "success_rate"])
+
+    # Load a pretrained model (a .zip file)
+    pretrained_model_path: Optional[str] = None
 
     # None  → use all available groups (runways, levels, …)
     train_groups: Optional[List[str]] = field(default_factory=lambda: None)
@@ -215,7 +237,6 @@ class SessionConfig:
 
     eval_freq:            int  = 5_000
     track_training_evals: bool = False
-
 
 # ---------------------------------------------------------------------------
 # Root config

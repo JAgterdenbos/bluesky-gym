@@ -2,34 +2,6 @@
 bluesky_gym/experiment/evaluate.py
 ------------------------------------
 Generic evaluation script for any trained SB3 + GoalEnv model.
-
-Extension point
----------------
-Custom per-env metrics are injected via a MetricExtractor — a small
-object that knows how to pull named float values out of a final episode
-info dict, and how to aggregate them across episodes.  The evaluator
-itself never imports anything env-specific; all that knowledge lives in
-the MetricExtractor returned by your experiment's metric_extractor()
-classmethod.
-
-Built-in (env-agnostic) metrics
----------------------------------
-  is_success    - from info[cfg.env.success_key]
-  total_reward  - from info["total_reward"]
-  group         - from info[cfg.env.group_key]  (or "all" if None)
- 
-
-Output
-------
-  Console  - formatted summary table (overall + per group)
-  CSV      - one row per episode     → <save_path>/eval_<run_id>_<ts>.csv
-  YAML     - aggregated metrics      → <save_path>/eval_<run_id>_<ts>.yaml
-
-Usage
------
-  python evaluate.py --run-id 20260331_134059
-  python evaluate.py --run-id 20260331_134059 --episodes 50
-  python evaluate.py --run-id 20260331_134059 --no-render
 """
 
 from __future__ import annotations
@@ -39,7 +11,7 @@ import csv
 import os
 import yaml
 from datetime import datetime
-from typing import Callable, Optional, Type, TypedDict, cast
+from typing import Any, Callable, Optional, TypedDict, cast
  
 import bluesky_gym
 import numpy as np
@@ -48,7 +20,7 @@ from .config import ExperimentConfig
 
 
 # ---------------------------------------------------------------------------
-# MetricExtractor — the env-specific extension point
+# MetricExtractor — Updated for Any-type support
 # ---------------------------------------------------------------------------
 
 class MetricExtractor:
@@ -56,48 +28,55 @@ class MetricExtractor:
 
     Parameters
     ----------
-    extractors : dict[str, Callable[[dict, bool], float]]
-        Maps metric name → function(info, is_success) → float.
-        Return float("nan") to mark a metric as invalid for that episode
-        (e.g. flight_time on a failed episode).  nanmean is used by default
-        so nans are ignored in aggregation.
+    extractors : dict[str, Callable[[dict, bool], Any]]
+        Maps metric name → function(info, is_success) → Any.
+        Now supports non-float return types.
 
-    aggregators : dict[str, Callable[[list[float]], float]] | None
-        Per-metric aggregation overrides.  Defaults to np.nanmean.
+    aggregators : dict[str, Callable[[list[Any]], Any]] | None
+        Per-metric aggregation overrides. Defaults to np.nanmean for numbers,
+        or a simple 'list' capture for non-numeric data if not specified.
 
     display : list[str] | None
         Ordered subset of metric names shown in the console table.
-        Defaults to all metrics in insertion order.
     """
 
-    #TODO: Make extractor and aggregators return any type, not just float.  This would allow things like success-weighted flight time, which is a useful metric but doesn't fit the current float-based design.
     def __init__(
         self,
-        extractors:  dict[str, Callable[[dict, bool], float]],
-        aggregators: dict[str, Callable[[list[float]], float]] | None = None,
+        extractors:  dict[str, Callable[[dict, bool], Any]],
+        aggregators: dict[str, Callable[[list[Any]], Any]] | None = None,
         display:     list[str] | None = None,
     ) -> None:
         self.extractors  = extractors
         self.aggregators = aggregators or {}
         self.display     = display or list(extractors.keys())
 
-    def extract(self, info: dict, is_success: bool) -> dict[str, float]:
+    def extract(self, info: dict, is_success: bool) -> dict[str, Any]:
+        """Extract metrics from the episode info dict."""
         return {name: fn(info, is_success) for name, fn in self.extractors.items()}
 
-    def aggregate(self, rows: list[dict[str, float]]) -> dict[str, float]:
-        result: dict[str, float] = {}
+    def aggregate(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Aggregate extracted metrics across multiple episodes."""
+        result: dict[str, Any] = {}
         for name in self.extractors:
             values = [r[name] for r in rows]
-            agg_fn = self.aggregators.get(name, np.nanmean)
+            
+            # Use custom aggregator if provided; otherwise default based on type
+            if name in self.aggregators:
+                agg_fn = self.aggregators[name]
+            else:
+                # Default to mean for numbers, or just returning the list for others
+                is_numeric = all(isinstance(v, (int, float, np.number)) for v in values if v is not None)
+                agg_fn = cast(Callable, np.nanmean if is_numeric else list)
+
             try:
-                result[name] = float(agg_fn(values))
+                result[name] = agg_fn(values)
             except Exception:
                 result[name] = float("nan")
         return result
 
 
 # ---------------------------------------------------------------------------
-# Episode record
+# Episode record — Updated for flexibility
 # ---------------------------------------------------------------------------
 
 class EpisodeRecord(TypedDict):
@@ -105,15 +84,14 @@ class EpisodeRecord(TypedDict):
     group:        str
     is_success:   bool
     total_reward: float
+    # Extras are dynamically added and can be Any type
 
-#TODO: make extras more flexible so it can support non-float metrics if we want to go that route in the future
-    # Extra env-specific metrics go here; keys depend on the experiment's MetricExtractor
 def _make_record(
     episode:      int,
     group:        str,
     is_success:   bool,
     total_reward: float,
-    extras:       dict[str, float],
+    extras:       dict[str, Any],
 ) -> EpisodeRecord:
     rec = {
         "episode":      episode,
@@ -175,7 +153,7 @@ def run_evaluation(
  
         status    = "✅" if is_success else "❌"
         extra_str = "  ".join(
-            f"{k}={v:.2f}"
+            f"{k}={_fmt_val(v)}"
             for k, v in extras.items()
             if extractor and k in extractor.display
             and not (isinstance(v, float) and np.isnan(v))
@@ -191,8 +169,20 @@ def run_evaluation(
 
 
 # ---------------------------------------------------------------------------
-# Aggregation
+# Aggregation & Formatting — Optimized for Any types
 # ---------------------------------------------------------------------------
+
+def _fmt_val(v) -> str:
+    """Smart formatting for arbitrary metric types."""
+    if isinstance(v, (float, np.floating)):
+        return "n/a" if np.isnan(v) else f"{v:.2f}"
+    if isinstance(v, (list, tuple)):
+        return f"len={len(v)}"
+    return str(v)
+
+def _fmt_pct(v) -> str:
+    return "n/a" if (isinstance(v, float) and np.isnan(v)) else f"{v:.1%}"
+
 
 def _aggregate_group(
     label:     str,
@@ -218,6 +208,7 @@ def _aggregate_group(
         "std_total_reward":  float(np.std(rewards)),
     }
     if extractor:
+        # Pass the full list of extra metrics to the flexible aggregator
         extra_rows = [{k: r[k] for k in extractor.extractors} for r in recs]
         base.update(extractor.aggregate(extra_rows))
     return base
@@ -240,22 +231,12 @@ def aggregate_metrics(
     return overall, per_group
 
 
-# ---------------------------------------------------------------------------
-# Output helpers
-# ---------------------------------------------------------------------------
-
-def _fmt_pct(v) -> str:
-    return "n/a" if (isinstance(v, float) and np.isnan(v)) else f"{v:.1%}"
-
-def _fmt_f(v, decimals: int = 2) -> str:
-    return "n/a" if (isinstance(v, float) and np.isnan(v)) else f"{v:.{decimals}f}"
-
-
 def print_summary(
     overall:   dict,
     per_group: dict[str, dict],
     extractor: MetricExtractor | None,
 ) -> None:
+    """Print the final evaluation table, handling Any types gracefully."""
     fixed_cols = ["group", "n_episodes", "success_rate",
                   "mean_total_reward", "std_total_reward"]
     extra_cols = extractor.display if extractor else []
@@ -272,7 +253,7 @@ def print_summary(
             if   c == "group":       cells.append(f"{str(v):>{col_w}}")
             elif c == "n_episodes":  cells.append(f"{int(v):>{col_w}}")
             elif c == "success_rate":cells.append(f"{_fmt_pct(v):>{col_w}}")
-            else:                    cells.append(f"{_fmt_f(v):>{col_w}}")
+            else:                    cells.append(f"{_fmt_val(v):>{col_w}}")
         return "  ".join(cells)
 
     print(f"\n{sep}")
@@ -288,6 +269,10 @@ def print_summary(
     print()
 
 
+# ---------------------------------------------------------------------------
+# File I/O
+# ---------------------------------------------------------------------------
+
 def save_csv(records: list[EpisodeRecord], path: str) -> None:
     if not records:
         return
@@ -302,9 +287,15 @@ def save_csv(records: list[EpisodeRecord], path: str) -> None:
 def save_yaml_summary(overall: dict, per_group: dict[str, dict], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    def _clean(d: dict) -> dict:
-        return {k: (None if isinstance(v, float) and np.isnan(v) else v)
-                for k, v in d.items()}
+    def _clean(val: Any) -> Any:
+        """Deep clean types for YAML serialization (e.g., converting NaNs)."""
+        if isinstance(val, dict):
+            return {k: _clean(v) for k, v in val.items()}
+        if isinstance(val, list):
+            return [_clean(v) for v in val]
+        if isinstance(val, (float, np.floating)) and np.isnan(val):
+            return None
+        return val
 
     payload = {
         "overall":   _clean(overall),
@@ -314,10 +305,6 @@ def save_yaml_summary(overall: dict, per_group: dict[str, dict], path: str) -> N
         yaml.dump(payload, f, default_flow_style=False, sort_keys=False)
     print(f"📊 Metrics YAML → {path}")
 
-
-# ---------------------------------------------------------------------------
-# CLI entry point (called by run_experiment)
-# ---------------------------------------------------------------------------
 
 def run_evaluate_cli(experiment_cls) -> None:
     """Standalone evaluation CLI for a given experiment class."""

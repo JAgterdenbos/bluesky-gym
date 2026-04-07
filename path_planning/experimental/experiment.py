@@ -229,13 +229,14 @@ class PathPlanningExperiment(BaseExperiment):
                 "noise_reward":    lambda info, _ok: float(
                     info.get("average_noise_rew", float("nan"))
                 ),
+                "death_cause":    lambda info, _ok: info.get("death_cause", "unknown"),
             },
             # flight_time uses nanmean implicitly (nan on failures is ignored)
             # Add explicit overrides here if you need e.g. np.nanstd for one metric
             aggregators={
 
             },
-            display=["flight_time", "path_length_km", "noise_reward"],
+            display=["flight_time", "path_length_km", "noise_reward", "death_cause"],
         )
 
     def make_env(

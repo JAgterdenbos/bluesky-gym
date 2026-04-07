@@ -67,6 +67,21 @@ RUNWAYS_SCHIPHOL_FAF = {
 
 ALL_RUNWAYS = list(RUNWAYS_SCHIPHOL_FAF.keys())
 
+OVERLAPPING_RUNWAYS = {
+    "18C": ["18L", "18R"],
+    "36C": ["36L", "36R"],
+    "18L": ["18C", "18R"],
+    "36R": ["36L", "36C"],
+    "18R": ["18C", "18L"],
+    "36L": ["36R", "36C"],
+    "06":  ["04", "09"],
+    "24":  ["22", "27"],
+    "09":  ["06"],
+    "27":  ["24"],
+    "04":  ["06"],
+    "22":  ["24"],
+}
+
 FAF_DISTANCE = 25   # km
 IAF_DISTANCE = 30   # km
 IAF_ANGLE    = 60   # degrees
@@ -86,8 +101,7 @@ ACTION_TIME = 120 # s
 
 ACTION_FREQUENCY = int(ACTION_TIME / SIM_DT)
 
-GOAL_GRACE_LENGTH = 1000 * (IAF_DISTANCE - FAF_DISTANCE) #/ 2 # m
-WRONG_GOAL_GRACE = GOAL_GRACE_LENGTH / SPEED  # seconds, tune based on overlap width / SPEED
+DISTANCE_MARGIN = 4.5 # km
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -190,11 +204,13 @@ class PathPlanningGoalEnv(GoalEnv):
         self.lon_list = []
         self.simt = 0
         self.death_cause = None
-        self.wrong_runway_timestamp = None
 
         # ── current goal (set properly in reset) ──────────────────────────────
         self.current_runway = self.runways[0]
         self.goal_vector    = self._compute_goal_vector(self.current_runway)
+
+        # ── compute non-overlapping runways ──────────────────────────────────
+        self._non_overlapping_runways = self._compute_non_overlapping_runways()
 
         self._set_terminal_conditions(self.runways)
 
@@ -246,11 +262,14 @@ class PathPlanningGoalEnv(GoalEnv):
         self.wpt_reach      = False
         self.simt           = 0
         self.death_cause    = None
-        self.wrong_runway_timestamp = None
 
         # ── sample goal ────────────────────────────────────────────────────────
         self.current_runway = self.np_random.choice(self.runways)
         self.goal_vector    = self._compute_goal_vector(self.current_runway)
+
+        # ─── compute non-overlapping runways ──────────────────────────────────
+        self._non_overlapping_runways = self._compute_non_overlapping_runways()
+
 
         # ── spawn aircraft ─────────────────────────────────────────────────────
         spawn_lat, spawn_lon, spawn_heading = self._get_spawn()
@@ -338,7 +357,7 @@ class PathPlanningGoalEnv(GoalEnv):
 
         x = np.sin(brg) * dis
         y = np.cos(brg) * dis
-        t = 0.0 
+        t = self.simt / MAX_TIME
 
         obs_vec = np.array([x, y, t], dtype=np.float64)
 
@@ -374,7 +393,6 @@ class PathPlanningGoalEnv(GoalEnv):
         return np.array([x, y, t], dtype=np.float64)
 
     def _get_info(self) -> dict:
-        obs = self._get_obs()
         is_success = self.death_cause == "success"
 
         return {
@@ -416,48 +434,39 @@ class PathPlanningGoalEnv(GoalEnv):
         shapes = bs.tools.areafilter.basic_shapes
         line_ac = Path(np.array([[self.lat, self.lon], [bs.traf.lat[0], bs.traf.lon[0]]]))
 
-        # Always check target runway first — success takes absolute priority
+        self.lat = bs.traf.lat[0]
+        self.lon = bs.traf.lon[0]
+
         target_sink = Path(np.reshape(shapes[f"SINK{self.current_runway}"].coordinates, (-1, 2)))
         if target_sink.intersects_path(line_ac):
             self.segment_reward += 10.0
             self.death_cause = "success"
             self.terminated = True
-            self.lat = bs.traf.lat[0]
-            self.lon = bs.traf.lon[0]
-            return True
+            return self.terminated
         
-        if self.wrong_runway_timestamp is not None and (self.simt - self.wrong_runway_timestamp) > WRONG_GOAL_GRACE:
+        target_restrict = Path(np.reshape(shapes[f"RESTRICT{self.current_runway}"].coordinates, (-1, 2)))
+        if target_restrict.intersects_path(line_ac):
             self.segment_reward += -1.0
-            self.death_cause = "wrong_runway"
+            self.death_cause = "restrict"
             self.terminated = True
-            self.lat = bs.traf.lat[0]
-            self.lon = bs.traf.lon[0]
-            return True
-
-        # Check wrong runways with grace period
-        for rwy in self.runways:
-            line_sink = Path(np.reshape(shapes[f"SINK{rwy}"].coordinates, (-1, 2)))
-            line_restrict = Path(np.reshape(shapes[f"RESTRICT{rwy}"].coordinates, (-1, 2)))
-
-            if rwy != self.current_runway and line_sink.intersects_path(line_ac):
-                if self.wrong_runway_timestamp is None:
-                    self.wrong_runway_timestamp = self.simt
-                
-                self.lat = bs.traf.lat[0]
-                self.lon = bs.traf.lon[0]
-                return False  # still within grace period
-
-            if line_restrict.intersects_path(line_ac) and self.wrong_runway_timestamp is None:
-                self.segment_reward -= 1.0
+            return self.terminated
+        
+        for rwy in self._non_overlapping_runways:
+            rwy_sink = Path(np.reshape(shapes[f"SINK{rwy}"].coordinates, (-1, 2)))
+            if rwy_sink.intersects_path(line_ac):
+                self.segment_reward += -1.0
+                self.death_cause = "wrong_runway"
                 self.terminated = True
+                return self.terminated
+            
+            rwy_restrict = Path(np.reshape(shapes[f"RESTRICT{rwy}"].coordinates, (-1, 2)))
+            if rwy_restrict.intersects_path(line_ac):
+                self.segment_reward += -1.0
                 self.death_cause = "restrict"
-                self.lat = bs.traf.lat[0]
-                self.lon = bs.traf.lon[0]
-                return True
+                self.terminated = True
+                return self.terminated
 
-        self.lat = bs.traf.lat[0]
-        self.lon = bs.traf.lon[0]
-        return False
+        return self.terminated
 
     def _get_truncated(self):
         if self.simt >= MAX_TIME:
@@ -534,7 +543,7 @@ class PathPlanningGoalEnv(GoalEnv):
 
     def _get_spawn(self):
         spawn_bearing  = self.np_random.uniform(0, 360)
-        spawn_distance = max(self.np_random.uniform(0, 0.9) * MAX_DISTANCE, MIN_DISTANCE)
+        spawn_distance = max(self.np_random.uniform(0, 0.95) * MAX_DISTANCE, MIN_DISTANCE + DISTANCE_MARGIN)
         spawn_lat, spawn_lon = fn.get_point_at_distance(
             SCHIPHOL[0], SCHIPHOL[1], spawn_distance, spawn_bearing
         )
@@ -605,6 +614,17 @@ class PathPlanningGoalEnv(GoalEnv):
                     [(float(x), float(y)) for x, y in zip(x_restrict, y_restrict)]
                 )
 
+    def _compute_non_overlapping_runways(self):
+        """
+        Compute a list of non-overlapping runways, excluding the current runway
+        """
+        runway_overlaps = OVERLAPPING_RUNWAYS.get(self.current_runway, [])
+        return [
+            rwy for rwy in self.runways
+            if rwy != self.current_runway
+            and rwy not in runway_overlaps
+        ]
+
     def _render_frame(self):
         # Initialize Pygame, Window, Surface, and Fonts exactly once
         if self.window is None and self.render_mode == "human":
@@ -646,12 +666,26 @@ class PathPlanningGoalEnv(GoalEnv):
         # Clear the reused surface
         self.surface.fill((255, 255, 255))
 
+        overlapping_rwy = OVERLAPPING_RUNWAYS.get(self.current_runway, [])
         # --- Draw Runways ---
         for idx, rwy in enumerate(self.runways):
             is_goal        = rwy == self.current_runway
-            arc_color      = (0,   0,   0)   if is_goal else (180, 180, 180)
-            restrict_color = (255, 0,   0)   if is_goal else (220, 180, 180)
-            width          = 3               if is_goal else 1
+            is_overlapping = rwy in overlapping_rwy
+
+            if is_goal:
+                arc_color      = (0, 0, 0)
+                restrict_color = (255, 0, 0)
+                width          = 3
+
+            elif is_overlapping:
+                arc_color      = (180, 100, 100)   # slightly reddish gray
+                restrict_color = (255, 120, 120)   # softer red
+                width          = 2
+
+            else:
+                arc_color      = (180, 180, 180)
+                restrict_color = (220, 180, 180)
+                width          = 1
 
             if idx < len(self.line_arc_pg):
                 pygame.draw.lines(self.surface, arc_color,      False, self.line_arc_pg[idx],      width)

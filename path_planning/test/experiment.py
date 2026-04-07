@@ -63,6 +63,12 @@ class PathPlanningModelConfig(ModelConfig):
     her_n_sampled_goal:          int  = 4
     her_goal_selection_strategy: str  = "final"   # "future" | "final" | "episode"
 
+    def resolve_algorithm(self, name: str) -> Type:
+        if name == "SAC":
+            return SAC
+        else:
+            raise ValueError(f"Unsupported algorithm: {name}")
+
     @property
     def policy_kwargs(self) -> Dict[str, Any]:
         return dict(net_arch=self.net_arch)
@@ -135,10 +141,11 @@ class PathPlanningExperiment(BaseExperiment):
             raise ValueError("env_name is not set in config!")
 
         env = gym.make(
-            env_name
+            env_name,
             render_mode=render_mode,
             **env_kwargs,
         )
+        env.reset()
         return Monitor(env)
 
     def make_model(self, env: gym.Env):

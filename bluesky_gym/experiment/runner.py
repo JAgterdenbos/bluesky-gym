@@ -21,28 +21,26 @@ Generated CLI (example with PathPlanningExperiment)
   python main.py --help
 
   # Train with defaults
-  python main.py
+  python main.py train
 
   # 500 k steps, custom learning rate, skip evaluation
-  python main.py --session-total-timesteps 500000 --model-learning-rate 1e-4 --session-no-do-evaluate
+  python main.py train --session-total-timesteps 500000 --model-learning-rate 1e-4 --session-no-do-evaluate
 
   # Evaluation only (load a previous run)
-  python main.py --run-id 20260331_134059 --session-no-do-train
+  python main.py evaluate --run-id 20260331_134059
 
   # Env overrides (from your EnvConfig + EnvKwargsConfig subclass fields)
-  python main.py --env-action-mode wpt
-  python main.py --env-use-rta
-  python main.py --env-runways 27 18R
+  python main.py train --env-action-mode wpt
 
   # Load from YAML, override one field on top
-  python main.py --config experiments/my_config.yaml --session-total-timesteps 1000000
+  python main.py train --config experiments/my_config.yaml --session-total-timesteps 1000000
 
-Mode flags (added on top of dataclass fields)
-----------------------------------------------
-  --run-id ID         Load a saved config (used for eval/enjoy).
-  --config PATH       Load a YAML config file before CLI overrides.
-  --mode {train,evaluate,enjoy}
-                      Default: train.  Runs the corresponding lifecycle.
+Commands
+--------
+  train           Train (and optionally evaluate) a new model (default).
+  evaluate        Run detailed evaluation on a saved model.
+  enjoy           Watch/record a saved model.
+  generate-config Generate a default config.yaml for this experiment.
 """
 
 from __future__ import annotations
@@ -54,19 +52,14 @@ if TYPE_CHECKING:
     from .base_experiment import BaseExperiment
 
 
+#TODO: Check if first building the 
 def run_experiment(experiment_cls: "Type[BaseExperiment]") -> None:
-    """Build a CLI from experiment_cls's config dataclasses and run it.
-
-    Parameters
-    ----------
-    experiment_cls : Type[BaseExperiment]
-        Your experiment subclass.  Its class variables
-        ``model_config_cls`` and ``env_config_cls`` determine which
-        dataclass fields are exposed as CLI flags.
-    """
+    """Build a CLI from experiment_cls's config dataclasses and run it."""
     from .config import ExperimentConfig
     from .evaluate import run_evaluate_cli
     from .enjoy import run_enjoy_cli
+    from .plot import main as run_plot_cli
+    from .compare_runs import main as run_compare_cli
 
     model_cls = experiment_cls.model_config_cls
     env_cls   = experiment_cls.env_config_cls
@@ -78,31 +71,48 @@ def run_experiment(experiment_cls: "Type[BaseExperiment]") -> None:
         description=f"Train / evaluate {experiment_cls.__name__}.",
     )
 
-    # ── Mode flag ───────────────────────────────────────────────────────
-    parser.add_argument(
-        "--mode",
-        choices=["train", "evaluate", "enjoy"],
-        default="train",
-        help=(
-            "train   — train (and optionally evaluate) a new model.\n"
-            "evaluate — run detailed evaluation on a saved model.\n"
-            "enjoy   — watch/record a saved model."
-        ),
-    )
+    # ── Subcommands ──────────────────────────────────────────────────────
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    subparsers.add_parser("train", help="Train (and optionally evaluate) a new model. [default]")
+    subparsers.add_parser("evaluate", help="Run detailed evaluation on a saved model.")
+    subparsers.add_parser("enjoy", help="Watch/record a saved model.")
+    subparsers.add_parser("generate-config", help="Generate a default config.yaml for this experiment.")
+    subparsers.add_parser("plot", help="Plot training curves or evaluation results.")
+    subparsers.add_parser("compare", help="Compare training metrics across multiple runs.")
 
-    args = parser.parse_args()
+    # We use parse_known_args so the sub-CLIs can parse their own specific flags
+    args, _ = parser.parse_known_args()
+
+    # Default to train if no command is specified
+    command = args.command or "train"
 
     # ── Delegate to the right sub-CLI ───────────────────────────────────
-    if args.mode == "evaluate":
-        # evaluate and enjoy have their own minimal parsers; re-parse
-        _reparse_and_run(run_evaluate_cli, experiment_cls)
+    if command == "generate-config":
+        cfg = ExperimentConfig.from_args(args, model_cls, env_cls)
+        # Override save path to drop it in the current working directory
+        cfg.save_path = "."  #TODO: make this configurable
+        cfg.save()
+        print("✅ Default config saved to ./config.yaml")
         return
 
-    if args.mode == "enjoy":
-        _reparse_and_run(run_enjoy_cli, experiment_cls)
+    if command == "evaluate":
+        _reparse_and_run(run_evaluate_cli, experiment_cls, command)
         return
 
-    # ── mode == "train" (default) ───────────────────────────────────────
+    if command == "enjoy":
+        _reparse_and_run(run_enjoy_cli, experiment_cls, command)
+        return
+    
+    if command == "plot":
+        _reparse_and_run(run_plot_cli, experiment_cls, command)
+        return
+    
+    if command == "compare":
+        _reparse_and_run(run_compare_cli, experiment_cls, command)
+        return
+
+    # ── command == "train" ──────────────────────────────────────────────
     run_id = getattr(args, "run_id", None)
 
     if run_id:
@@ -119,22 +129,16 @@ def run_experiment(experiment_cls: "Type[BaseExperiment]") -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _reparse_and_run(sub_cli_fn, experiment_cls) -> None:
-    """Strip --mode from sys.argv and hand off to a sub-CLI function."""
-    # Remove --mode <value> so the sub-parser doesn't see it
-    argv = [a for a in sys.argv[1:] if a not in ("--mode", "train", "evaluate", "enjoy")]
+def _reparse_and_run(sub_cli_fn, experiment_cls, command_name: str) -> None:
+    """Strip the command from sys.argv and hand off to a sub-CLI function."""
+    argv = [a for a in sys.argv[1:] if a != command_name]
     sys.argv = [sys.argv[0]] + argv
     sub_cli_fn(experiment_cls)
 
 
 def _apply_cli_overrides(cfg, args, model_cls, env_cls):
-    """Apply explicit CLI args on top of a loaded config.
-
-    Called when --run-id is given alongside other flags so users can do:
-        python main.py --run-id 20260331 --session-eval-episodes 50
-    """
+    """Apply explicit CLI args on top of a loaded config."""
     from dataclasses import fields
-    # Removed ALGO_MAP from the imports
     from .config import SessionConfig, _field_dest, _MISSING
 
     for section, dc_cls in [

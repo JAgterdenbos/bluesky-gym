@@ -29,7 +29,7 @@ from typing import Optional, Type, TYPE_CHECKING
 
 import gymnasium as gym
 
-from .config import ExperimentConfig, ModelConfig, EnvConfig, SessionConfig
+from .config import ExperimentConfig, ModelConfig, EnvConfig
 from .callbacks import get_callbacks
 
 if TYPE_CHECKING:
@@ -156,11 +156,25 @@ class BaseExperiment(abc.ABC):
  
         train_env = self.make_env(cfg.train_env_kwargs)
         eval_env  = self.make_env(cfg.eval_env_kwargs)
-        model     = self.make_model(train_env)
-        callbacks = self.get_callbacks(eval_env)
 
-        if model is None:
-            raise ValueError("make_model() returned None.  Did you forget to return the model instance?")
+        if cfg.session.pretrained_model_path:
+            print(f"📥 Loading pretrained model from {cfg.session.pretrained_model_path}...")
+            model = cfg.model.get_algorithm().load(cfg.session.pretrained_model_path, env=train_env)
+
+            if model is None:
+                raise ValueError("Model load failed!")
+            
+            # Compatibility Checks
+            if model.observation_space != train_env.observation_space:
+                raise ValueError("Pretrained model observation space does not match the environment!")
+            if model.action_space != train_env.action_space:
+                raise ValueError("Pretrained model action space does not match the environment!")
+        else:
+            model = self.make_model(train_env)
+            if model is None:
+                raise ValueError("make_model() returned None!")
+
+        callbacks = self.get_callbacks(eval_env)
  
         print(f"\n🏋️  Training for {cfg.session.total_timesteps:,} steps …")
         model.learn(
