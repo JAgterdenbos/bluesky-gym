@@ -222,26 +222,18 @@ def save_merged_csv(
 
     print(f"📄 Merged CSV → {path}")
 
-
 # ---------------------------------------------------------------------------
-# CLI
+# Programmatic API & CLI
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Compare training evaluation curves across multiple runs.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    group = p.add_mutually_exclusive_group(required=True)
-    group.add_argument("--runs", nargs="+", metavar="RUN_ID")
-    group.add_argument("--all",  action="store_true",
-                       help="Auto-discover all runs with training_evals.csv.")
-    p.add_argument("--full", action="store_true",
-                   help="Also print the full per-timestep table.")
-    p.add_argument("--out",  type=str, default=None, metavar="PATH")
-    args = p.parse_args()
-
-    if args.all:
+def compare(
+    runs: list[str] | str | None = None,
+    discover_all: bool = False,
+    full: bool = False,
+    out: str | None = None,
+) -> None:
+    """Programmatic entry point for comparing training runs."""
+    if discover_all:
         discovered = find_all_training_csvs()
         if not discovered:
             print("No training_evals.csv files found under ./experiments/")
@@ -250,7 +242,10 @@ def main() -> None:
         csv_paths = [p for _, p in discovered]
         print(f"Found {len(run_ids)} run(s): {', '.join(run_ids)}")
     else:
-        run_ids   = args.runs
+        if not runs:
+            print("❌ Error: Must provide either a list of runs or discover_all=True.")
+            return
+        run_ids   = runs if isinstance(runs, list) else runs.split(",")
         csv_paths = [find_training_csv(rid) for rid in run_ids]
 
     all_rows: list[list[dict]] = []
@@ -262,13 +257,31 @@ def main() -> None:
     summaries = [run_summary(rid, rows) for rid, rows in zip(run_ids, all_rows)]
     print_summary_table(summaries)
 
-    if args.full:
+    if full:
         print_full_table(run_ids, all_rows)
 
     ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = args.out or f"./experiments/comparison_{ts}.csv"
-    save_merged_csv(run_ids, all_rows, out)
+    out_path = out or f"./experiments/comparison_{ts}.csv"
+    save_merged_csv(run_ids, all_rows, out_path)
 
 
-if __name__ == "__main__":
-    main()
+def run_compare_cli(experiment_cls=None) -> None:
+    """Standalone CLI entry point (experiment_cls is ignored but required by runner.py signature)."""
+    p = argparse.ArgumentParser(
+        description="Compare training evaluation curves across multiple runs.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--runs", nargs="+", metavar="RUN_ID")
+    group.add_argument("--all",  action="store_true", help="Auto-discover all runs with training_evals.csv.")
+    p.add_argument("--full", action="store_true", help="Also print the full per-timestep table.")
+    p.add_argument("--out",  type=str, default=None, metavar="PATH")
+    
+    args = p.parse_args()
+
+    compare(
+        runs=args.runs,
+        discover_all=args.all,
+        full=args.full,
+        out=args.out
+    )

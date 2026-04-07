@@ -321,6 +321,11 @@ class ExperimentConfig:
         _make() can reconstruct it field-by-field.
         """
         d = asdict(self)
+
+        # Convert the algorithm class object to its string name
+        if self.model.algorithm is not None:
+            # self.model.algorithm is a Type, e.g., <class 'SAC'>
+            d["model"]["algorithm"] = self.model.algorithm.__name__
         
         # Store concrete subclass names so load() can reconstruct them accurately
         d["_model_config_cls"] = type(self.model).__name__

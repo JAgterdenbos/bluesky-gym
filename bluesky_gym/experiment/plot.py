@@ -213,6 +213,55 @@ def _save_or_show(fig, out_dir: Optional[str], filename: str, plt) -> None:
         plt.show()
     plt.close(fig)
 
+def plot(
+    command: str,
+    runs: list[str] | None = None,
+    discover_all: bool = False,
+    files: list[str] | None = None,
+    run_id: str | None = None,
+    metric: str = "success_rate",
+    labels: list[str] | None = None,
+    out: str | None = None,
+    title: str | None = None,
+    smooth: int = 1,
+) -> None:
+    """Programmatic entry point for plotting."""
+    
+    if command == "training":
+        if discover_all:
+            discovered = _find_all_training_csvs()
+            run_ids, csv_paths = [r for r, _ in discovered], [c for _, c in discovered]
+        else:
+            if not runs:
+                print("❌ Error: Provide a list of runs or discover_all=True")
+                return
+            run_ids = runs
+            csv_paths = [_find_training_csv(r) for r in run_ids]
+            
+        all_rows = [_load_training_csv(p) for p in csv_paths]
+        plot_training_curves(run_ids, all_rows, out, smooth, title)
+
+    elif command in ["eval-summary", "eval-episodes"]:
+        ext = "yaml" if command == "eval-summary" else "csv"
+        eval_files = files
+        if not eval_files and run_id:
+            eval_files = _find_eval_files(run_id, ext)
+        
+        if not eval_files:
+            print(f"❌ Error: Provide either 'files' or a 'run_id' with existing {ext} files.")
+            return
+
+        plot_labels = labels or [os.path.basename(f) for f in eval_files]
+        
+        if command == "eval-summary":
+            yaml_data = [_load_eval_yaml(f) for f in eval_files]
+            plot_eval_summary(plot_labels, yaml_data, metric, out, title)
+        else:
+            csv_data = [_load_eval_csv(f) for f in eval_files]
+            plot_eval_episodes(plot_labels, csv_data, out, title)
+    else:
+        print(f"❌ Unknown command: {command}")
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -250,34 +299,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
     return p
 
-def main() -> None:
+def run_plot_cli(experiment_cls=None) -> None:
+    """Standalone CLI entry point."""
     args = _build_parser().parse_args()
 
     if args.command == "training":
-        if args.all:
-            discovered = _find_all_training_csvs()
-            run_ids, csv_paths = [r for r, _ in discovered], [c for _, c in discovered]
-        else:
-            run_ids = args.runs
-            csv_paths = [_find_training_csv(r) for r in run_ids]
-        plot_training_curves(run_ids, [_load_training_csv(p) for p in csv_paths], args.out, args.smooth, args.title)
-
+        plot(
+            command="training", 
+            runs=getattr(args, 'runs', None), 
+            discover_all=getattr(args, 'all', False),
+            smooth=args.smooth, 
+            out=args.out, 
+            title=args.title
+        )
     elif args.command in ["eval-summary", "eval-episodes"]:
-        ext = "yaml" if args.command == "eval-summary" else "csv"
-        files = args.files
-        if not files and args.run_id:
-            files = _find_eval_files(args.run_id, ext)
-        
-        if not files:
-            print(f"❌ Error: Provide either --files or a --run-id with existing {ext} files.")
-            return
-
-        labels = args.labels or [os.path.basename(f) for f in files]
-        if args.command == "eval-summary":
-            plot_eval_summary(labels, [_load_eval_yaml(f) for f in files], args.metric, args.out, args.title)
-        else:
-            plot_eval_episodes(labels, [_load_eval_csv(f) for f in files], args.out, args.title)
-
-
-if __name__ == "__main__":
-    main()
+        plot(
+            command=args.command, 
+            files=args.files, 
+            run_id=args.run_id, 
+            metric=getattr(args, 'metric', 'success_rate'), 
+            labels=args.labels, 
+            out=args.out, 
+            title=args.title
+        )

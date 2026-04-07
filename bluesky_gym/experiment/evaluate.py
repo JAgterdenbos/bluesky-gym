@@ -293,6 +293,10 @@ def save_yaml_summary(overall: dict, per_group: dict[str, dict], path: str) -> N
             return {k: _clean(v) for k, v in val.items()}
         if isinstance(val, list):
             return [_clean(v) for v in val]
+        
+        # Handle NumPy scalars (converts np.float64 -> float, np.int64 -> int)
+        if hasattr(val, "item") and not isinstance(val, (list, np.ndarray)):
+            val = val.item()
         if isinstance(val, (float, np.floating)) and np.isnan(val):
             return None
         return val
@@ -305,53 +309,77 @@ def save_yaml_summary(overall: dict, per_group: dict[str, dict], path: str) -> N
         yaml.dump(payload, f, default_flow_style=False, sort_keys=False)
     print(f"📊 Metrics YAML → {path}")
 
-
-def run_evaluate_cli(experiment_cls) -> None:
-    """Standalone evaluation CLI for a given experiment class."""
-    p = argparse.ArgumentParser(
-        description="Evaluate a trained model with detailed metrics.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument("--run-id",    type=str, required=True)
-    p.add_argument("--episodes",  type=int, default=None)
-    p.add_argument("--groups",    nargs="+", default=None, metavar="GROUP",
-                   help="Group IDs (runways, levels, …) to evaluate on.")
-    p.add_argument("--no-render", action="store_true")
-    args = p.parse_args()
- 
+def evaluate(
+    experiment_cls,
+    run_id: str,
+    episodes: int | None = None,
+    groups: list[str] | None = None,
+    render: bool = True,
+) -> tuple[dict, dict]:
+    """
+    Programmatic API to evaluate a trained model.
+    Returns (overall_metrics, per_group_metrics).
+    """
+    import bluesky_gym
     bluesky_gym.register_envs()
- 
+
+    # 1. Load Config
     cfg = ExperimentConfig.load(
-        args.run_id,
+        run_id,
         model_config_cls=experiment_cls.model_config_cls,
         env_config_cls=experiment_cls.env_config_cls,
     )
- 
-    n_episodes = args.episodes or cfg.session.eval_episodes
-    groups     = args.groups
- 
+
+    n_episodes = episodes or cfg.session.eval_episodes
+    eval_groups = groups or cfg.session.eval_groups
     algo_name = cfg.model.algorithm.__name__ if cfg.model.algorithm else "Unspecified"
 
     print(f"\n🔍 Evaluating run  {cfg.run_id}")
     print(f"   env     = {cfg.env.env_name}")
     print(f"   algo    = {algo_name}")
-    print(f"   model   = {cfg.save_path}/final_model.zip")
     print(f"   n_eps   = {n_episodes}")
-    print(f"   groups  = {groups or cfg.session.eval_groups}\n")
- 
+    print(f"   groups  = {eval_groups or 'All'}\n")
+
+    # 2. Run Inference
     records = run_evaluation(
         cfg=cfg,
         experiment_cls=experiment_cls,
         n_episodes=n_episodes,
-        groups=groups,
-        render=not args.no_render,
+        groups=eval_groups,
+        render=render,
     )
- 
-    extractor          = experiment_cls.metric_extractor()
+
+    # 3. Process Metrics
+    extractor = experiment_cls.metric_extractor()
     overall, per_group = aggregate_metrics(records, extractor)
     print_summary(overall, per_group, extractor)
- 
+
+    # 4. Save Artifacts
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"eval_{cfg.run_id}_{ts}"
-    save_csv(records,                     os.path.join(cfg.save_path, f"{stem}.csv"))
+    save_csv(records, os.path.join(cfg.save_path, f"{stem}.csv"))
     save_yaml_summary(overall, per_group, os.path.join(cfg.save_path, f"{stem}.yaml"))
+
+    return overall, per_group
+
+
+def run_evaluate_cli(experiment_cls):
+    """CLI wrapper for the evaluate function."""
+    p = argparse.ArgumentParser(
+        description="Evaluate a trained model with detailed metrics.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--run-id",    type=str, required=True, help="The ID of the run to evaluate.")
+    p.add_argument("--episodes",  type=int, default=None,  help="Override default episode count.")
+    p.add_argument("--groups",    nargs="+", default=None, metavar="GROUP", help="Specific groups to test.")
+    p.add_argument("--no-render", action="store_true",     help="Disable UI rendering.")
+    
+    args = p.parse_args()
+
+    evaluate(
+        experiment_cls=experiment_cls,
+        run_id=args.run_id,
+        episodes=args.episodes,
+        groups=args.groups,
+        render=not args.no_render
+    )

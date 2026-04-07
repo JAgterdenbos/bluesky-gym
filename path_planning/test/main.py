@@ -32,8 +32,8 @@ Usage
   python main.py --env-runways 27 18R
 
   # Evaluate / watch a saved model
-  python main.py --mode evaluate --run-id 20260331_134059
-  python main.py --mode enjoy    --run-id 20260331_134059 --groups 27
+  python main.py evaluate --run-id 20260331_134059
+  python main.py enjoy    --run-id 20260331_134059 --groups 27
 
   # Full flag list
   python main.py --help
