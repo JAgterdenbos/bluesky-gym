@@ -314,7 +314,7 @@ class ExperimentConfig:
     # Serialisation                                                        #
     # ------------------------------------------------------------------ #
 
-    def _to_dict(self) -> dict:
+    def _to_dict(self, include_metadata: bool = True) -> dict:
         """Serialise to a plain dict.
  
         The nested structure mirrors the dataclass hierarchy exactly so
@@ -326,6 +326,10 @@ class ExperimentConfig:
         if self.model.algorithm is not None:
             # self.model.algorithm is a Type, e.g., <class 'SAC'>
             d["model"]["algorithm"] = self.model.algorithm.__name__
+
+        if not include_metadata:
+            d.pop("run_id", None)
+            return d
         
         # Store concrete subclass names so load() can reconstruct them accurately
         d["_model_config_cls"] = type(self.model).__name__
@@ -333,11 +337,11 @@ class ExperimentConfig:
         d["_env_kwargs_cls"]   = type(self.env.env_kwargs).__name__
         return d
 
-    def save(self) -> None:
+    def save(self, filename: str = "config.yaml", include_metadata: bool = True) -> None:
         """Write config.yaml next to the model files."""
-        path = os.path.join(self.save_path, "config.yaml")
+        path = os.path.join(self.save_path, filename)
         with open(path, "w") as f:
-            yaml.dump(self._to_dict(), f, default_flow_style=False, sort_keys=False)
+            yaml.dump(self._to_dict(include_metadata), f, default_flow_style=False, sort_keys=False)
 
     # ------------------------------------------------------------------ #
     # Construction helpers (used by from_args / from_yaml / load)        #

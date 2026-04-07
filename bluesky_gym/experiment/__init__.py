@@ -26,14 +26,15 @@ Import surface
       plot_eval_episodes,
 
       # Standalone entry points
+      train,
       evaluate,
       enjoy,
       compare,
       plot
 
       # Standalone CLIs (rarely needed directly)
+      run_train_cli,
       run_evaluate_cli,
-      evaluate,
       run_enjoy_cli,
       run_compare_cli,
       run_plot_cli
@@ -49,6 +50,7 @@ from .config          import (
     SessionConfig,
     ExperimentConfig,
 )
+from .train           import run_train_cli, train
 from .evaluate        import MetricExtractor, run_evaluate_cli, evaluate
 from .enjoy           import run_enjoy_cli, enjoy
 from .compare_runs    import run_compare_cli, compare
@@ -69,10 +71,12 @@ __all__ = [
     "SessionConfig",
     "ExperimentConfig",
     "MetricExtractor",
+    "train",
     "evaluate",
     "enjoy",
     "compare",
     "plot",
+    "run_train_cli",
     "run_evaluate_cli",
     "run_enjoy_cli",
     "run_compare_cli",

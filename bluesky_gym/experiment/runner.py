@@ -30,13 +30,77 @@ def _print_global_help(experiment_cls: "Type[BaseExperiment]") -> None:
     print(textwrap.dedent(help_text))
 
 
+def run_generate_config_cli(experiment_cls: Type[BaseExperiment]) -> None:
+    """CLI wrapper to generate and save a default configuration file."""
+    from .config import ExperimentConfig
+    
+    model_cls = experiment_cls.model_config_cls
+    env_cls   = experiment_cls.env_config_cls
+    
+    parser = ExperimentConfig._build_parser(
+        model_config_cls=model_cls,
+        env_config_cls=env_cls,
+        description=f"Generate a default config.yaml for {experiment_cls.__name__}.",
+    )
+
+    # Parse arguments (command has already been stripped by _reparse_and_run)
+    args, _ = parser.parse_known_args()
+    
+    cfg = ExperimentConfig.from_args(args, model_cls, env_cls)
+    cfg.save_path = "." 
+    cfg.save()
+    print("✅ Default config saved to ./config.yaml")
+
+def run_generate_config_cli(experiment_cls: Type[BaseExperiment]) -> None:
+    """CLI wrapper to generate and save a default configuration file."""
+    from .config import ExperimentConfig
+    
+    model_cls = experiment_cls.model_config_cls
+    env_cls   = experiment_cls.env_config_cls
+    
+    # 1. Get the base parser (includes all model/env hyperparameters)
+    parser = ExperimentConfig._build_parser(
+        model_config_cls=model_cls,
+        env_config_cls=env_cls,
+        description=f"Generate a default config.yaml for {experiment_cls.__name__}."
+    )
+
+    # 2. Add specific arguments for the generation process
+    parser.add_argument(
+        "--path", 
+        type=str, 
+        default=".", 
+        help="Directory where the config file should be saved (defaults to script directory).")
+    parser.add_argument(
+        "--filename", 
+        type=str, 
+        default="config.yaml", 
+        help="Name of the output configuration file. Note: the file will be overwritten if it already exists and needs to end in '.yaml'."
+    )
+
+    # 3. Parse arguments
+    args, _ = parser.parse_known_args()
+    
+    # 4. Initialize config and save to the specified location
+    cfg = ExperimentConfig.from_args(args, model_cls, env_cls)
+    
+    # 5. Save
+    caller_dir = os.path.dirname(os.path.abspath(sys.argv[0]))    
+    target_dir = os.path.abspath(os.path.join(caller_dir, args.path))
+    os.makedirs(target_dir, exist_ok=True)
+    # Manually trigger the save to the specific path
+    cfg.save_path = target_dir
+    cfg.save(filename=args.filename, include_metadata=False)
+        
+    print(f"✅ Default config saved to {os.path.join(target_dir, args.filename)}")
+
 def run_experiment(experiment_cls: "Type[BaseExperiment]") -> None:
     """Single entry point for the CLI."""
-    from .config import ExperimentConfig
     from .evaluate import run_evaluate_cli
     from .enjoy import run_enjoy_cli
     from .plot import run_plot_cli
     from .compare_runs import run_compare_cli
+    from .train import run_train_cli
 
     known_commands = {"train", "evaluate", "enjoy", "generate-config", "plot", "compare"}
     
@@ -48,63 +112,26 @@ def run_experiment(experiment_cls: "Type[BaseExperiment]") -> None:
             break
 
     # ── 2. Global Help Intercept ─────────────────────────────────────────
-    # If no command is given, but --help is requested, show our clean global menu
     if command is None and any(arg in ["-h", "--help"] for arg in sys.argv):
         _print_global_help(experiment_cls)
         sys.exit(0)
+
+    # ── 3. Sub-script Dispatch ───────────────────────────────────────────
+    dispatch_map = {
+        "train":           run_train_cli,
+        "evaluate":        run_evaluate_cli,
+        "enjoy":           run_enjoy_cli,
+        "plot":            run_plot_cli,
+        "compare":         run_compare_cli,
+        "generate-config": run_generate_config_cli,
+    }
 
     # Default to 'train' if nothing is specified
     if command is None:
         command = "train"
 
-    # ── 3. Sub-script Dispatch ───────────────────────────────────────────
-    # Hand off execution so sub-scripts can use their own argparse natively
-    if command == "evaluate":
-        return _reparse_and_run(run_evaluate_cli, experiment_cls, command)
-    if command == "enjoy":
-        return _reparse_and_run(run_enjoy_cli, experiment_cls, command)
-    if command == "plot":
-        return _reparse_and_run(run_plot_cli, experiment_cls, command)
-    if command == "compare":
-        return _reparse_and_run(run_compare_cli, experiment_cls, command)
-
-    # ── 4. Train & Config Parsers ────────────────────────────────────────
-    model_cls = experiment_cls.model_config_cls
-    env_cls   = experiment_cls.env_config_cls
-
-    parser = ExperimentConfig._build_parser(
-        model_config_cls=model_cls,
-        env_config_cls=env_cls,
-        description=f"Train / evaluate {experiment_cls.__name__}.\n\n(Run 'python {os.path.basename(sys.argv[0])} --help' to see all commands)",
-    )
-
-    # Remove the command from argv so standard argparse doesn't trip on it
-    argv = sys.argv[:]
-    for i in range(1, len(argv)):
-        if argv[i] == command:
-            argv.pop(i)
-            break
-            
-    # If the user typed `python main.py train --help`, the parser catches it right here!
-    args, _ = parser.parse_known_args(argv[1:])
-
-    # ── 5. Execute Core Commands ─────────────────────────────────────────
-    if command == "generate-config":
-        cfg = ExperimentConfig.from_args(args, model_cls, env_cls)
-        cfg.save_path = "."  
-        cfg.save()
-        print("✅ Default config saved to ./config.yaml")
-        return
-
-    # Train
-    run_id = getattr(args, "run_id", None)
-    if run_id:
-        cfg = ExperimentConfig.load(run_id, model_cls, env_cls)
-        cfg = _apply_cli_overrides(cfg, args, model_cls, env_cls)
-    else:
-        cfg = ExperimentConfig.from_args(args, model_cls, env_cls)
-
-    experiment_cls(cfg).run()
+    if command in dispatch_map:
+        return _reparse_and_run(dispatch_map[command], experiment_cls, command)
 
 
 # ---------------------------------------------------------------------------
@@ -114,26 +141,9 @@ def run_experiment(experiment_cls: "Type[BaseExperiment]") -> None:
 def _reparse_and_run(sub_cli_fn, experiment_cls, command_name: str) -> None:
     """Strip the command from sys.argv and hand off to a sub-CLI function."""
     argv = sys.argv[:]
-    # Remove only the FIRST occurrence of the command to protect argument values
     for i in range(1, len(argv)):
         if argv[i] == command_name:
             argv.pop(i)
             break
     sys.argv = argv
     sub_cli_fn(experiment_cls)
-
-def _apply_cli_overrides(cfg, args, model_cls, env_cls):
-    """Apply explicit CLI args on top of a loaded config."""
-    from dataclasses import fields
-    from .config import SessionConfig, _field_dest, _MISSING
-
-    for section, dc_cls in [("session", SessionConfig), ("model", model_cls), ("env", env_cls)]:
-        sub = getattr(cfg, section)
-        for f in fields(dc_cls):
-            dest = _field_dest(section, f.name)
-            val  = getattr(args, dest, _MISSING)
-            if val is not _MISSING and val is not None:
-                setattr(sub, f.name, val)
-
-    cfg._build_paths()
-    return cfg
