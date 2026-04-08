@@ -30,10 +30,19 @@ from bluesky_gym.experiment import (
     MetricExtractor,
 )
 
+from path_planning.rta import RTASampler
+
 
 # ---------------------------------------------------------------------------
 # Config subclasses
 # ---------------------------------------------------------------------------
+
+def _load_rta_sampler(path: Optional[str] = None) -> Optional[RTASampler]:
+    """Load the RTA sampler from a file. (For now we just return None.)"""
+    if path is None or not path:
+        return None
+
+    return None
 
 @dataclass()
 class PathPlanningModelConfig(ModelConfig):
@@ -79,14 +88,13 @@ class PathPlanningEnvKwargsConfig(EnvKwargsConfig):
 
     All fields become CLI flags automatically:
       --env-action-mode hdg
-      --env-use-rta / --env-no-use-rta
+      --env-rta-sampler-path ...
       --env-runways 27 18R 06
     """
 
     action_mode: str                 = "hdg"
-    use_rta:     bool                = False
-    runways:     Optional[List[str]] = field(default_factory=lambda: None)
-
+    rta_sampler_path: Optional[str]  = None  # None → spatial-only
+    runways: Optional[List[str]]     = field(default_factory=lambda: None)
 
 @dataclass
 class PathPlanningEnvConfig(EnvConfig):
@@ -139,10 +147,15 @@ class PathPlanningExperiment(BaseExperiment):
 
         if env_name is None:
             raise ValueError("env_name is not set in config!")
+        
+        kwargs       = dict(env_kwargs)
+        sampler_path = kwargs.pop("rta_sampler_path", None)
+        rta_sampler  = _load_rta_sampler(sampler_path)
 
         env = gym.make(
             env_name,
             render_mode=render_mode,
+            rta_sampler=rta_sampler,
             **env_kwargs,
         )
         env.reset()

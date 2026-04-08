@@ -86,8 +86,6 @@ def main():
     cfg = ExperimentConfig()
     print(f"▶️ Starting Experiment: {cfg.run_id}")
 
-    cfg.session.total_timesteps = 500_000 #
-
     # Train the model
     if cfg.session.do_train:
         print("\nTraining Model ...")

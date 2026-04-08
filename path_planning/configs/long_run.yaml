@@ -32,7 +32,7 @@ session:
 env:
   env_kwargs:
     action_mode: hdg
-    use_rta: false
+    rta_sampler_path: null
     runways: null
   env_name: PathPlanningGoalEnv-v0
   success_key: is_success

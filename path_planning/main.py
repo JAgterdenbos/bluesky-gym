@@ -42,6 +42,9 @@ Usage
 from path_planning.experiment import PathPlanningExperiment
 from path_planning.registry import PathPlanningRegistry
 
-if __name__ == "__main__":
+def main():
     registry = PathPlanningRegistry()
     registry.run_experiment(PathPlanningExperiment)
+
+if __name__ == "__main__":
+    main()

@@ -29,6 +29,7 @@ from matplotlib.path import Path
 
 import bluesky as bs
 from bluesky_gym.envs.common.screen_dummy import ScreenDummy
+from bluesky_gym.envs.common.base_sampler import BaseSampler
 import bluesky_gym.envs.common.functions as fn
 from bluesky.traffic import Route
 
@@ -36,6 +37,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from typing import List
+
 
 class GoalEnv(gym.Env):
     """Abstract GoalEnv contract.  Subclasses must implement compute_reward() and _get_obs()."""
@@ -134,11 +136,11 @@ class PathPlanningGoalEnv(GoalEnv):
         render_mode=None,
         runways: list | None = None,
         action_mode: str = "hdg",
-        use_rta: bool = False,
+        rta_sampler: BaseSampler | None = None,
     ):
         self.runways     = runways if runways is not None else ALL_RUNWAYS
         self.action_mode = action_mode
-        self.use_rta     = use_rta
+        self._rta_sampler = rta_sampler
 
         self.window_width  = 512
         self.window_height = 512
@@ -216,6 +218,10 @@ class PathPlanningGoalEnv(GoalEnv):
 
         self.window = None
         self.clock  = None
+
+    @property
+    def use_rta(self) -> bool:
+        return self._rta_sampler is not None
 
     # ──────────────────────────────────────────────────────────────────────────
     # GoalEnv contract

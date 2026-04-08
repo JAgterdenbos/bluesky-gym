@@ -27,6 +27,9 @@ def register_command(help_text: Optional[str] = None, **arg_configs):
     return wrapper
 
 class BaseRegistry(abc.ABC):
+    run_id: str = "run_id"
+    timestamp: str = "timestamp"
+
     def __init__(self, filepath: str = "./experiments/registry.csv"):
         self.filepath = filepath
         self._ensure_exists()
@@ -34,7 +37,7 @@ class BaseRegistry(abc.ABC):
     @property
     @abc.abstractmethod
     def headers(self) -> List[str]:
-        """User-defined columns. 'run_id' is mandatory."""
+        """User-defined columns. 'run_id' is mandatory. 'timestamp' is optional but is auto-set when used. """
         pass
 
     def _run_experiment(self, experiment_cls: Type["BaseExperiment"], custom_commands: Optional[CustomCommandMap] = None):
@@ -92,7 +95,7 @@ class BaseRegistry(abc.ABC):
                 # Automatic Header Discovery for **kwargs (used in 'add')
                 if p.kind == inspect.Parameter.VAR_KEYWORD:
                     for h in self.headers:
-                        if h != "run_id":
+                        if h != self.run_id:
                             flag = f"--{h.replace('_', '-')}"
                             sub.add_argument(flag, type=str, default="")
                     continue
@@ -130,10 +133,10 @@ class BaseRegistry(abc.ABC):
     @register_command("Add a new experiment run. Extra headers can be passed as --header-name.")
     def add(self, run_id: str, **kwargs):
         row = {h: "" for h in self.headers}
-        row["run_id"] = run_id
+        row[self.run_id] = run_id
         
-        if "timestamp" in self.headers:
-            row["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if self.timestamp in self.headers:
+            row[self.timestamp] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         for key, value in kwargs.items():
             clean_key = key.replace("-", "_")
@@ -190,7 +193,7 @@ class BaseRegistry(abc.ABC):
         rows = self._read_all()
         found = False
         for row in rows:
-            if row.get("run_id") == run_id:
+            if row.get(self.run_id) == run_id:
                 row.update(updates)
                 found = True
                 break

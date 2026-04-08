@@ -20,8 +20,8 @@ class PathPlanningRegistry(BaseRegistry):
     @property
     def headers(self):
         return [
-            "run_id",
-            "timestamp",
+            BaseRegistry.run_id,
+            BaseRegistry.timestamp,
             "intent",
             "priority",
             "status",
@@ -31,19 +31,19 @@ class PathPlanningRegistry(BaseRegistry):
 
     @register_command(
         "Mark the outcome of a finished run.",
-        status={"choices": ["running", "done", "failed", "abandoned"]},
-        quality={"choices": ["good", "bad", "promising", "inconclusive"]},
+        status={"choices": ["running", "done", "failed", "abandoned"], "default": "done"},
+        quality={"choices": ["good", "bad", "promising", "inconclusive"], "default": "good"},
         notes={"default": ""},
     )
-    def label(self, run_id: str, status: str, quality: str, notes: str = ""):
+    def label(self, run_id: str, status: str = "done", quality: str = "good", notes: str = ""):
         self.update_run(run_id, {"status": status, "quality": quality, "notes": notes})
         print(f"✅ Labelled {run_id}: {status} / {quality}")
 
     @register_command(
         "Set the priority of a run.",
-        priority={"choices": ["high", "medium", "low"]},
+        priority={"choices": ["high", "medium", "low"], "default": "low"},
     )
-    def prioritise(self, run_id: str, priority: str):
+    def prioritise(self, run_id: str, priority: str = "low"):
         self.update_run(run_id, {"priority": priority})
         print(f"🔖 {run_id} → priority: {priority}")
 
