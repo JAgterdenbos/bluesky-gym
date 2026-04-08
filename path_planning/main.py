@@ -39,8 +39,9 @@ Usage
   python main.py --help
 """
 
-from bluesky_gym.experiment import run_experiment
 from path_planning.experiment import PathPlanningExperiment
+from path_planning.registry import PathPlanningRegistry
 
 if __name__ == "__main__":
-    run_experiment(PathPlanningExperiment)
+    registry = PathPlanningRegistry()
+    registry.run_experiment(PathPlanningExperiment)
