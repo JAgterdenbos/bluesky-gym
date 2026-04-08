@@ -148,8 +148,7 @@ class PathPlanningExperiment(BaseExperiment):
         if env_name is None:
             raise ValueError("env_name is not set in config!")
         
-        kwargs       = dict(env_kwargs)
-        sampler_path = kwargs.pop("rta_sampler_path", None)
+        sampler_path = env_kwargs.pop("rta_sampler_path", None)
         rta_sampler  = _load_rta_sampler(sampler_path)
 
         env = gym.make(

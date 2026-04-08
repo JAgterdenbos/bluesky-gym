@@ -5,7 +5,7 @@ if TYPE_CHECKING:
 
 class SamplerRegistry:
     """A standalone manager that maps strings to Sampler classes."""
-    _catalog: Dict[str, Type[RTASampler]] = {}
+    _catalog: Dict[str, Type["RTASampler"]] = {}
 
     @classmethod
     def register(cls, name: str):
@@ -16,7 +16,7 @@ class SamplerRegistry:
         return wrapper
 
     @classmethod
-    def make(cls, name: str, **kwargs) -> RTASampler:
+    def make(cls, name: str, **kwargs) -> "RTASampler":
         """Factory method to create a sampler instance."""
         if name not in cls._catalog:
             raise KeyError(f"Sampler '{name}' not found in registry.")

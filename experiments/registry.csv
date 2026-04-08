@@ -1,0 +1,3 @@
+run_id,timestamp,intent,priority,status,quality,notes
+20260407_153017,2026-04-08 16:41,,low,done,good,Initial HER training with 500_000 timesteps to see if it works well
+20260408_172910,2026-04-08 17:08, Spatial Comparison, high, training,,Training with HER for 250_000 timesteps for comparison with no HER for spatial phase

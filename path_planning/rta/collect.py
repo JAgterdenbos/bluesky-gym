@@ -127,15 +127,19 @@ def get_collector(output_path: str, chunk_size: int, fresh_start: bool = True):
 
 def _get_args():
     p = argparse.ArgumentParser(description="Collect rta data step-by-step per successful episode.")
-    p.add_argument("--run-id", type=str, required=True)
-    p.add_argument("--episodes", type=int, default=100)
-    p.add_argument("--out", type=str, default="rta_data.csv")
-    p.add_argument("--chunk", type=int, default=25)
-    p.add_argument("--verbose_frequency", type=int, default=100)
+    p.add_argument("run_id", type=str, help="The ID of the run to collect data from.")
+    p.add_argument("--episodes", type=int, default=100, help="Number of successful episodes to collect.")
+    p.add_argument("--out", type=str, default="rta_data.csv", help="Output file path.")
+    p.add_argument("--chunk", type=int, default=25, help="Number of steps to collect per episode.")
+    p.add_argument("--verbose_frequency", type=int, default=100, help="Print progress every N episodes.")
     return p.parse_args()
 
 def run_collection(experiment_cls):
     from os.path import join
+    import bluesky_gym
+
+    bluesky_gym.register_envs()
+
     args = _get_args()
 
     # 1. Load Config & Model

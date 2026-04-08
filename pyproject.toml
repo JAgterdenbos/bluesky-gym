@@ -8,6 +8,7 @@ dependencies = [
     "stable-baselines3",
     "numpy",
     "bluesky-simulator>=1.0.7",
+    "pyarrow>=23.0.1",
 ]
 authors = [
   { name="Jan Groot", email="d.j.groot@tudelft.nl" },

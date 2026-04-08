@@ -35,7 +35,6 @@ def _print_global_help(experiment_cls: "Type[BaseExperiment]", custom_commands: 
     
     # Add custom commands if they exist
     if custom_commands:
-        cmd_help += "\n    Custom Commands:\n"
         for cmd, (fn, desc) in custom_commands.items():
             cmd_help += f"      {cmd:<{max_len}}  {desc}\n"
 
@@ -45,7 +44,7 @@ def _print_global_help(experiment_cls: "Type[BaseExperiment]", custom_commands: 
     CLI for {experiment_cls.__name__}.
 
     Commands:
-        {cmd_help}
+{cmd_help}
     Type 'python {script_name} <command> --help' for details on a specific command.
     """
     print(textwrap.dedent(help_text))

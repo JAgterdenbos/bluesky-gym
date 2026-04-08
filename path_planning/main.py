@@ -42,9 +42,15 @@ Usage
 from path_planning.experiment import PathPlanningExperiment
 from path_planning.registry import PathPlanningRegistry
 
+from path_planning.rta import run_collection
+
 def main():
+    custom_commands = {
+        "collect-rta": (run_collection, "Collect rta data step-by-step per successful episode."),
+    }
+
     registry = PathPlanningRegistry()
-    registry.run_experiment(PathPlanningExperiment)
+    registry.run_experiment(PathPlanningExperiment, custom_commands)
 
 if __name__ == "__main__":
     main()
