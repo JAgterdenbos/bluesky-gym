@@ -1,3 +1,12 @@
+"""
+Plotting API and Command-Line Interface.
+
+This module serves as the primary entry point for generating visual analytics 
+across both training and evaluation phases. It parses user commands to locate 
+log files (CSV/YAML) and routes the data to the appropriate plotting engines 
+defined in `train_plots.py` and `eval_plots.py`.
+"""
+
 from __future__ import annotations
 
 import argparse

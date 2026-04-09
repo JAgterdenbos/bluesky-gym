@@ -1,3 +1,12 @@
+"""
+Training plotting suite.
+
+Generates learning curves and comparative grids to analyze model performance 
+during the training phase. Key features include rolling mean smoothing, 
+standard deviation banding, and multi-run gap analysis for identifying 
+policy consistency and convergence speeds.
+"""
+
 from __future__ import annotations
 
 from .style import _apply_style, _color, _plt, _get_ticker, _smooth, _shade_std, _save_or_show

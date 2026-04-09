@@ -235,10 +235,15 @@ The framework includes a laboratory for scientifically comparing different "live
 * **Multi-Mode Plotting Engine**: The plot API is modular, allowing you to extract insights using a variety of lenses:
 
     1) `training`: The "standard" view of reward over time.
-
     2) `eval-summary`: A high-level leaderboard for different experiment groups.
-
     3) `eval-episodes`: A microscopic view of exactly what happened, step-by-step, in a single run.
+    4) `eval-dashboard`: A comprehensive, auto-configuring visual summary of a single run.
+
+        * **Adaptive Layout**: Automatically scales between 2 and 3 columns to accommodate as many metrics as your `MetricExtractor` provides.
+
+        * **Smart Validation**: Cross-references CSV logs with YAML summaries to ensure only "official" aggregated metrics are plotted, filtering out noise or internal indices.
+
+        * **Visual Depth**: Combines violin plots for distributions, success rate benchmarks, and temporal timelines in a single view.
 
 ## 5. Optional: The Experiment Registry
 The Registry is an optional metadata layer. Use it when you want a persistent CSV log of all your runs to track things like "Intent," "Priority," or qualitative "Quality" scores.

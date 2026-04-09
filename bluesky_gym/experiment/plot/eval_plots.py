@@ -1,12 +1,21 @@
+"""
+Evaluation plotting suite.
+
+Generates visual analytics for post-training model evaluations. This includes 
+single-run performance dashboards, cross-run success rate summaries, and 
+detailed episode-by-episode timelines. It dynamically accommodates custom 
+metrics extracted via the `MetricExtractor` class.
+"""
+
 from __future__ import annotations
 
 from .style import _apply_style, _color, _plt, _get_ticker, _smooth, _save_or_show, _extra_numeric_keys
 
+import math
 import numpy as np
 from typing import Optional
 
 
-#TODO: find a better way to handle the metric extractor (extra metrics overview), because we should show all of them and not just the first one!
 def plot_eval_dashboard(
     label:   str,
     rows:    list[dict],
@@ -15,14 +24,16 @@ def plot_eval_dashboard(
     title:   Optional[str] = None,
 ) -> None:
     """
-    Single-run evaluation dashboard — 2x2 grid:
+    Single-run evaluation dashboard with dynamic grid sizing.
 
-      [0,0]  Reward distribution by group  (violin + jitter)
-      [0,1]  Success rate by group         (horizontal bar + n label)
-      [1,0]  Episode timeline              (reward scatter coloured by success)
-      [1,1]  Extra metrics overview        (bar chart of per-group means for
-                                            each extra column, or reward
-                                            histogram if no extras)
+    Always shows:
+      1. Reward distribution by group (violin + jitter)
+      2. Success rate by group (horizontal bar)
+      3. Episode timeline (scatter + rolling mean)
+      
+    Then dynamically appends:
+      - A bar chart for *each* extra metric extracted.
+      - Or a reward histogram if no extra metrics exist.
     """
     _apply_style()
     plt = _plt()
@@ -31,14 +42,29 @@ def plot_eval_dashboard(
     groups       = sorted({r["group"] for r in rows})
     n_groups     = len(groups)
     group_colors = {g: _color(i) for i, g in enumerate(groups)}
-    extras       = _extra_numeric_keys(rows)
+    extras       = _extra_numeric_keys(rows, yaml_data)
     by_group     = {g: [r for r in rows if r["group"] == g] for g in groups}
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
-    ax_viol, ax_sr   = axes[0, 0], axes[0, 1]
-    ax_time, ax_ext  = axes[1, 0], axes[1, 1]
+    # ── Dynamic Grid Calculation ─────────────────────────────────────────────
+    # Base 3 plots + either 1 plot per extra metric OR 1 fallback histogram
+    n_plots = 3 + (len(extras) if extras else 1)
+    
+    # Force columns to be either 2 or 3 for optimal viewing
+    cols = 3 if n_plots >= 5 or n_plots == 3 else 2
+    rows_grid = math.ceil(n_plots / cols)
 
-    # ── [0,0]  Reward violin + jitter ───────────────────────────────────────
+    fig, axes = plt.subplots(rows_grid, cols, figsize=(cols * 6.5, rows_grid * 4.5))
+    
+    # Flatten axes for easy sequential iteration
+    if isinstance(axes, np.ndarray):
+        axes = axes.flatten()
+    else:
+        axes = [axes]
+
+    ax_idx = 0
+
+    # ── 1. Reward violin + jitter ────────────────────────────────────────────
+    ax_viol = axes[ax_idx]; ax_idx += 1
     reward_data = [np.array([r["total_reward"] for r in by_group[g]]) for g in groups]
     vp = ax_viol.violinplot(reward_data, positions=range(n_groups),
                              showmedians=True, showextrema=False)
@@ -56,7 +82,7 @@ def plot_eval_dashboard(
     ax_viol.set_xticklabels(groups)
     ax_viol.set_ylabel("Total Reward")
     ax_viol.set_title("Reward Distribution by Group")
-    # Legend for jitter colours
+    
     from matplotlib.lines import Line2D
     ax_viol.legend(
         handles=[Line2D([0],[0], marker="o", color="w", markerfacecolor="#2ecc71", markersize=7, label="success"),
@@ -64,7 +90,8 @@ def plot_eval_dashboard(
         fontsize=8, loc="upper right",
     )
 
-    # ── [0,1]  Success rate horizontal bars ─────────────────────────────────
+    # ── 2. Success rate horizontal bars ──────────────────────────────────────
+    ax_sr = axes[ax_idx]; ax_idx += 1
     sr_vals = [sum(r["is_success"] for r in by_group[g]) / len(by_group[g]) for g in groups]
     n_eps   = [len(by_group[g]) for g in groups]
     bars = ax_sr.barh(range(n_groups), sr_vals, color=[group_colors[g] for g in groups],
@@ -72,7 +99,6 @@ def plot_eval_dashboard(
     for j, (bar, sr, n) in enumerate(zip(bars, sr_vals, n_eps)):
         ax_sr.text(min(sr + 0.02, 0.98), bar.get_y() + bar.get_height() / 2,
                    f"{sr:.0%}  (n={n})", va="center", fontsize=8, color="#333333")
-    # Overall line
     overall_sr = sum(r["is_success"] for r in rows) / len(rows)
     ax_sr.axvline(overall_sr, color="#444444", linewidth=1.5, linestyle="--", label=f"overall {overall_sr:.0%}")
     ax_sr.set_yticks(range(n_groups))
@@ -82,12 +108,12 @@ def plot_eval_dashboard(
     ax_sr.set_title("Success Rate by Group")
     ax_sr.legend(fontsize=8)
 
-    # ── [1,0]  Episode timeline ──────────────────────────────────────────────
+    # ── 3. Episode timeline ──────────────────────────────────────────────────
+    ax_time = axes[ax_idx]; ax_idx += 1
     eps     = [r["episode"]      for r in rows]
     rewards = [r["total_reward"] for r in rows]
     colors  = [("#2ecc71" if r["is_success"] else "#e74c3c") for r in rows]
     ax_time.scatter(eps, rewards, c=colors, s=20, alpha=0.75, zorder=3, linewidths=0)
-    # Rolling mean
     if len(rows) >= 5:
         rm = _smooth(np.array(rewards, dtype=float), max(3, len(rows) // 10))
         ax_time.plot(eps, rm, color="#444444", linewidth=1.5, label="rolling mean", zorder=4)
@@ -96,42 +122,45 @@ def plot_eval_dashboard(
     ax_time.set_ylabel("Total Reward")
     ax_time.set_title("Episode Timeline  (● success  ● failure)")
 
-    # ── [1,1]  Extras or histogram ───────────────────────────────────────────
+    # ── 4. Dynamic Extra Metrics (or Fallback Histogram) ─────────────────────
     if extras:
-        # Show first extra metric as grouped bars; list remaining as text
-        key  = extras[0]
-        vals = [np.nanmean([r[key] for r in by_group[g]]) for g in groups]
-        stds = [np.nanstd( [r[key] for r in by_group[g]]) for g in groups]
-        bars2 = ax_ext.bar(range(n_groups), vals, yerr=stds,
-                           color=[group_colors[g] for g in groups],
-                           alpha=0.75, capsize=4, zorder=3,
-                           error_kw=dict(elinewidth=1, ecolor="#666666"))
-        for bar, v in zip(bars2, vals):
-            ax_ext.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(stds) * 0.1,
-                        f"{v:.2f}", ha="center", fontsize=7, color="#333333")
-        ax_ext.set_xticks(range(n_groups))
-        ax_ext.set_xticklabels(groups)
-        ax_ext.set_ylabel(key.replace("_", " ").title())
-        ax_ext.set_title(f"{key.replace('_', ' ').title()} by Group  (mean ± std)")
-        # Note any additional extras
-        if len(extras) > 1:
-            note = "Also available: " + ", ".join(extras[1:])
-            ax_ext.text(0.5, -0.15, note, transform=ax_ext.transAxes,
-                        fontsize=7, color="#888888", ha="center")
+        # Generate a bar chart for every extra metric we tracked
+        for key in extras:
+            ax_ext = axes[ax_idx]
+            ax_idx += 1
+            
+            vals = [np.nanmean([r[key] for r in by_group[g]]) for g in groups]
+            stds = [np.nanstd( [r[key] for r in by_group[g]]) for g in groups]
+            
+            bars2 = ax_ext.bar(range(n_groups), vals, yerr=stds,
+                               color=[group_colors[g] for g in groups],
+                               alpha=0.75, capsize=4, zorder=3,
+                               error_kw=dict(elinewidth=1, ecolor="#666666"))
+            for bar, v in zip(bars2, vals):
+                ax_ext.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(stds) * 0.1,
+                            f"{v:.2f}", ha="center", fontsize=7, color="#333333")
+            ax_ext.set_xticks(range(n_groups))
+            ax_ext.set_xticklabels(groups)
+            ax_ext.set_ylabel(key.replace("_", " ").title())
+            ax_ext.set_title(f"{key.replace('_', ' ').title()} by Group  (mean ± std)")
     else:
         # Fallback: overall reward histogram coloured by group
+        ax_hist = axes[ax_idx]; ax_idx += 1
         for g in groups:
             vals = [r["total_reward"] for r in by_group[g]]
-            ax_ext.hist(vals, bins=12, alpha=0.55, color=group_colors[g], label=g, zorder=3)
-        ax_ext.set_xlabel("Total Reward")
-        ax_ext.set_ylabel("Count")
-        ax_ext.set_title("Reward Histogram by Group")
-        ax_ext.legend(fontsize=8)
+            ax_hist.hist(vals, bins=12, alpha=0.55, color=group_colors[g], label=g, zorder=3)
+        ax_hist.set_xlabel("Total Reward")
+        ax_hist.set_ylabel("Count")
+        ax_hist.set_title("Reward Histogram by Group")
+        ax_hist.legend(fontsize=8)
+
+    # ── Clean up empty subplots ──────────────────────────────────────────────
+    for i in range(ax_idx, len(axes)):
+        fig.delaxes(axes[i])
 
     fig.suptitle(title or f"Evaluation Dashboard — {label}", fontsize=13, fontweight="bold")
     fig.tight_layout()
     _save_or_show(fig, out_dir, f"eval_dashboard_{label}.png", plt)
-
 
 def plot_eval_summary(
     labels:    list[str],
@@ -218,7 +247,7 @@ def plot_eval_episodes(
     title:    Optional[str] = None,
 ) -> None:
     """
-    Per-run 2×2 comparison grid:
+    Per-run 2x2 comparison grid:
       [0,0]  Reward boxplots by group (one subplot per run, shared y)
       [0,1]  Success rate grouped bars across runs
       [1,0]  Episode timeline scatter for all runs overlaid

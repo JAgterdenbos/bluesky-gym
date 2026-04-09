@@ -1,5 +1,14 @@
+"""
+Matplotlib styling and utility functions.
+
+Provides a unified, publication-ready aesthetic for all framework plots. 
+Includes custom color palettes, standard deviation shading wrappers, array 
+smoothing functions, and file-saving helpers.
+"""
+
 from __future__ import annotations
 
+import math
 import os
 from typing import Optional
 
@@ -91,11 +100,33 @@ def _save_or_show(fig, out_dir: Optional[str], filename: str, plt):
         plt.show()
     plt.close(fig)
 
-def _extra_numeric_keys(rows: list[dict]) -> list[str]:
-    """Return extra numeric column names beyond the four fixed fields."""
+def _extra_numeric_keys(rows: list[dict], yaml_data: dict | None = None) -> list[str]:
+    """
+    Return extra numeric column names beyond the four fixed fields.
+    
+    If yaml_data is provided, it cross-references the 'overall' keys to ensure
+    we only plot metrics that were explicitly aggregated.
+    """
     fixed = {"episode", "group", "is_success", "total_reward"}
     if not rows:
         return []
-    return [k for k in rows[0] if k not in fixed
-            and isinstance(rows[0][k], (int, float))
-            and not (isinstance(rows[0][k], float) and math.isnan(rows[0][k]))]
+
+    # 1. Identify candidates from the CSV row
+    candidates = [
+        k for k in rows[0] 
+        if k not in fixed
+        and isinstance(rows[0][k], (int, float))
+        and not (isinstance(rows[0][k], float) and math.isnan(rows[0][k]))
+    ]
+
+    # 2. If we have YAML metadata, refine the list
+    if yaml_data and "overall" in yaml_data:
+        # The YAML 'overall' section contains keys like 'mean_total_reward', 
+        # 'std_total_reward', and our extras.
+        yaml_keys = yaml_data["overall"].keys()
+        
+        # We only keep candidates that exist in the YAML 
+        # (The MetricExtractor output keys match the CSV column names)
+        candidates = [k for k in candidates if k in yaml_keys]
+
+    return candidates

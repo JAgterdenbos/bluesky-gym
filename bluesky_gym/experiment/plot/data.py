@@ -1,3 +1,11 @@
+"""
+Data ingestion and file discovery utilities.
+
+Handles the parsing of CSV and YAML artifacts generated during training and 
+evaluation. This includes safely loading numeric data, resolving file globs 
+from run IDs, and reconstructing multi-run data structures from merged logs.
+"""
+
 from __future__ import annotations
 
 import csv
