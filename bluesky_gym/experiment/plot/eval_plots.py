@@ -9,12 +9,42 @@ metrics extracted via the `MetricExtractor` class.
 
 from __future__ import annotations
 
-from .style import _apply_style, _color, _plt, _get_ticker, _smooth, _save_or_show, _extra_numeric_keys
+from .style import _apply_style, _color, _plt, _get_ticker, _smooth, _save_or_show
 
 import math
 import numpy as np
 from typing import Optional
 
+def _extra_numeric_keys(rows: list[dict], yaml_data: dict | None = None) -> list[str]:
+    """
+    Return extra numeric column names beyond the four fixed fields.
+    
+    If yaml_data is provided, it cross-references the 'overall' keys to ensure
+    we only plot metrics that were explicitly aggregated.
+    """
+    fixed = {"episode", "group", "is_success", "total_reward"}
+    if not rows:
+        return []
+
+    # 1. Identify candidates from the CSV row
+    candidates = [
+        k for k in rows[0] 
+        if k not in fixed
+        and isinstance(rows[0][k], (int, float))
+        and not (isinstance(rows[0][k], float) and math.isnan(rows[0][k]))
+    ]
+
+    # 2. If we have YAML metadata, refine the list
+    if yaml_data and "overall" in yaml_data:
+        # The YAML 'overall' section contains keys like 'mean_total_reward', 
+        # 'std_total_reward', and our extras.
+        yaml_keys = yaml_data["overall"].keys()
+        
+        # We only keep candidates that exist in the YAML 
+        # (The MetricExtractor output keys match the CSV column names)
+        candidates = [k for k in candidates if k in yaml_keys]
+
+    return candidates
 
 def plot_eval_dashboard(
     label:   str,
