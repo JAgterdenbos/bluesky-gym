@@ -232,7 +232,7 @@ The framework includes a laboratory for scientifically comparing different "live
 
 * **The `compare` Command**: Generates a brutal benchmarking table. It calculates **Sample Efficiency** (how fast it learned), **Convergence** (when it "got it") and **Stability** (if it started vibrating/regressing at the end).
 
-* **Multi-Mode Plotting**:
+* **Multi-Mode Plotting Engine**: The plot API is modular, allowing you to extract insights using a variety of lenses:
 
     1) `training`: The "standard" view of reward over time.
 
