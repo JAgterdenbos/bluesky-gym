@@ -1,8 +1,9 @@
 import csv
 from pathlib import Path
 from abc import ABC, abstractmethod
-import argparse
 from bluesky_gym.experiment.config import ExperimentConfig
+
+from typing import Optional
 
 class BaseDataCollector(ABC):
     """Abstract base class for streaming data collectors."""
@@ -24,8 +25,11 @@ class BaseDataCollector(ABC):
         """Accepts arbitrary keyword arguments to easily collect dynamic data."""
         self.current_episode_steps.append(data_dict)
 
-    def finalise_episode(self, success: bool):
+    def finalise_episode(self, success: bool, backfill: Optional[dict] = None):
         if success:
+            if backfill is not None:
+                for step in self.current_episode_steps:
+                    step.update(backfill)
             self.buffer.extend(self.current_episode_steps)
             self.successful_count += 1
         
@@ -126,6 +130,8 @@ def get_collector(output_path: str, chunk_size: int, fresh_start: bool = True):
         raise ValueError(f"Unsupported file format for: {output_path}. Use .csv or .parquet")
 
 def _get_args():
+    import argparse
+
     p = argparse.ArgumentParser(description="Collect rta data step-by-step per successful episode.")
     p.add_argument("run_id", type=str, help="The ID of the run to collect data from.")
     p.add_argument("--episodes", type=int, default=100, help="Number of successful episodes to collect.")
@@ -169,23 +175,26 @@ def run_collection(experiment_cls):
         step = 0
         
         while not (done or truncated):
-            action, info = model.predict(obs, deterministic=True)
+            action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, truncated, info = env.step(action)
-            
-            # Simple conversion of numpy arrays to lists for serialization
-            act_val = action.tolist() if hasattr(action, 'tolist') else action
-            
-            #TODO: rewrate so we collect the necessary info for the rta!
+
             collector.collect_step(
-                episode = success_count + 1,
-                step = step,
-                reward = float(reward),
-                action = str(act_val)
+                episode  = success_count + 1,
+                step     = step,
+                x        = float(obs["observation"][0]),
+                y        = float(obs["observation"][1]),
+                t        = float(obs["observation"][2]),   # normalised simt
+                runway   = info["current_runway"],
+                # Goal vector not needed as it can be obtained from the assigned runway
+                # rta is NOT known yet — backfilled in finalise_episode
             )
             step += 1
         
         is_success = info.get(success_key, False)
-        collector.finalise_episode(success=is_success)
+        collector.finalise_episode(
+            success=is_success,
+            backfill = {"rta": float(info["sim_time"])}
+            )
         
         if is_success:
             success_count += 1

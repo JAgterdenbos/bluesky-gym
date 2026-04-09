@@ -1,3 +1,6 @@
 run_id,timestamp,intent,priority,status,quality,notes
-20260407_153017,2026-04-08 16:41,,low,done,good,Initial HER training with 500_000 timesteps to see if it works well
-20260408_172910,2026-04-08 17:08, Spatial Comparison, high, training,,Training with HER for 250_000 timesteps for comparison with no HER for spatial phase
+20260407_153017,2026-04-08 16:41,,low,done,good,Initial HER training with 500_000 timesteps to see if it works well for spatial phase
+20260408_183050,2026-04-08 17:08, Spatial Comparison, high, training,,Training with HER for 250_000 timesteps for comparison with no HER for spatial phase
+20260409_094449,2026-04-09 09:45, Spatial Comparison, high, training,,Training with NO HER for 250_000 timesteps for comparison with no HER for spatial phase
+20260409_131016,2026-04-09 13:12,,low,done,good,Non-HER training with 500_00 timesteps for spatial phase, because there was no clear winner
+

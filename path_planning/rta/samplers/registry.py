@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Dict, Type, List
 
 if TYPE_CHECKING:
-    from .sampler import RTASampler
+    from .rta_sampler import RTASampler
 
 class SamplerRegistry:
     """A standalone manager that maps strings to Sampler classes."""

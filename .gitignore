@@ -7,3 +7,4 @@ logs/
 models/
 dist/
 *.lock
+/experiments/results

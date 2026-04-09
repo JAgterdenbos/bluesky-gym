@@ -1,3 +1,18 @@
+"""
+bluesky_gym/experiment/registry.py
+----------------------------------
+Persistent CSV-based storage for tracking experiment runs and metadata.
+
+Classes
+-------
+  BaseRegistry - Abstract handler for reading/writing run metadata to disk.
+
+Usage
+-----
+  Inherit from BaseRegistry and define the 'headers' property to create
+  a project-specific registry (e.g., to track flight success, wind speeds, etc).
+"""
+
 import os
 import csv
 import abc
