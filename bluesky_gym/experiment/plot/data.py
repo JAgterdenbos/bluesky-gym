@@ -123,3 +123,66 @@ def _load_eval_csv(path: str) -> list[dict]:
                     rec[k] = _safe_float(v) if v.strip() not in ("", "None") else float("nan")
             rows.append(rec)
     return rows
+
+def _resolve_eval_files(
+    run_ids:      list[str] | None,
+    files:        list[str] | None,
+    eval_indices: list[int] | None,
+    ext:          str,
+    command:      str,
+) -> list[str]:
+    """
+    Resolve the final list of eval files to load, honouring --eval-indices
+    when multiple files exist for a run.
+
+    Resolution order:
+      1. --files wins outright — indices are ignored (files are explicit).
+      2. --run-ids  → discover all files per run, then apply the matching
+         index from --eval-indices (or 0 if none supplied for that run).
+
+    Parameters
+    ----------
+    run_ids      : list of run IDs from --run-ids, or None.
+    files        : explicit file paths from --files, or None.
+    eval_indices : per-run indices from --eval-indices, or None.
+    ext          : file extension to look for ('csv' or 'yaml').
+    command      : subcommand name, used in error messages only.
+
+    Returns
+    -------
+    A flat list of resolved file paths.
+    """
+    if files:
+        return files
+
+    if not run_ids:
+        return []
+
+    indices = eval_indices or []
+    resolved = []
+    for i, run_id in enumerate(run_ids):
+        found = _find_eval_files(run_id, ext)
+        if not found:
+            print(f"⚠️  Warning: No {ext} eval files found for run '{run_id}' — skipping.")
+            continue
+        idx = indices[i] if i < len(indices) else 0
+        if idx >= len(found) or idx < -len(found):
+            print(
+                f"⚠️  Warning: --eval-indices value {idx} is out of range for run "
+                f"'{run_id}' ({len(found)} file(s) found). Using index 0."
+            )
+            idx = 0
+        resolved.append(found[idx])
+    return resolved
+
+
+def _list_eval_files(run_ids: list[str], ext: str) -> None:
+    """Print a numbered list of discovered eval files for each run."""
+    for run_id in run_ids:
+        found = _find_eval_files(run_id, ext)
+        if not found:
+            print(f"  {run_id}: (no {ext} files found)")
+        else:
+            print(f"  {run_id}:")
+            for idx, path in enumerate(found):
+                print(f"    [{idx}]  {path}")

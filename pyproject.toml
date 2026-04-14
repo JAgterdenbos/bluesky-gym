@@ -9,6 +9,7 @@ dependencies = [
     "numpy",
     "bluesky-simulator>=1.0.7",
     "pyarrow>=23.0.1",
+    "scikit-learn>=1.7.2",
 ]
 authors = [
   { name="Jan Groot", email="d.j.groot@tudelft.nl" },

@@ -15,7 +15,7 @@ class BaseSampler(ABC):
         pass
 
     @abstractmethod
-    def sample(self, *args, **kwargs) -> Any:
+    def sample(self, X: Any, *args, **kwargs) -> Any:
         """
         Return a single sampled value.
         Must be implemented by all subclasses.
@@ -23,7 +23,7 @@ class BaseSampler(ABC):
         pass
 
     @abstractmethod
-    def fit(self, data: Any, *args, **kwargs) -> None:
+    def fit(self, X: Any, y: Any, *args, **kwargs) -> None:
         """
         Train the sampler based on provided data.
         Must be implemented. If the sampler is static, simply use 'pass'.

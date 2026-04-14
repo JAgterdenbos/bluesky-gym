@@ -135,18 +135,75 @@ def _get_args():
     p = argparse.ArgumentParser(description="Collect rta data step-by-step per successful episode.")
     p.add_argument("run_id", type=str, help="The ID of the run to collect data from.")
     p.add_argument("--episodes", type=int, default=100, help="Number of successful episodes to collect.")
+    p.add_argument("--deterministic", action="store_true", default=False, help="Use deterministic actions.")
+    p.add_argument("--no-fresh-start", action="store_true", default=False, help="Append to existing data.")
     p.add_argument("--out", type=str, default="rta_data.csv", help="Output file path.")
     p.add_argument("--chunk", type=int, default=25, help="Number of steps to collect per episode.")
     p.add_argument("--verbose_frequency", type=int, default=100, help="Print progress every N episodes.")
     return p.parse_args()
 
-def run_collection(experiment_cls):
+def collect(env, model, collector, max_episodes, success_key, deterministic=False, verbose_frequency=100):
+    """Core logic for running episodes and recording successful data."""
+    success_count = 0
+    
+    print(f"🏃 Collecting {max_episodes} successful episodes...")
+    print(f"Progress: [0/{max_episodes}] episodes", end="", flush=True)
+    while success_count < max_episodes:
+        obs, info = env.reset()
+        done = truncated = False
+        step = 0
+
+        # Add starting data into the buffer
+        collector.collect_step(
+            episode  = success_count + 1,
+            step     = step,
+            x        = float(obs["observation"][0]),
+            y        = float(obs["observation"][1]),
+            t        = float(obs["observation"][2]),
+            runway   = info["current_runway"],
+        )
+
+        step += 1
+        
+        while not (done or truncated):
+            action, _ = model.predict(obs, deterministic=deterministic)
+            obs, reward, done, truncated, info = env.step(action)
+
+            # Record step-by-step data into the buffer
+            collector.collect_step(
+                episode  = success_count + 1,
+                step     = step,
+                x        = float(obs["observation"][0]),
+                y        = float(obs["observation"][1]),
+                t        = float(obs["observation"][2]),
+                runway   = info["current_runway"],
+            )
+            step += 1
+        
+        is_success = info.get(success_key, False)
+
+        rta = float(obs["observation"][2])
+        
+        # Backfill RTA (sim_time) into successful steps before flushing
+        collector.finalise_episode(
+            success=is_success,
+            backfill = {"rta": rta},
+        )
+        
+        if is_success:
+            success_count += 1
+
+        #TODO: print initial loop for debugging ([0/max_episodes] episodes)
+        if success_count % verbose_frequency == 0:
+            print(f"\rProgress: [{success_count}/{max_episodes}] episodes", end="")
+
+def run_collection_cli(experiment_cls):
+    """Entry point for CLI-based data collection."""
     from os.path import join
     import bluesky_gym
-
     bluesky_gym.register_envs()
 
-    args = _get_args()
+    args = _get_args() # Retrieve CLI arguments
 
     # 1. Load Config & Model
     cfg = ExperimentConfig.load(
@@ -162,45 +219,20 @@ def run_collection(experiment_cls):
     model = cfg.model.get_algorithm().load(model_path, env=env)
     
     # 2. Setup Collector
-    collector = get_collector(args.out, args.chunk, fresh_start=True)
+    collector = get_collector(args.out, args.chunk, fresh_start=not args.no_fresh_start)
     
-    # 3. Main Loop
-    success_count, max_episodes = 0, args.episodes
-    success_key = cfg.env.success_key
-    
-    print(f"🏃 Collecting {max_episodes} successful episodes...")
-    while success_count < max_episodes:
-        obs, info = env.reset()
-        done = truncated = False
-        step = 0
-        
-        while not (done or truncated):
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, truncated, info = env.step(action)
-
-            collector.collect_step(
-                episode  = success_count + 1,
-                step     = step,
-                x        = float(obs["observation"][0]),
-                y        = float(obs["observation"][1]),
-                t        = float(obs["observation"][2]),   # normalised simt
-                runway   = info["current_runway"],
-                # Goal vector not needed as it can be obtained from the assigned runway
-                # rta is NOT known yet — backfilled in finalise_episode
-            )
-            step += 1
-        
-        is_success = info.get(success_key, False)
-        collector.finalise_episode(
-            success=is_success,
-            backfill = {"rta": float(info["sim_time"])}
-            )
-        
-        if is_success:
-            success_count += 1
-
-        if success_count % args.verbose_frequency == 0:
-            print(f"\rProgress: [{success_count}/{max_episodes}] episodes", end="")
-    
-    collector.close()
-    env.close()
+    # 3. Execute Collection with Resource Safety
+    try:
+        collect(
+            env=env,
+            model=model,
+            collector=collector,
+            max_episodes=args.episodes,
+            success_key=cfg.env.success_key,
+            deterministic=args.deterministic,
+            verbose_frequency=args.verbose_frequency
+        )
+    finally:
+        # Ensure files are flushed and environments are closed
+        collector.close()
+        env.close()

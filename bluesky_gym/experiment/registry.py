@@ -83,9 +83,9 @@ class BaseRegistry(abc.ABC):
         pre-run validation) or teardown tasks.
 
         Note:
-            If you override this method, you MUST call `self._run_experiment(...)` 
-            within your implementation. Failure to do so will prevent the 
-            registry commands from being injected into the CLI.
+            If you override this method, you MUST call `self._run_experiment(...)`
+            or `super().run_experiment(...)` to inject the registry commands
+            within your implementation.
         """
         self._run_experiment(experiment_cls, custom_commands)
 

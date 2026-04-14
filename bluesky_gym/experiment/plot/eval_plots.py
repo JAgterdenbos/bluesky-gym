@@ -31,7 +31,7 @@ def _extra_numeric_keys(rows: list[dict], yaml_data: dict | None = None) -> list
         k for k in rows[0] 
         if k not in fixed
         and isinstance(rows[0][k], (int, float))
-        and not (isinstance(rows[0][k], float) and math.isnan(rows[0][k]))
+        and any(not (isinstance(r[k], float) and math.isnan(r[k])) for r in rows)
     ]
 
     # 2. If we have YAML metadata, refine the list
@@ -81,9 +81,9 @@ def plot_eval_dashboard(
     
     # Force columns to be either 2 or 3 for optimal viewing
     cols = 3 if n_plots >= 5 or n_plots == 3 else 2
-    rows_grid = math.ceil(n_plots / cols)
+    n_rows_grid = math.ceil(n_plots / cols)
 
-    fig, axes = plt.subplots(rows_grid, cols, figsize=(cols * 6.5, rows_grid * 4.5))
+    fig, axes = plt.subplots(n_rows_grid, cols, figsize=(cols * 6.5, n_rows_grid * 4.5))
     
     # Flatten axes for easy sequential iteration
     if isinstance(axes, np.ndarray):
@@ -110,6 +110,7 @@ def plot_eval_dashboard(
         ax_viol.scatter(j + jx, ys, c=cs, s=18, alpha=0.7, zorder=3, linewidths=0)
     ax_viol.set_xticks(range(n_groups))
     ax_viol.set_xticklabels(groups)
+    ax_viol.set_xlabel("Group")
     ax_viol.set_ylabel("Total Reward")
     ax_viol.set_title("Reward Distribution by Group")
     
@@ -117,7 +118,7 @@ def plot_eval_dashboard(
     ax_viol.legend(
         handles=[Line2D([0],[0], marker="o", color="w", markerfacecolor="#2ecc71", markersize=7, label="success"),
                  Line2D([0],[0], marker="o", color="w", markerfacecolor="#e74c3c", markersize=7, label="failure")],
-        fontsize=8, loc="upper right",
+        fontsize=8,
     )
 
     # ── 2. Success rate horizontal bars ──────────────────────────────────────
@@ -127,14 +128,18 @@ def plot_eval_dashboard(
     bars = ax_sr.barh(range(n_groups), sr_vals, color=[group_colors[g] for g in groups],
                       alpha=0.75, zorder=3)
     for j, (bar, sr, n) in enumerate(zip(bars, sr_vals, n_eps)):
-        ax_sr.text(min(sr + 0.02, 0.98), bar.get_y() + bar.get_height() / 2,
-                   f"{sr:.0%}  (n={n})", va="center", fontsize=8, color="#333333")
+        ax_sr.text(min(sr + 0.05, 1), bar.get_y() + bar.get_height() / 2,
+                   f"{sr:.1%}", va="center", fontsize=8, color="#333333")
+        ax_sr.text(bar.get_x() + bar.get_width() / 2, bar.get_y() + bar.get_height() / 2,
+                   f"(n={n})", va="center", fontsize=8, color="#333333")
     overall_sr = sum(r["is_success"] for r in rows) / len(rows)
-    ax_sr.axvline(overall_sr, color="#444444", linewidth=1.5, linestyle="--", label=f"overall {overall_sr:.0%}")
+    ax_sr.axvline(overall_sr, color="#444444", linewidth=1.5, linestyle="--", label=f"overall {overall_sr:.1%}")
     ax_sr.set_yticks(range(n_groups))
     ax_sr.set_yticklabels(groups)
     ax_sr.set_xlim(0, 1.15)
     ax_sr.xaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
+    ax_sr.set_xlabel("Success Rate")
+    ax_sr.set_ylabel("Group")
     ax_sr.set_title("Success Rate by Group")
     ax_sr.legend(fontsize=8)
 
@@ -147,10 +152,15 @@ def plot_eval_dashboard(
     if len(rows) >= 5:
         rm = _smooth(np.array(rewards, dtype=float), max(3, len(rows) // 10))
         ax_time.plot(eps, rm, color="#444444", linewidth=1.5, label="rolling mean", zorder=4)
-        ax_time.legend(fontsize=8)
+        ax_time.legend(
+            handles=[Line2D([0],[0], marker="o", color="w", markerfacecolor="#2ecc71", markersize=7, label="success"),
+                     Line2D([0],[0], marker="o", color="w", markerfacecolor="#e74c3c", markersize=7, label="failure"),
+                     Line2D([0],[0], color="#444444", linewidth=1.5, label="rolling mean")],
+            fontsize=8
+        )
     ax_time.set_xlabel("Episode")
     ax_time.set_ylabel("Total Reward")
-    ax_time.set_title("Episode Timeline  (● success  ● failure)")
+    ax_time.set_title("Episode Timeline")
 
     # ── 4. Dynamic Extra Metrics (or Fallback Histogram) ─────────────────────
     if extras:
@@ -165,12 +175,31 @@ def plot_eval_dashboard(
             bars2 = ax_ext.bar(range(n_groups), vals, yerr=stds,
                                color=[group_colors[g] for g in groups],
                                alpha=0.75, capsize=4, zorder=3,
-                               error_kw=dict(elinewidth=1, ecolor="#666666"))
+                               error_kw=dict(elinewidth=1, ecolor="#666666", alpha=1))
+            
+            max_val = max([abs(x) for x in vals]) if vals else 0
+            offset = max(max_val * 0.02, 0.01)
             for bar, v in zip(bars2, vals):
-                ax_ext.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(stds) * 0.1,
-                            f"{v:.2f}", ha="center", fontsize=7, color="#333333")
+                sign = 1 if v >= 0 else -1
+                y_pos = v + (sign * offset)
+                va_align = "bottom" if v >= 0 else "top"
+                
+                ax_ext.text(bar.get_x() + bar.get_width() / 2, 
+                            y_pos,
+                            f"{v:.2f}", 
+                            ha="center", 
+                            va=va_align,
+                            fontsize=7, 
+                            rotation=90,
+                            color="#333333",
+                            # zorder=4 ensures the text and its box draw OVER the error bars
+                            zorder=4, 
+                            # Solid white box masks the error bar running behind the text
+                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1.5))
+                
             ax_ext.set_xticks(range(n_groups))
             ax_ext.set_xticklabels(groups)
+            ax_ext.set_xlabel("Group")
             ax_ext.set_ylabel(key.replace("_", " ").title())
             ax_ext.set_title(f"{key.replace('_', ' ').title()} by Group  (mean ± std)")
     else:
@@ -189,7 +218,7 @@ def plot_eval_dashboard(
         fig.delaxes(axes[i])
 
     fig.suptitle(title or f"Evaluation Dashboard — {label}", fontsize=13, fontweight="bold")
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.01, 0.01, 0.99, 0.99))
     _save_or_show(fig, out_dir, f"eval_dashboard_{label}.png", plt)
 
 def plot_eval_summary(
@@ -221,7 +250,7 @@ def plot_eval_summary(
     std_key = std_key_map.get(metric)
 
     is_pct = metric in ("success_rate",)
-    fmt_v  = (lambda v: f"{v:.0%}") if is_pct else (lambda v: f"{v:.2f}")
+    fmt_v  = (lambda v: f"{v:.1%}") if is_pct else (lambda v: f"{v:.2f}")
 
     fig, ax = plt.subplots(figsize=(max(7, n_groups * 1.4 + 2), 5))
 
@@ -260,6 +289,7 @@ def plot_eval_summary(
 
     ax.set_xticks(x)
     ax.set_xticklabels(all_groups, rotation=30, ha="right")
+    ax.set_xlabel("Group")
     ax.set_ylabel(metric.replace("_", " ").title())
     if is_pct:
         ax.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
@@ -338,12 +368,14 @@ def plot_eval_episodes(
         for bar, v in zip(bars, sr_vals):
             ax_sr.text(bar.get_x() + bar.get_width() / 2,
                        bar.get_height() + 0.015,
-                       f"{v:.0%}", ha="center", fontsize=7, color="#333333")
+                       f"{v:.1%}", ha="center", fontsize=7, color="#333333", rotation=90)
 
     ax_sr.set_xticks(x)
     ax_sr.set_xticklabels(all_groups, rotation=20, ha="right")
     ax_sr.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
     ax_sr.set_ylim(0, 1.15)
+    ax_sr.set_xlabel("Group")
+    ax_sr.set_ylabel("Success Rate")
     ax_sr.set_title("Success Rate by Group")
     ax_sr.legend(fontsize=8)
 
@@ -379,4 +411,3 @@ def plot_eval_episodes(
 
     fig.suptitle(title or "Evaluation Comparison", fontsize=13, fontweight="bold")
     _save_or_show(fig, out_dir, "eval_episodes.png", plt)
-

@@ -152,6 +152,9 @@ def run_experiment(
         sys.exit(0)
 
     if command is None:
+        if len(sys.argv) == 1:
+            _print_global_help(experiment_cls, custom_commands)
+            sys.exit(0)
         given_command = sys.argv[1]
         error_message = f"Unknown command: {given_command}" if given_command else "No command given"
         raise ValueError(error_message)

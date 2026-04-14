@@ -39,7 +39,7 @@ def run_enjoy_cli(experiment_cls) -> None:
                    help="Record episodes to video.")
     p.add_argument("--groups",       nargs="+", default=None, metavar="GROUP",
                    help="Override the eval groups from the saved config.")
-    p.add_argument("--deterministic",action="store_true", default=True)
+    p.add_argument("--undeterministic",action="store_true", default=False)
     args = p.parse_args()
 
     enjoy(
@@ -48,7 +48,7 @@ def run_enjoy_cli(experiment_cls) -> None:
         episodes=args.episodes,
         record=args.record,
         groups=args.groups,
-        deterministic=args.deterministic,
+        deterministic= not args.undeterministic,
     )
 
 def enjoy(

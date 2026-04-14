@@ -1,117 +1,133 @@
+from __future__ import annotations
+
 from abc import abstractmethod
+from typing import Any, List, Optional
+
+import numpy as np
+
 from bluesky_gym.envs.common.base_sampler import BaseSampler
 from .registry import SamplerRegistry
+from .plot import plot_rta_distribution, PlotKind, CoordSystem
 
-from typing import Any, Optional, List
 
 class RTASampler(BaseSampler):
-    def __init__(self, *args, **kwargs):
+    """
+    RTASampler — abstract base class for all RTA distribution samplers.
+
+    Design contract
+    ---------------
+    * `_sample(runway, X)` receives n-dimensional coordinate arrays.
+    * The coordinate system used to display results is a rendering concern and
+      is never seen by samplers.
+    * Subclasses register themselves automatically via `__init_subclass__`.
+    * `fit` / `_fit` follow the same public/private wrapper pattern.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._runways: Optional[List[str]] = None
 
-    def __init_subclass__(cls, name: Optional[str] = None, *args, **kwargs):
-        """Register the sampler class in the registry."""
-        super().__init_subclass__(*args, **kwargs)
-        cls_name = name or cls.__name__
-        SamplerRegistry.register(cls_name)(cls)
+    # ------------------------------------------------------------------ #
+    # Auto-registration                                                  #
+    # ------------------------------------------------------------------ #
+
+    def __init_subclass__(
+        cls, name: Optional[str] = None, **kwargs: Any
+    ) -> None:
+        super().__init_subclass__(**kwargs)
+        SamplerRegistry.register(name or cls.__name__)(cls)
+
+    # ------------------------------------------------------------------ #
+    # State queries                                                      #
+    # ------------------------------------------------------------------ #
 
     @property
     def runways(self) -> List[str]:
-        """List of available runways. Returns empty list if not fitted."""
+        """Fitted runway identifiers. Empty list if not yet fitted."""
         return self._runways or []
-    
+
     @property
     def is_fitted(self) -> bool:
-        """Boolean flag indicating if the sampler has been trained."""
+        """True once fit() has been called successfully."""
         return self._runways is not None
-    
+
     def is_runway_fitted(self, runway: str | List[str]) -> bool:
-        """
-        Check if a single runway or a list of runways are present in the sampler.
-        """
+        """Return True if every requested runway has been fitted."""
         if isinstance(runway, str):
             return runway in self.runways
         return bool(runway) and all(r in self.runways for r in runway)
-    
-    def sample(self, runway: str, *args, **kwargs) -> Any:
+
+    # ------------------------------------------------------------------ #
+    # Public fit / sample interface                                      #
+    # ------------------------------------------------------------------ #
+
+    def fit(
+        self,
+        X: List[np.ndarray],
+        y: List[np.ndarray],
+        runways: List[str] | str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Normalise runway input and delegate to _fit."""
+        self._runways = [runways] if isinstance(runways, str) else list(runways)
+        self._fit(X, y, self._runways, *args, **kwargs)
+
+    def sample(
+        self,
+        runway: str,
+        X: np.ndarray,
+    ) -> np.ndarray:
         """
-        Validate input and return a sampled value for the given runway.
+        Normalise runway input and delegate to _sample.
         """
         if not self.is_runway_fitted(runway):
             raise ValueError(
-                f"Sampler is not fitted for runway '{runway}'. "
-                f"Available runways: {self.runways}"
+                f"Runway '{runway}' has not been fitted. "
+                f"Available: {self.runways}"
             )
-        return self._sample(runway, *args, **kwargs)
-    
-    @abstractmethod
-    def _sample(self, runway: str, *args, **kwargs) -> Any:
-        """Internal sampling logic to be implemented by subclasses."""
-        pass
 
-    def fit(self, data: Any, runways: List[str] | str, *args, **kwargs) -> None:
-        """
-        Wrapper to normalise runway inputs and execute fitting logic.
-        """
-        normalised_runways = [runways] if isinstance(runways, str) else runways
-        self._runways = normalised_runways
-        self._fit(data, self._runways, *args, **kwargs)
+        return self._sample(runway, X)
 
     @abstractmethod
-    def _fit(self, data: Any, runways: List[str], *args, **kwargs) -> None:
-        """Internal fitting logic to be implemented by subclasses."""
-        pass
+    def _fit(self, X: List[np.ndarray], y: List[np.ndarray], runways: List[str], *args: Any, **kwargs: Any) -> None:
+        """Fit the model for the given runways. Implemented by subclasses."""
 
-    def plot_distribution(self, runway: str | List[str] | None = None, n_points: int = 1000):
+    @abstractmethod
+    def _sample(self, runway: str, X: np.ndarray) -> np.ndarray:
+        """
+        Predict time-to-go for the given coordinates.
+
+        Inputs are provided as unpacked arrays. For 2D samplers, 
+        subclasses should implement this as:
+        
+        def _sample(self, runway, x, y):
+            ...
+        """
+
+    def plot_distribution(
+        self,
+        runways: Optional[List[str] | str] = None,
+        n_points: int = 10_000,
+        kind: PlotKind = PlotKind.CONTOUR,
+        coord: CoordSystem = CoordSystem.CARTESIAN,
+        save_path: Optional[str] = None,
+        *,
+        sample_coord: Optional[CoordSystem] = None,
+    ) -> None:
+        """
+        Plot the fitted distribution.
+        """
         if not self.is_fitted:
-            raise RuntimeError("Sampler is not fitted yet. Call fit() first.")
+            raise RuntimeError("Call fit() before plot_distribution().")
+    
 
-        import numpy as np
-        import matplotlib.pyplot as plt
-
-        if isinstance(runway, str):
-            runways = [runway]
-        elif isinstance(runway, list):
-            runways = runway
-        else:
+        if runways is None:
             runways = self.runways
-            
-        n = len(runways)
-        ncols = min(3, n)
-        nrows = int(np.ceil(n / ncols))
+        elif isinstance(runways, str):
+            runways = [runways]
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
-
-        # Sample on a regular grid
-        xs = np.linspace(-1.5, 1.5, int(np.sqrt(n_points)))
-        ys = np.linspace(-1.5, 1.5, int(np.sqrt(n_points)))
-        xx, yy = np.meshgrid(xs, ys)
-        grid_points = np.stack([xx.ravel(), yy.ravel()], axis=1)
-
-        for ax, rwy in zip(axes.flat, runways):
-            rta_values, valid_x, valid_y = [], [], []
-
-            for x, y in grid_points:
-                try:
-                    rta = self.sample(rwy, x=float(x), y=float(y))
-                    rta_values.append(rta)
-                    valid_x.append(x)
-                    valid_y.append(y)
-                except (ValueError, KeyError):
-                    pass  # Outside convex hull or unfitted — skip
-
-            if rta_values:
-                sc = ax.scatter(valid_x, valid_y, c=rta_values, cmap="viridis", s=4, alpha=0.8)
-                plt.colorbar(sc, ax=ax, label="RTA (s)")
-            
-            ax.set_title(f"Runway {rwy}")
-            ax.set_xlabel("x")
-            ax.set_ylabel("y")
-            ax.set_aspect("equal")
-
-        for ax in axes.flat[n:]:
-            ax.set_visible(False)
-
-        plt.suptitle("RTA distribution per runway", y=1.02)
-        plt.tight_layout()
-        plt.show()
+        # The plotting utility should be updated to handle the *coords signature
+        plot_rta_distribution(
+            self.sample, runways, n_points, kind, coord, save_path, sample_coord=sample_coord
+        )
