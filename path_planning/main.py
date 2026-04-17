@@ -42,7 +42,9 @@ Usage
 from path_planning.experiment import PathPlanningExperiment
 from path_planning.registry import PathPlanningRegistry
 
-from path_planning.rta import run_collection_cli, run_fit_and_plot_cli, run_analyse_cli
+from path_planning.rta.testing import run_collection_cli, run_fit_and_plot_cli, run_analyse_cli, run_benchmark_cli
+
+import path_planning.rta.sampling
 
 #TODO: factorise the rta commands out into a common rta command with subcommands
 
@@ -50,6 +52,7 @@ def main():
     custom_commands = {
         "collect-rta": (run_collection_cli, "Collect rta data step-by-step per successful episode."),
         "analyse-rta": (run_analyse_cli, "Analyse rta data."),
+        "benchmark-rta": (run_benchmark_cli, "Benchmark samplers on rta data."),
         "fit-and-plot-rta": (run_fit_and_plot_cli, "Fit and plot rta data."),
     }
 

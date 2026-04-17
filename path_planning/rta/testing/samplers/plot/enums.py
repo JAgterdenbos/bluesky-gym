@@ -19,6 +19,10 @@ class PlotKind(Enum):
     @classmethod
     def list_names(cls) -> List[str]:
         return [k.name for k in cls]
+    
+    @classmethod
+    def from_str(cls, s: str):
+        return cls(s.lower())
 
 class CoordSystem(Enum):
     """
@@ -32,3 +36,7 @@ class CoordSystem(Enum):
     @classmethod
     def list_names(cls) -> List[str]:
         return [c.name for c in cls]
+    
+    @classmethod
+    def from_str(cls, s: str):
+        return cls(s.lower())

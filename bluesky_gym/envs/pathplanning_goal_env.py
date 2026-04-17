@@ -1,23 +1,43 @@
 """
 HER-compatible Goal-conditioned PathPlanningEnv.
 
-Changes vs. pathplanning_goal_env.py
---------------------------------------
-1. Inherits from gymnasium_robotics.GoalEnv (which itself inherits gym.Env).
-   SB3's HerReplayBuffer requires this interface.
+This module implements a Goal-Conditioned Reinforcement Learning (GCRL) environment 
+for 4D path planning. The agent must navigate to a spatial Initial Approach Fix (IAF) 
+while satisfying a Required Time of Arrival (RTA).
 
-2. observation_space is restructured into the three keys that HER expects:
-     - "observation"   : the agent's own state  (x, y, t)
-     - "achieved_goal" : what the agent has reached so far — here we use the
-                         agent's current (x, y, t) position encoded identically
-                         to the goal vector.
-     - "desired_goal"  : the target runway FAF encoded as (goal_x, goal_y, rta)
+Core Logic & GCRL Strategy:
+---------------------------
+1. The 4D Goal (RTA): 
+   While the physical simulation occurs in 2D space (x, y), the addition of a 
+   temporal constraint (t) moves the problem into the '4D' domain (3D space + time). 
+   Since the aircraft flies at a constant speed, the agent must learn 'path stretching' 
+   manoeuvers to delay its arrival to meet specific RTA constraints.
 
-3. compute_reward(achieved_goal, desired_goal, info) is implemented.
+2. GCRL Structure:
+   The environment uses a Dict observation space compatible with 'gymnasium_robotics' 
+   standards to separate the state from the targets:
+     - 'observation':   The agent's current state (normalised x, y, t).
+     - 'achieved_goal': The current state transformed into the goal format.
+     - 'desired_goal':  The target destination and RTA (normalised x, y, t).
 
-4. _get_obs() returns the new dict layout.
+3. The Necessity of the Sampler:
+   A sampler is used to provide a diverse distribution of target RTAs across episodes. 
+   Without a sampler, the agent would only memorise a single trajectory; with it, 
+   the agent learns a generalised policy capable of meeting any RTA within bounds.
 
-5. Everything else (bluesky sim, action modes, rendering) is unchanged.
+4. Why Samplers are Critical for HER (The Reinterpretation Logic):
+   Hindsight Experience Replay (HER) does not create new behaviour; it only reinterprets 
+   existing behaviour. To schedule and sequence aircraft, the RTA must be part of the 
+   'desired_goal'. HER then facilitates learning by saying: "You missed the target 
+   time of 300s and arrived at 400s. But hey, now you know exactly how to fly a 
+   path that takes 400s!" The sampler is critical because it forces the agent to 
+   explore the various time-scales that HER needs to populate the replay buffer.
+
+5. Training Compatibility:
+   This structure is optimized for HER to solve sparse-reward challenges but 
+   is fully compatible with no-HER training (e.g., standard SAC). The 'desired_goal' 
+   acts as an additional input to the policy, allowing the agent to learn via 
+   standard reward signals.
 """
 
 #TODO: Add RTA (Required Time of Arrival) to the goal vector, so that the agent can plan to arrive on time. Add a flag to specify whether to use RTA or keep it constant at 0.0. This will allow us to train agents that can not only reach the goal location, but also learn to time their arrival, which is crucial for real-world applications. 
@@ -40,8 +60,18 @@ from typing import List
 
 
 class GoalEnv(gym.Env):
-    """Abstract GoalEnv contract.  Subclasses must implement compute_reward() and _get_obs()."""
+    """
+    Abstract GoalEnv contract required by Stable Baselines3 (SB3).
+    
+    To use Hindsight Experience Replay (HER), SB3 requires the environment 
+    to implement this specific 'compute_reward' signature. This allows the 
+    replay buffer to recalculate rewards offline when goals are relabeled.
+    """
     def compute_reward(self, achieved_goal, desired_goal, infos):
+        """
+        Must return the reward for the given achieved and desired goals.
+        Signature matches the 'gymnasium_robotics' standard used by SB3.
+        """
         raise NotImplementedError
 
 # ── shared constants ──────────────────────────────────────────────────────────
@@ -89,7 +119,7 @@ IAF_DISTANCE = 30   # km
 IAF_ANGLE    = 60   # degrees
 
 MIN_DISTANCE = FAF_DISTANCE + IAF_DISTANCE
-MAX_DISTANCE = 300
+MAX_DISTANCE = 300. # km
 
 MAX_TIME = 3600 * 6 # 6 hours in seconds, Note: This is just a random choice but it should be long enough!
 
@@ -103,7 +133,9 @@ ACTION_TIME = 120 # s
 
 ACTION_FREQUENCY = int(ACTION_TIME / SIM_DT)
 
-DISTANCE_MARGIN = 4.5 # km
+DISTANCE_MARGIN = 4.5 # km    
+
+RTA_TOLERANCE = 5 * 60 / MAX_TIME # 5 minutes
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -141,6 +173,9 @@ class PathPlanningGoalEnv(GoalEnv):
         self.runways     = runways if runways is not None else ALL_RUNWAYS
         self.action_mode = action_mode
         self._rta_sampler = rta_sampler
+
+        if self._rta_sampler is not None:
+            self._rta_sampler.min_time_fn = self._min_rta_time  # type: ignore
 
         self.window_width  = 512
         self.window_height = 512
@@ -189,10 +224,6 @@ class PathPlanningGoalEnv(GoalEnv):
         self.step_reward   = 0
         self.segment_reward = 0
         self.total_reward   = 0
-        self.segment_noise  = 0
-        self.total_noise    = 0
-        self.segment_length = 0
-        self.total_length   = 0
         self.population_weight  = POPULATION_WEIGHT
         self.path_length_weight = PATH_LENGTH_WEIGHT
         self.average_noise = 0
@@ -232,9 +263,27 @@ class PathPlanningGoalEnv(GoalEnv):
         desired_goal: np.ndarray,
         infos: List[dict],
     ) -> np.ndarray:
-        if self.use_rta:
-            raise NotImplementedError("RTA-based reward is not implemented yet. Set use_rta=False or implement the RTA logic in compute_reward().")
-        
+        """
+        Computes the reward for a batch of transitions. Required by SB3's HerReplayBuffer.
+
+        Called offline by the replay buffer with synthetic goals — desired_goal is
+        replaced with what the agent actually achieved in a past episode, making the
+        time error zero by construction.
+
+        Why there is no RTA penalty here:
+        ----------------------------------
+        HER teaches RTA timing through goal relabelling, not penalisation. When the
+        agent arrives at t=400s instead of the desired t=300s, HER creates a synthetic
+        transition where desired_goal.t = 400s. Adding an RTA penalty here would
+        always be zero on HER transitions and would conflict with the relabelling
+        logic. The RTA penalty belongs only in _get_terminated(), where it shapes
+        the live reward signal without interfering with HER.
+
+        achieved_goal: the goal the agent actually reached, encoded as (x, y, t).
+        desired_goal:  the HER-relabelled target goal, encoded as (x, y, t).
+        infos:         per-transition dicts containing 'death_cause' and 'step_reward'
+                    as populated by _get_info().
+        """
         success = np.array([
             i.get("death_cause") in ("success", "wrong_runway") 
             for i in infos
@@ -269,14 +318,6 @@ class PathPlanningGoalEnv(GoalEnv):
         self.simt           = 0
         self.death_cause    = None
 
-        # ── sample goal ────────────────────────────────────────────────────────
-        self.current_runway = self.np_random.choice(self.runways)
-        self.goal_vector    = self._compute_goal_vector(self.current_runway)
-
-        # ─── compute non-overlapping runways ──────────────────────────────────
-        self._non_overlapping_runways = self._compute_non_overlapping_runways()
-
-
         # ── spawn aircraft ─────────────────────────────────────────────────────
         spawn_lat, spawn_lon, spawn_heading = self._get_spawn()
         bs.traf.cre("kl001", "a320", spawn_lat, spawn_lon, spawn_heading, ALTITUDE, SPEED)
@@ -289,6 +330,13 @@ class PathPlanningGoalEnv(GoalEnv):
 
         self.lat = bs.traf.lat[0]
         self.lon = bs.traf.lon[0]
+
+        # ── sample goal ────────────────────────────────────────────────────────
+        self.current_runway = self.np_random.choice(self.runways)
+        self.goal_vector    = self._compute_goal_vector(self.current_runway)
+
+        # ─── compute non-overlapping runways ──────────────────────────────────
+        self._non_overlapping_runways = self._compute_non_overlapping_runways()
 
         observation = self._get_obs()
         info        = self._get_info()
@@ -367,14 +415,37 @@ class PathPlanningGoalEnv(GoalEnv):
 
         obs_vec = np.array([x, y, t], dtype=np.float64)
 
+        t_achieved = t if self.use_rta else 0.0
+
+        achieved_vec = np.array([x, y, t_achieved], dtype=np.float64)
+
         return {
             "observation":   obs_vec,
-            "achieved_goal": obs_vec.copy(),
+            "achieved_goal": achieved_vec,
             "desired_goal":  self.goal_vector.copy(),
         }
+    
+    def _min_rta_time(self, X, runway: str) -> float:
+        rwy_info = RUNWAYS_SCHIPHOL_FAF[runway]
+        
+        iaf_lat, iaf_lon = fn.get_point_at_distance(
+            rwy_info["lat"], rwy_info["lon"],
+            FAF_DISTANCE + IAF_DISTANCE,
+            rwy_info["track"] - 180,
+        )
+
+        _, dis = bs.tools.geo.kwikqdrdist(
+            iaf_lat, iaf_lon, self.lat, self.lon
+        )
+
+        dis = dis * NM2M
+        dis = max(dis, 0)
+        min_rta = dis / SPEED
+
+        return min_rta / MAX_TIME
 
     def _compute_goal_vector(self, runway: str) -> np.ndarray:
-        """Encodes the runway IAF as a 4-D vector (x, y, t, heading)."""
+        """Encodes the runway IAF as a 3-D vector (x, y, t)."""
         rwy_info = RUNWAYS_SCHIPHOL_FAF[runway]
         
         # Target the IAF (Initial Approach Fix)
@@ -386,20 +457,34 @@ class PathPlanningGoalEnv(GoalEnv):
             rwy_info["track"] - 180,
         )
 
-        brg, dis = bs.tools.geo.kwikqdrdist(
+        goal_brg, goal_dis = bs.tools.geo.kwikqdrdist(
             SCHIPHOL[0], SCHIPHOL[1], iaf_lat, iaf_lon
         )
-        brg = np.radians(brg)
-        dis = dis * NM2KM / MAX_DISTANCE
+        goal_brg = np.radians(goal_brg)
+        goal_dis = goal_dis * NM2KM / MAX_DISTANCE
 
-        x = np.sin(brg) * dis
-        y = np.cos(brg) * dis
-        t = 0.0 # Placeholder for RTA
+        goal_x = np.sin(goal_brg) * goal_dis
+        goal_y = np.cos(goal_brg) * goal_dis
 
-        return np.array([x, y, t], dtype=np.float64)
+        ac_brg, ac_dis = bs.tools.geo.kwikqdrdist(
+            SCHIPHOL[0], SCHIPHOL[1], self.lat, self.lon
+        )
+
+        ac_brg = np.radians(ac_brg)
+        ac_dis = ac_dis * NM2KM / MAX_DISTANCE
+
+        ac_x = np.sin(ac_brg) * ac_dis
+        ac_y = np.cos(ac_brg) * ac_dis
+
+        goal_t = self._rta_sampler.sample(np.array([ac_x, ac_y]), self.current_runway) if self.use_rta else 0.0
+
+        return np.array([goal_x, goal_y, goal_t], dtype=np.float64)
 
     def _get_info(self) -> dict:
-        is_success = self.death_cause == "success"
+        on_time = self._is_rta_successful()
+        correct_runway = (self.death_cause == "success")
+
+        is_success = on_time and correct_runway
 
         return {
             "is_success":         is_success,   # required by GoalSuccessLoggerCallback
@@ -413,6 +498,8 @@ class PathPlanningGoalEnv(GoalEnv):
             "path_length_weight": self.path_length_weight,
             "current_runway":     self.current_runway,
             "goal_vector":        self.goal_vector.tolist(),
+            "on_time":            on_time,
+            "correct_runway":     correct_runway
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -432,10 +519,18 @@ class PathPlanningGoalEnv(GoalEnv):
         self.step_reward    += tick_reward
         self.segment_reward += tick_reward
 
+
+    def _is_rta_successful(self):
+        return np.abs(self.goal_vector[2] - (self.simt / MAX_TIME)) <= RTA_TOLERANCE if self.use_rta else True
+
     # ──────────────────────────────────────────────────────────────────────────
     # Terminal conditions
     # ──────────────────────────────────────────────────────────────────────────
-    def _get_terminated(self):
+
+    def _get_terminated(self):  
+        def _get_rta_penalty():
+            return 0.0 if self._is_rta_successful() else -1.0 #TODO: should we make it if not on time -5 and if on time +5 when using rta?
+
         self.terminated = False
         shapes = bs.tools.areafilter.basic_shapes
         line_ac = Path(np.array([[self.lat, self.lon], [bs.traf.lat[0], bs.traf.lon[0]]]))
@@ -445,7 +540,7 @@ class PathPlanningGoalEnv(GoalEnv):
 
         target_sink = Path(np.reshape(shapes[f"SINK{self.current_runway}"].coordinates, (-1, 2)))
         if target_sink.intersects_path(line_ac):
-            self.segment_reward += 10.0
+            self.segment_reward += 10.0 + _get_rta_penalty()
             self.death_cause = "success"
             self.terminated = True
             return self.terminated
@@ -549,7 +644,8 @@ class PathPlanningGoalEnv(GoalEnv):
 
     def _get_spawn(self):
         spawn_bearing  = self.np_random.uniform(0, 360)
-        spawn_distance = max(self.np_random.uniform(0, 0.95) * MAX_DISTANCE, MIN_DISTANCE + DISTANCE_MARGIN)
+        min_spawn_dist = (MIN_DISTANCE + DISTANCE_MARGIN) / MAX_DISTANCE
+        spawn_distance = self.np_random.uniform(min_spawn_dist, 0.95) * MAX_DISTANCE
         spawn_lat, spawn_lon = fn.get_point_at_distance(
             SCHIPHOL[0], SCHIPHOL[1], spawn_distance, spawn_bearing
         )
@@ -771,13 +867,17 @@ class PathPlanningGoalEnv(GoalEnv):
         # --- Draw Text Information ---
         # Calculate real-world distance based on our normalized observation vector
         obs = self._get_obs()
-        dist_norm = np.linalg.norm(obs["achieved_goal"] - obs["desired_goal"])
+        dist_norm = np.linalg.norm(obs["achieved_goal"][:2] - obs["desired_goal"][:2]) # Both are (x, y, t) and we only care about (x, y)
         dist_km = dist_norm * MAX_DISTANCE
+
+        time_to_go = obs["desired_goal"][2] - obs["achieved_goal"][2]
+        time_to_go *= MAX_TIME
 
         info_texts = [
             f"Runway: {self.current_runway}",
             f"sim time: {self.simt:.1f} s",
             f"Distance to Goal: {dist_km:.2f} km",
+            f"Time to Goal: {time_to_go:.2f} s",
             f"Segment Reward: {self.segment_reward:.2f}",
             f"Total Reward: {self.total_reward:.2f}"
         ]

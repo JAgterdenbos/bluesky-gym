@@ -91,6 +91,9 @@ def enjoy(
         video_dir = f"{cfg.save_path}/videos"
         env = RecordVideo(env, video_folder=video_dir, episode_trigger=lambda _: True)
         print(f"🎥 Recording to {video_dir}")
+        env.close()
+        return
+
 
     model_path = f"{cfg.save_path}/final_model.zip"
     model      = cfg.model.get_algorithm().load(model_path, env=env)

@@ -100,7 +100,7 @@ class BaseExperiment(abc.ABC):
         """
         return get_callbacks(self.cfg, eval_env)
 
-    def evaluate(self, model) -> dict[str, list[bool]]:
+    def evaluate(self, model, deterministic=True) -> dict[str, list[bool]]:
         """Run eval episodes and print per-group success rates.
  
         Uses cfg.env.success_key and cfg.env.group_key to read results
@@ -121,7 +121,7 @@ class BaseExperiment(abc.ABC):
             done = truncated = False
             obs, info = eval_env.reset()
             while not (done or truncated):
-                action, _ = model.predict(obs, deterministic=True)
+                action, _ = model.predict(obs, deterministic=deterministic)
                 obs, _, done, truncated, info = eval_env.step(action)
  
             group = str(info.get(group_key, "unknown")) if group_key else "all"

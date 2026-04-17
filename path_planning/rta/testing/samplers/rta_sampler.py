@@ -32,10 +32,11 @@ class RTASampler(BaseSampler):
     # ------------------------------------------------------------------ #
 
     def __init_subclass__(
-        cls, name: Optional[str] = None, **kwargs: Any
+        cls, name: Optional[str] = None, register: bool = True, **kwargs: Any
     ) -> None:
         super().__init_subclass__(**kwargs)
-        SamplerRegistry.register(name or cls.__name__)(cls)
+        if register:
+            SamplerRegistry.register(name or cls.__name__)(cls)
 
     # ------------------------------------------------------------------ #
     # State queries                                                      #
@@ -110,10 +111,10 @@ class RTASampler(BaseSampler):
         runways: Optional[List[str] | str] = None,
         n_points: int = 10_000,
         kind: PlotKind = PlotKind.CONTOUR,
-        coord: CoordSystem = CoordSystem.CARTESIAN,
+        coord: CoordSystem | str = CoordSystem.CARTESIAN,
         save_path: Optional[str] = None,
         *,
-        sample_coord: Optional[CoordSystem] = None,
+        sample_coord: Optional[CoordSystem | str] = None,
     ) -> None:
         """
         Plot the fitted distribution.
@@ -126,6 +127,12 @@ class RTASampler(BaseSampler):
             runways = self.runways
         elif isinstance(runways, str):
             runways = [runways]
+
+        if isinstance(coord, str):
+            coord = CoordSystem.from_str(coord)
+
+        if isinstance(sample_coord, str):
+            sample_coord = CoordSystem.from_str(sample_coord)
 
         # The plotting utility should be updated to handle the *coords signature
         plot_rta_distribution(

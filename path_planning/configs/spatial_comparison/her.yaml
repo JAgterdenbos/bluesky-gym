@@ -24,7 +24,7 @@ session:
   pretrained_model_path: null
   train_groups: null
   eval_groups: null
-  eval_episodes: 100
+  eval_episodes: 500
   do_train: true
   do_evaluate: true
   eval_freq: 5000

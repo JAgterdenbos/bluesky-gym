@@ -30,19 +30,18 @@ from bluesky_gym.experiment import (
     MetricExtractor,
 )
 
-from path_planning.rta import RTASampler
-
+from bluesky_gym.envs.common.base_sampler import BaseSampler
 
 # ---------------------------------------------------------------------------
 # Config subclasses
 # ---------------------------------------------------------------------------
 
-def _load_rta_sampler(path: Optional[str] = None) -> Optional[RTASampler]:
-    """Load the RTA sampler from a file. (For now we just return None.)"""
+def _load_sampler(path: Optional[str] = None) -> Optional[BaseSampler]:
+    """Load the sampler from a file."""
     if path is None or not path:
         return None
 
-    return None
+    return BaseSampler.load(path)
 
 @dataclass()
 class PathPlanningModelConfig(ModelConfig):
@@ -149,7 +148,7 @@ class PathPlanningExperiment(BaseExperiment):
             raise ValueError("env_name is not set in config!")
         
         sampler_path = env_kwargs.pop("rta_sampler_path", None)
-        rta_sampler  = _load_rta_sampler(sampler_path)
+        rta_sampler  = _load_sampler(sampler_path)
 
         env = gym.make(
             env_name,
@@ -211,6 +210,12 @@ class PathPlanningExperiment(BaseExperiment):
                 "noise_reward":   lambda info, _ok: float(
                     info.get("average_noise_rew", float("nan"))
                 ),
+                "correct_runway": lambda info, _ok: float(
+                    info.get("correct_runway", float("nan"))
+                ),
+                "on_time":        lambda info, _ok: float(
+                    info.get("on_time", float("nan"))
+                ),
             },
-            display=["flight_time", "path_length_km", "noise_reward"],
+            display=["flight_time", "path_length_km", "noise_reward", "correct_runway", "on_time"],
         )

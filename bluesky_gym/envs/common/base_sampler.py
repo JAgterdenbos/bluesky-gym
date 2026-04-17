@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 import pickle
-from typing import Any
+from typing import Any, Type, TypeVar
+
+T = TypeVar("T", bound="BaseSampler")
 
 class BaseSampler(ABC):
     """
@@ -35,13 +37,22 @@ class BaseSampler(ABC):
         Save the sampler state to a file using pickle.
         """
         with open(path, 'wb') as f:
-            pickle.dump(self.__dict__, f)
+            pickle.dump(self, f)
 
-    def load(self, path: str) -> None:
+    @classmethod
+    def load(cls: Type[T], path: str) -> T:
         """
-        Load the sampler state from a file.
+        Load the sampler object from a file and return it.
         """
         with open(path, 'rb') as f:
-            state = pickle.load(f)
-            for key, value in state.items():
-                setattr(self, key, value)
+            obj = pickle.load(f)
+            
+            # This check passes if obj is the specific class 
+            # OR any subclass of the class 'load' was called on.
+            if not isinstance(obj, cls):
+                raise TypeError(
+                    f"Loaded object of type {type(obj).__name__} "
+                    f"is not a subclass of {cls.__name__}"
+                )
+                
+            return obj

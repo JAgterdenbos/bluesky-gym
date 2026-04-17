@@ -99,7 +99,7 @@ def run_generate_config_cli(experiment_cls: Type[BaseExperiment]) -> None:
     args, _ = parser.parse_known_args()
     
     # 4. Initialize config and save to the specified location
-    cfg = ExperimentConfig.from_args(args, model_cls, env_cls)
+    cfg = ExperimentConfig.from_args(args, model_cls, env_cls, build_paths=False)
     
     # 5. Save
     caller_dir = os.path.dirname(os.path.abspath(sys.argv[0]))    

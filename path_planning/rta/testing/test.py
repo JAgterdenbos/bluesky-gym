@@ -1,4 +1,4 @@
-from path_planning.rta.samplers import *
+from path_planning.rta.testing.samplers import *
 
 from typing import List
 
@@ -12,7 +12,7 @@ def create_plots(samplers: List[str] | str, n_points: int = 10_000, *args, **kwa
     )
 
 def main():
-    from path_planning.rta.samplers.plot import PlotKind, CoordSystem
+    from path_planning.rta.testing.samplers.plot import PlotKind, CoordSystem
     samplers = ["RFRTASampler"]#["KNNRTASampler"]
 
     coords = [CoordSystem.CARTESIAN, CoordSystem.POLAR_NORTH]

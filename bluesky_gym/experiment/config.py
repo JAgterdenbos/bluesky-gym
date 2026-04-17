@@ -497,6 +497,7 @@ class ExperimentConfig:
         args,
         model_config_cls: Type[ModelConfig] = ModelConfig,
         env_config_cls:   Type[EnvConfig]   = EnvConfig,
+        build_paths:      bool              = True,
     ) -> "ExperimentConfig":
         """Build an ExperimentConfig from parsed CLI args.
  
@@ -508,7 +509,9 @@ class ExperimentConfig:
             cfg = cls._make({}, model_config_cls, env_config_cls, fresh_run_id=True)
  
         _apply_args_to_cfg(cfg, args, model_config_cls, env_config_cls)
-        cfg._build_paths()
+ 
+        if build_paths:
+            cfg._build_paths()
         return cfg
 
 

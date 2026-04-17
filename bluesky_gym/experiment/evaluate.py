@@ -22,7 +22,6 @@ import yaml
 from datetime import datetime
 from typing import Any, Callable, Optional, TypedDict, cast
  
-import bluesky_gym
 import numpy as np
  
 from .config import ExperimentConfig
@@ -119,9 +118,10 @@ def _make_record(
 def run_evaluation(
     cfg:            ExperimentConfig,
     experiment_cls,
-    n_episodes:     int,
-    groups:         Optional[list[str]],
-    render:         bool,
+    n_episodes:     int = 10,
+    groups:         Optional[list[str]] = None,
+    render:         bool = True,
+    deterministic:  bool = True,
 ) -> list[EpisodeRecord]:
     """Run n_episodes episodes; return one EpisodeRecord per episode."""
  
@@ -147,7 +147,7 @@ def run_evaluation(
         info: dict = {}
  
         while not (done or truncated):
-            action, _ = model.predict(obs, deterministic=True)
+            action, _ = model.predict(obs, deterministic=deterministic)
             if hasattr(action, "shape") and action.shape == ():
                 action = action[()]
             obs, _, done, truncated, info = env.step(action)
@@ -324,6 +324,7 @@ def evaluate(
     episodes: int | None = None,
     groups: list[str] | None = None,
     render: bool = True,
+    deterministic: bool = True,
 ) -> tuple[dict, dict]:
     """
     Programmatic API to evaluate a trained model.
@@ -356,6 +357,7 @@ def evaluate(
         n_episodes=n_episodes,
         groups=eval_groups,
         render=render,
+        deterministic=deterministic
     )
 
     # 3. Process Metrics
@@ -382,6 +384,7 @@ def run_evaluate_cli(experiment_cls):
     p.add_argument("--episodes",  type=int, default=None,  help="Override default episode count.")
     p.add_argument("--groups",    nargs="+", default=None, metavar="GROUP", help="Specific groups to test.")
     p.add_argument("--no-render", action="store_true",     help="Disable UI rendering.")
+    p.add_argument("--undeterministic",action="store_true", default=False)
     
     args = p.parse_args()
 
@@ -390,5 +393,6 @@ def run_evaluate_cli(experiment_cls):
         run_id=args.run_id,
         episodes=args.episodes,
         groups=args.groups,
-        render=not args.no_render
+        render=not args.no_render,
+        deterministic= not args.undeterministic
     )
