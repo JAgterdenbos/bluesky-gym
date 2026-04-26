@@ -42,7 +42,7 @@ Usage
 from path_planning.experiment import PathPlanningExperiment
 from path_planning.registry import PathPlanningRegistry
 
-from path_planning.rta.testing import run_collection_cli, run_fit_and_plot_cli, run_analyse_cli, run_benchmark_cli
+from path_planning.rta import run_collection_cli, run_fit_and_plot_cli, run_analyse_cli, run_benchmark_cli
 
 import path_planning.rta.sampling
 

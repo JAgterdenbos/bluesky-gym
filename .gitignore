@@ -10,3 +10,4 @@ dist/
 /experiments/results
 /path_planning/rta/plots
 /path_planning/rta/testing/plots
+path_planning/rta/data/

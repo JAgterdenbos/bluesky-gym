@@ -7,16 +7,28 @@ import numpy as np
 
 from bluesky_gym.envs.common.base_sampler import BaseSampler
 from .registry import SamplerRegistry
-from .plot import plot_rta_distribution, PlotKind, CoordSystem
+
+from .plot import PlotKind, CoordSystem
 
 
-class RTASampler(BaseSampler):
+class DTGSampler(BaseSampler):
     """
-    RTASampler — abstract base class for all RTA distribution samplers.
+    DTGSampler — abstract base class for all Distance-To-Go distribution samplers.
+
+    Predicts P(dist_to_go | x, y, t, runway), where:
+        x, y        : normalised aircraft position  [-1, 1]
+        t           : normalised elapsed time        [0, 1]
+        dist_to_go  : remaining path distance (km) = total_dist_km - path_len
+
+    Including t as a feature future-proofs the sampler for variable-speed
+    scenarios: when speed is constant, dist_to_go and rta_remaining are
+    perfectly correlated, so t adds no information. When speed varies,
+    t decouples schedule progress from physical progress, making it a
+    genuinely informative feature.
 
     Design contract
     ---------------
-    * `_sample(runway, X)` receives n-dimensional coordinate arrays.
+    * `_sample(runway, X)` receives (N, 3) arrays of [coord1, coord2, t].
     * The coordinate system used to display results is a rendering concern and
       is never seen by samplers.
     * Subclasses register themselves automatically via `__init_subclass__`.
@@ -28,7 +40,7 @@ class RTASampler(BaseSampler):
         self._runways: Optional[List[str]] = None
 
     # ------------------------------------------------------------------ #
-    # Auto-registration                                                  #
+    # Auto-registration                                                    #
     # ------------------------------------------------------------------ #
 
     def __init_subclass__(
@@ -39,7 +51,7 @@ class RTASampler(BaseSampler):
             SamplerRegistry.register(name or cls.__name__)(cls)
 
     # ------------------------------------------------------------------ #
-    # State queries                                                      #
+    # State queries                                                        #
     # ------------------------------------------------------------------ #
 
     @property
@@ -59,7 +71,7 @@ class RTASampler(BaseSampler):
         return bool(runway) and all(r in self.runways for r in runway)
 
     # ------------------------------------------------------------------ #
-    # Public fit / sample interface                                      #
+    # Public fit / sample interface                                        #
     # ------------------------------------------------------------------ #
 
     def fit(
@@ -70,7 +82,20 @@ class RTASampler(BaseSampler):
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """Normalise runway input and delegate to _fit."""
+        """
+        Fit the sampler.
+
+        Parameters
+        ----------
+        X : list of (N_i, 3) arrays
+            Each array contains [coord1, coord2, t] for runway i.
+            coord1/coord2 are in the space defined by the CoordSystem passed
+            to fit_and_plot (Cartesian or Polar). t is always normalised [0, 1].
+        y : list of (N_i,) arrays
+            dist_to_go values (km) for each sample.
+        runways : list of str or str
+            Runway identifier(s) corresponding to each array in X and y.
+        """
         self._runways = [runways] if isinstance(runways, str) else list(runways)
         self._fit(X, y, self._runways, *args, **kwargs)
 
@@ -80,30 +105,50 @@ class RTASampler(BaseSampler):
         X: np.ndarray,
     ) -> np.ndarray:
         """
-        Normalise runway input and delegate to _sample.
+        Sample dist_to_go predictions for the given inputs.
+
+        Parameters
+        ----------
+        runway : str
+            The runway identifier.
+        X : (N, 3) array
+            Columns: [coord1, coord2, t].
+
+        Returns
+        -------
+        (N,) array of predicted dist_to_go values (km).
         """
         if not self.is_runway_fitted(runway):
             raise ValueError(
                 f"Runway '{runway}' has not been fitted. "
                 f"Available: {self.runways}"
             )
-
         return self._sample(runway, X)
 
     @abstractmethod
-    def _fit(self, X: List[np.ndarray], y: List[np.ndarray], runways: List[str], *args: Any, **kwargs: Any) -> None:
+    def _fit(
+        self,
+        X: List[np.ndarray],
+        y: List[np.ndarray],
+        runways: List[str],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """Fit the model for the given runways. Implemented by subclasses."""
 
     @abstractmethod
     def _sample(self, runway: str, X: np.ndarray) -> np.ndarray:
         """
-        Predict time-to-go for the given coordinates.
+        Predict dist_to_go for the given coordinate + time inputs.
 
-        Inputs are provided as unpacked arrays. For 2D samplers, 
-        subclasses should implement this as:
-        
-        def _sample(self, runway, x, y):
-            ...
+        Parameters
+        ----------
+        runway : str
+        X : (N, 3) array — [coord1, coord2, t]
+
+        Returns
+        -------
+        (N,) array of dist_to_go predictions.
         """
 
     def plot_distribution(
@@ -116,12 +161,10 @@ class RTASampler(BaseSampler):
         *,
         sample_coord: Optional[CoordSystem | str] = None,
     ) -> None:
-        """
-        Plot the fitted distribution.
-        """
+        """Plot the fitted DTG distribution."""
+        from .plot import plot_dtg_distribution
         if not self.is_fitted:
             raise RuntimeError("Call fit() before plot_distribution().")
-    
 
         if runways is None:
             runways = self.runways
@@ -134,7 +177,7 @@ class RTASampler(BaseSampler):
         if isinstance(sample_coord, str):
             sample_coord = CoordSystem.from_str(sample_coord)
 
-        # The plotting utility should be updated to handle the *coords signature
-        plot_rta_distribution(
-            self.sample, runways, n_points, kind, coord, save_path, sample_coord=sample_coord
+        plot_dtg_distribution(
+            self.sample, runways, n_points, kind, coord, save_path,
+            sample_coord=sample_coord,
         )

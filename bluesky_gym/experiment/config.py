@@ -224,8 +224,15 @@ class SessionConfig:
     # List of callback keys to load from the registry
     callbacks: List[str] = field(default_factory=lambda: ["csv_logger", "checkpoint", "eval", "success_rate"])
 
-    # Load a pretrained model (a .zip file)
-    pretrained_model_path: Optional[str] = None
+    # Load a pretrained model — supply ONE of the two options below:
+    #   pretrained_model_path : direct path to a .zip file
+    #   pretrained_run_id     : run ID whose saved model is resolved automatically
+    # If both are set, pretrained_model_path takes precedence.
+    pretrained_model_path:    Optional[str] = None
+    pretrained_run_id:        Optional[str] = None
+    # Which saved variant to load when using pretrained_run_id.
+    # One of: "final_model", "best_model", "checkpoint_model"
+    pretrained_model_variant: str           = "final_model"
 
     # None  → use all available groups (runways, levels, …)
     train_groups: Optional[List[str]] = field(default_factory=lambda: None)
@@ -274,6 +281,8 @@ class ExperimentConfig:
         self.env.validate()
         self.model.validate()
         self._build_paths()
+        self._resolve_pretrained_path()
+
 
     def _build_paths(self) -> None:
         algo_name = self.model.algorithm.__name__ if self.model.algorithm else "UnknownAlgorithm"
@@ -287,6 +296,45 @@ class ExperimentConfig:
         self.save_freq = max(5_000, self.session.total_timesteps // 100) #TODO: make this more flexible / configurable if we want to support algorithms that don't use timesteps as their main training unit (e.g. PPO with update_epochs) or if we want a different default cadence for shorter/longer experiments.
         os.makedirs(self.log_dir,   exist_ok=True)
         os.makedirs(self.save_path, exist_ok=True)
+
+    def _resolve_pretrained_path(self) -> None:
+        """Resolve pretrained_run_id → pretrained_model_path if needed.
+ 
+        Priority: pretrained_model_path (explicit path) wins over
+        pretrained_run_id (run-based lookup).  If only pretrained_run_id
+        is set the path is resolved from the experiment tree and written
+        back into session.pretrained_model_path so all downstream code
+        can use a single field regardless of how the model was specified.
+ 
+        Allowed variants: "final_model", "best_model", "checkpoint_model".
+        """
+        sess = self.session
+ 
+        # explicit path already set — nothing to do
+        if sess.pretrained_model_path:
+            return
+ 
+        if not sess.pretrained_run_id:
+            return
+ 
+        _VALID_VARIANTS = {"final_model", "best_model", "checkpoint_model"}
+        variant = sess.pretrained_model_variant
+        if variant not in _VALID_VARIANTS:
+            raise ValueError(
+                f"pretrained_model_variant='{variant}' is not valid.\n"
+                f"Choose one of: {sorted(_VALID_VARIANTS)}"
+            )
+        
+        print(f"Resolving pretrained model path for run_id='{sess.pretrained_run_id}' and variant='{variant}'...")
+ 
+        pattern = f"./experiments/*/*/models/{sess.pretrained_run_id}/{variant}.zip"
+        matches = glob.glob(pattern)
+        if not matches:
+            raise FileNotFoundError(
+                f"No {variant}.zip found for pretrained_run_id='{sess.pretrained_run_id}'.\n"
+                f"Searched: {pattern}"
+            )
+        sess.pretrained_model_path = matches[0]
 
     # ------------------------------------------------------------------ #
     # Env kwargs properties                                               #

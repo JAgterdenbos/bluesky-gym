@@ -142,6 +142,16 @@ def _get_args():
     p.add_argument("--verbose_frequency", type=int, default=100, help="Print progress every N episodes.")
     return p.parse_args()
 
+def _path_length_km(info: dict) -> float:
+    """Helper function to calculate path length in kilometers from episode info."""
+    plw = info.get("path_length_weight", 0.0)
+    path_rew = info.get("average_path_rew", 0.0)
+    
+    if plw == 0:
+        return 0.0
+        
+    return float((path_rew / plw) * 1.852) # NM -> km
+
 def collect(env, model, collector, max_episodes, success_key, deterministic=False, verbose_frequency=100):
     """Core logic for running episodes and recording successful data."""
     success_count = 0
@@ -161,6 +171,7 @@ def collect(env, model, collector, max_episodes, success_key, deterministic=Fals
             y        = float(obs["observation"][1]),
             t        = float(obs["observation"][2]),
             runway   = info["current_runway"],
+            path_len = _path_length_km(info),
         )
 
         step += 1
@@ -177,17 +188,20 @@ def collect(env, model, collector, max_episodes, success_key, deterministic=Fals
                 y        = float(obs["observation"][1]),
                 t        = float(obs["observation"][2]),
                 runway   = info["current_runway"],
+                path_len = _path_length_km(info),
             )
             step += 1
         
         is_success = info.get(success_key, False)
 
         rta = float(obs["observation"][2])
+        total_dist_km = _path_length_km(info)
+
         
         # Backfill RTA (sim_time) into successful steps before flushing
         collector.finalise_episode(
             success=is_success,
-            backfill = {"rta": rta},
+            backfill = {"rta": rta, "total_dist_km": total_dist_km},
         )
         
         if is_success:
@@ -196,6 +210,8 @@ def collect(env, model, collector, max_episodes, success_key, deterministic=Fals
         #TODO: print initial loop for debugging ([0/max_episodes] episodes)
         if success_count % verbose_frequency == 0:
             print(f"\rProgress: [{success_count}/{max_episodes}] episodes", end="")
+    
+    print(f"\rProgress: [{success_count}/{max_episodes}] episodes")
 
 def run_collection_cli(experiment_cls):
     """Entry point for CLI-based data collection."""

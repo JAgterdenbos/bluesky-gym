@@ -3,14 +3,14 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
-from .rta_sampler import RTASampler
+from .dtg_sampler import DTGSampler
 
 from typing import List, Literal, Tuple, Union
 
 
-class MLPRTASampler(RTASampler, name="MLPRTASampler"):
+class MLPDTGSampler(DTGSampler, name="MLPDTGSampler"):
     """
-    Multi-Layer Perceptron predictor for RTA distributions.
+    Multi-Layer Perceptron predictor for DTG distributions.
 
     A fully-connected feed-forward neural network implemented via
     ``sklearn.neural_network.MLPRegressor``. Features are automatically

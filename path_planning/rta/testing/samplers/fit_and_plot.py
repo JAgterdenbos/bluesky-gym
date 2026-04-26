@@ -9,58 +9,72 @@ from .plot import PlotKind, CoordSystem
 
 def transform_coordinates(X: np.ndarray, coord: CoordSystem) -> np.ndarray:
     """
-    Transforms an (N, 2) array of Cartesian coordinates (x, y) 
+    Transform an (N, 2) array of Cartesian coordinates (x, y)
     into the specified coordinate system.
-    
-    Args:
-        X: A numpy array of shape (N, 2) representing (x, y).
-        coord: The target CoordSystem enum.
-        
-    Returns:
-        A numpy array of shape (N, 2) with the transformed coordinates.
+
+    Parameters
+    ----------
+    X : (N, 2) array of (x, y) values.
+    coord : target CoordSystem.
+
+    Returns
+    -------
+    (N, 2) array in the requested coordinate system.
     """
-    # If it's Cartesian, no math is needed. Return a copy to avoid in-place mutations.
     if coord == CoordSystem.CARTESIAN:
         return X.copy()
-        
+
     x_val = X[:, 0]
     y_val = X[:, 1]
-    
-    # Radius is the same for both polar systems
     r = np.hypot(x_val, y_val)
-    
-    if coord == CoordSystem.POLAR or coord == CoordSystem.POLAR_NORTH:
-        # Standard maths: East = 0°, Counter-Clockwise, polar_north is visual only!
+
+    if coord in (CoordSystem.POLAR, CoordSystem.POLAR_NORTH):
+        # Standard maths convention: East = 0°, counter-clockwise.
+        # POLAR_NORTH is a visual-only distinction handled at render time.
         theta = np.arctan2(y_val, x_val)
     else:
         raise ValueError(f"Unknown coordinate system: {coord}")
-        
+
     return np.column_stack((r, theta))
 
-def prepare_grouped_data(data: pd.DataFrame, coord: CoordSystem):
-    # Get the vectorised basics
+
+def prepare_grouped_data(
+    data: pd.DataFrame,
+    coord: CoordSystem,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[str]]:
+    """
+    Split data into per-runway lists of (X, y) ready for fitting.
+
+    Feature matrix X has shape (N, 3): [coord1, coord2, t].
+    Target y is dist_to_go = total_dist_km - path_len (km).
+
+    Including t as a feature future-proofs fitting for variable-speed
+    scenarios. When speed is constant, t is redundant but harmless.
+    """
     runway_categories = data["runway"].astype("category")
     runway_ids = runway_categories.cat.codes.values
     resolved_runways = runway_categories.cat.categories.tolist()
 
-    X_raw = data[["x", "y"]].values
-    X_full = transform_coordinates(X_raw, coord)
-    y_full = (data["rta"] - data["t"]).values
+    # Spatial features (coord-transformed)
+    X_spatial = transform_coordinates(data[["x", "y"]].values, coord)  # (N, 2)
 
-    # Convert to List of Numpy Arrays
-    # We use the unique integer codes to slice the data
-    X_list = []
-    y_list = []
+    # Temporal feature
+    t = data["t"].to_numpy()[:, None]  # (N, 1)
 
+    # Full feature matrix: [coord1, coord2, t]
+    X_full = np.hstack([X_spatial, t])  # (N, 3)
+
+    # Target: physical distance remaining (km)
+    y_full = (data["total_dist_km"] - data["path_len"]).values
+
+    X_list, y_list = [], []
     for i in range(len(resolved_runways)):
-        # Create a boolean mask for the current runway ID
-        mask = (runway_ids == i)
-        
-        # Append the subset of data to our lists
+        mask = runway_ids == i
         X_list.append(X_full[mask])
         y_list.append(y_full[mask])
 
     return X_list, y_list, resolved_runways
+
 
 def fit_and_plot(
     data_path: str,
@@ -73,27 +87,38 @@ def fit_and_plot(
     *,
     sample_coord: Optional[CoordSystem] = None,
 ) -> None:
-    """Fit one or more RTASamplers from collected data and plot their distributions."""
+    """
+    Fit one or more DTGSamplers from collected data and plot their distributions.
+
+    Data requirements
+    -----------------
+    The data file must contain columns: x, y, t, runway, total_dist_km, path_len.
+    The target (dist_to_go = total_dist_km - path_len) is derived automatically.
+    """
     from .registry import SamplerRegistry
 
     if sample_coord is None:
         sample_coord = coord
 
-    # Load data
     if data_path.endswith(".parquet"):
-        data = pd.read_parquet(data_path, engine="pyarrow") # type: ignore
+        data = pd.read_parquet(data_path, engine="pyarrow")  # type: ignore
     elif data_path.endswith(".csv"):
         data = pd.read_csv(data_path)
     else:
         raise ValueError(f"Unsupported format: '{data_path}'. Use .csv or .parquet.")
 
+    required = {"x", "y", "t", "runway", "total_dist_km", "path_len"}
+    missing = required - set(data.columns)
+    if missing:
+        raise ValueError(f"Data file is missing required columns: {missing}")
+
     if runways is not None:
         data = data[data["runway"].isin(runways)]
 
-    data["rta_remaining"] = data["rta"] - data["t"]
+    # Derived target — kept in data for reference / inspection
+    data = data.copy()
+    data["dist_to_go"] = data["total_dist_km"] - data["path_len"]
 
-
-    # Prepare data
     X, y, resolved_runways = prepare_grouped_data(data, sample_coord)
 
     for sampler_name in sampler_names:
@@ -118,7 +143,7 @@ def run_fit_and_plot_cli(experiment_cls) -> None:
     from .registry import SamplerRegistry
 
     p = argparse.ArgumentParser(
-        description="Fit and plot RTA samplers from collected data."
+        description="Fit and plot DTG samplers from collected data."
     )
     p.add_argument("data_path", help="Path to data file (.csv or .parquet).")
     p.add_argument(
@@ -144,7 +169,7 @@ def run_fit_and_plot_cli(experiment_cls) -> None:
         "--coord", type=lambda s: CoordSystem[s.upper()], default=CoordSystem.POLAR,
         metavar="COORD",
         help=(
-            f"Rendering coordinate system. Choices: {CoordSystem.list_names()}."
+            f"Rendering coordinate system. Choices: {CoordSystem.list_names()}. "
             "Default: POLAR."
         ),
     )
@@ -152,8 +177,8 @@ def run_fit_and_plot_cli(experiment_cls) -> None:
         "--sample-coord", type=lambda s: CoordSystem[s.upper()], default=None,
         metavar="SAMPLE_COORD",
         help=(
-            f"Coordinate system for sampling. Choices: {CoordSystem.list_names()}."
-            "Default: same as --coord. Note: This does NOT affect rendering orientation."
+            f"Coordinate system for sampling. Choices: {CoordSystem.list_names()}. "
+            "Default: same as --coord. Note: does NOT affect rendering orientation."
         ),
     )
     p.add_argument("--out", default=None, metavar="PATH", help="Save figure to file.")

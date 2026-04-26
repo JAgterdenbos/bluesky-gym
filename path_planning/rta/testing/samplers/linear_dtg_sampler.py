@@ -8,14 +8,14 @@ from sklearn.linear_model import (
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
-from .rta_sampler import RTASampler
+from .dtg_sampler import DTGSampler
 
 from typing import List
 
 
-class LinearRTASampler(RTASampler, name="LinearRTASampler"):
+class LinearDTGSampler(DTGSampler, name="LinearDTGSampler"):
     """
-    Ordinary Least Squares predictor for RTA distributions.
+    Ordinary Least Squares predictor for DTG distributions.
 
     A fast, interpretable baseline. Features are automatically standardised
     before fitting so that coefficient magnitudes are comparable.
@@ -39,9 +39,9 @@ class LinearRTASampler(RTASampler, name="LinearRTASampler"):
         return model.predict(X)
 
 
-class RidgeRTASampler(RTASampler, name="RidgeRTASampler"):
+class RidgeDTGSampler(DTGSampler, name="RidgeDTGSampler"):
     """
-    Ridge (L2-regularised) regression predictor for RTA distributions.
+    Ridge (L2-regularised) regression predictor for DTG distributions.
 
     Adds an L2 penalty to OLS, shrinking coefficients towards zero and
     reducing variance at the cost of a small bias. A good default when
@@ -72,13 +72,13 @@ class RidgeRTASampler(RTASampler, name="RidgeRTASampler"):
         return model.predict(X)
 
 
-class LassoRTASampler(RTASampler, name="LassoRTASampler"):
+class LassoDTGSampler(DTGSampler, name="LassoDTGSampler"):
     """
-    Lasso (L1-regularised) regression predictor for RTA distributions.
+    Lasso (L1-regularised) regression predictor for DTG distributions.
 
     Adds an L1 penalty which drives irrelevant feature coefficients exactly to
     zero, performing implicit feature selection. Useful when you suspect only a
-    subset of features drive RTA.
+    subset of features drive DTG.
     """
 
     def __init__(
@@ -107,13 +107,13 @@ class LassoRTASampler(RTASampler, name="LassoRTASampler"):
         return model.predict(X)
 
 
-class BayesRidgeRTASampler(RTASampler, name="BayesRidgeRTASampler"):
+class BayesRidgeDTGSampler(DTGSampler, name="BayesRidgeDTGSampler"):
     """
-    Bayesian Ridge regression predictor for RTA distributions.
+    Bayesian Ridge regression predictor for DTG distributions.
 
     Estimates regularisation strength from the data via an evidence-maximisation
     procedure, removing the need to tune ``alpha`` manually. Also provides a
-    measure of predictive uncertainty via ``predict(return_std=True)``, which
+    measure of predictive uncedtginty via ``predict(return_std=True)``, which
     can be useful for downstream risk-aware decision making.
     """
 

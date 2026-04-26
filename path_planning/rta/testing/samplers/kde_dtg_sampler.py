@@ -2,12 +2,12 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import pairwise_kernels
 
-from .rta_sampler import RTASampler
+from .dtg_sampler import DTGSampler
 from typing import List, Literal
 
-class KDERTASampler(RTASampler, name="KDERTASampler"):
+class KDEDTGSampler(DTGSampler, name="KDEDTGSampler"):
     """
-    Kernel Density Estimation (Nadaraya-Watson) regressor for RTA.
+    Kernel Density Estimation (Nadaraya-Watson) regressor for DTG.
     
     Provides a smooth, weighted average of all training samples. 
     The 'bandwidth' parameter controls the smoothness of the distribution.
@@ -40,6 +40,8 @@ class KDERTASampler(RTASampler, name="KDERTASampler"):
         if entry is None:
             raise KeyError(f"No fitted data for runway '{runway}'.")
 
+        print(f"Sampling for runway '{runway}' with bandwidth={self.bandwidth} and kernel='{self.kernel}'")
+
         scaler = entry["scaler"]
         X_train = entry["X"]
         y_train = entry["y"]
@@ -50,7 +52,7 @@ class KDERTASampler(RTASampler, name="KDERTASampler"):
         # 2. Compute the Kernel matrix (weights)
         # Gamma is often defined as 1 / (2 * bandwidth^2) for RBF/Gaussian
         gamma = 1.0 / (2.0 * self.bandwidth ** 2)
-        weights = pairwise_kernels(X_query, X_train, metric="rbf", gamma=gamma)
+        weights = pairwise_kernels(X_query, X_train, metric=self.kernel, gamma=gamma)
 
         # 3. Compute weighted average: (Sum of weight * y) / (Sum of weights)
         weighted_sum = np.dot(weights, y_train)

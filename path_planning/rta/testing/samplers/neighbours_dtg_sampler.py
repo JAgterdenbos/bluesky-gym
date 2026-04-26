@@ -1,14 +1,14 @@
 import numpy as np
 from sklearn.neighbors import KNeighborsRegressor, RadiusNeighborsRegressor
 
-from .rta_sampler import RTASampler
+from .dtg_sampler import DTGSampler
 
 from typing import List, Literal, Optional
 
 
-class KNNRTASampler(RTASampler, name="KNNRTASampler"):
+class KNNDTGSampler(DTGSampler, name="KNNDTGSampler"):
     """
-    k-Nearest-Neighbours predictor for RTA distributions.
+    k-Nearest-Neighbours predictor for DTG distributions.
 
     Predictions are the (optionally distance-weighted) average of the k
     closest training samples. Non-parametric and naturally adapts to local
@@ -41,9 +41,9 @@ class KNNRTASampler(RTASampler, name="KNNRTASampler"):
         return model.predict(X)
 
 
-class RadiusNeighborsRTASampler(RTASampler, name="RadiusNeighborsRTASampler"):
+class RadiusNeighborsDTGSampler(DTGSampler, name="RadiusNeighborsDTGSampler"):
     """
-    Radius-based Nearest-Neighbours predictor for RTA distributions.
+    Radius-based Nearest-Neighbours predictor for DTG distributions.
 
     Instead of a fixed number of neighbours, uses all training samples within
     a fixed radius. Prediction density therefore varies with local data density,

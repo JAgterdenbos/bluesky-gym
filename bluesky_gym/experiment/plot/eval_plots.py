@@ -15,7 +15,7 @@ import math
 import numpy as np
 from typing import Optional
 
-def _extra_numeric_keys(rows: list[dict], yaml_data: dict | None = None) -> list[str]:
+def _extra_numeric_keys(rows: list[dict], yaml_data: Optional[dict] = None, metrics: Optional[list[str]] = None) -> list[str]:
     """
     Return extra numeric column names beyond the four fixed fields.
     
@@ -26,7 +26,6 @@ def _extra_numeric_keys(rows: list[dict], yaml_data: dict | None = None) -> list
     if not rows:
         return []
 
-    # 1. Identify candidates from the CSV row
     candidates = [
         k for k in rows[0] 
         if k not in fixed
@@ -34,7 +33,6 @@ def _extra_numeric_keys(rows: list[dict], yaml_data: dict | None = None) -> list
         and any(not (isinstance(r[k], float) and math.isnan(r[k])) for r in rows)
     ]
 
-    # 2. If we have YAML metadata, refine the list
     if yaml_data and "overall" in yaml_data:
         # The YAML 'overall' section contains keys like 'mean_total_reward', 
         # 'std_total_reward', and our extras.
@@ -44,6 +42,9 @@ def _extra_numeric_keys(rows: list[dict], yaml_data: dict | None = None) -> list
         # (The MetricExtractor output keys match the CSV column names)
         candidates = [k for k in candidates if k in yaml_keys]
 
+    if metrics is not None:
+        candidates = [k for k in candidates if k in metrics]
+
     return candidates
 
 def plot_eval_dashboard(
@@ -52,6 +53,7 @@ def plot_eval_dashboard(
     yaml_data: dict | None = None,
     out_dir: Optional[str] = None,
     title:   Optional[str] = None,
+    metrics: Optional[list[str]] = None,
 ) -> None:
     """
     Single-run evaluation dashboard with dynamic grid sizing.
@@ -72,7 +74,7 @@ def plot_eval_dashboard(
     groups       = sorted({r["group"] for r in rows})
     n_groups     = len(groups)
     group_colors = {g: _color(i) for i, g in enumerate(groups)}
-    extras       = _extra_numeric_keys(rows, yaml_data)
+    extras       = _extra_numeric_keys(rows, yaml_data, metrics)
     by_group     = {g: [r for r in rows if r["group"] == g] for g in groups}
 
     # ── Dynamic Grid Calculation ─────────────────────────────────────────────
@@ -279,6 +281,7 @@ def plot_eval_summary(
                 ax.text(bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + (0.01 if is_pct else 0.05),
                         fmt_v(v),
+                        rotation=90 if is_pct else 0,
                         ha="center", va="bottom", fontsize=7, color="#333333")
 
         # Overall dashed line
@@ -377,7 +380,7 @@ def plot_eval_episodes(
     ax_sr.set_xlabel("Group")
     ax_sr.set_ylabel("Success Rate")
     ax_sr.set_title("Success Rate by Group")
-    ax_sr.legend(fontsize=8)
+    ax_sr.legend(fontsize=8, loc="lower left")
 
     # ── [1,0]  Episode timeline overlay ──────────────────────────────────────
     for i, (label, rows) in enumerate(zip(labels, all_rows)):

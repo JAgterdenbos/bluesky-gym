@@ -32,6 +32,7 @@ def plot(
     title:        str | None = None,
     smooth:       int = 1,
     grid:         bool = False,
+    metrics:      list[str] | None = None,
 ) -> None:
     """
     Programmatic entry point for plotting.
@@ -107,7 +108,7 @@ def plot(
                     yaml_idx = (eval_indices[i] if eval_indices and i < len(eval_indices) else 0)
                     yaml_idx = yaml_idx if yaml_idx < len(yaml_files) else 0
                     yaml_d   = _load_eval_yaml(yaml_files[yaml_idx])
-            plot_eval_dashboard(label, rows, yaml_d, out, title)
+            plot_eval_dashboard(label, rows, yaml_d, out, title, metrics)
 
     elif command in ["eval-summary", "eval-episodes"]:
         ext = "yaml" if command == "eval-summary" else "csv"
@@ -185,7 +186,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     src = tr.add_mutually_exclusive_group(required=True)
     src.add_argument(
-        "--runs",
+        "--run-ids",
         nargs="+",
         metavar="RUN_ID",
         help=(
@@ -424,6 +425,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    ed.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of metric names to include as extra panels in the "
+            "dashboard. Defaults to all numeric columns in the CSV that are also present in the YAML 'overall' section"
+        ),
+    )
+
     return p
 
 
@@ -454,4 +465,5 @@ def run_plot_cli(experiment_cls=None) -> None:
             labels=getattr(args, "labels", None),
             out=args.out,
             title=args.title,
+            metrics=getattr(args, "metrics", None),
         )

@@ -13,7 +13,7 @@ def create_plots(samplers: List[str] | str, n_points: int = 10_000, *args, **kwa
 
 def main():
     from path_planning.rta.testing.samplers.plot import PlotKind, CoordSystem
-    samplers = ["RFRTASampler"]#["KNNRTASampler"]
+    samplers = ["RFDTGSampler"]  # was RFRTASampler
 
     coords = [CoordSystem.CARTESIAN, CoordSystem.POLAR_NORTH]
     sample_coords = CoordSystem.CARTESIAN
@@ -23,14 +23,18 @@ def main():
 
     for coord in coords:
         for kind in plot_kind:
-            #save_path = f"path_planning/rta/plots/sampler/{coord.name.lower()}_{kind.name.lower()}_18R.png"
-            create_plots(samplers, coord=coord, runways = ["18R"], kind=kind, n_points=n_points, sample_coord=sample_coords)
+            create_plots(
+                samplers, coord=coord, runways=["18R"], kind=kind,
+                n_points=n_points, sample_coord=sample_coords,
+            )
 
     coord = CoordSystem.POLAR_NORTH
     kind = PlotKind.CONTOUR
     save_path = f"path_planning/rta/plots/sampler/{coord.name.lower()}_{kind.name.lower()}.png"
-    create_plots(samplers, coord=coord, kind=kind, n_points=n_points, sample_coord=sample_coords, save_path=save_path)    
-
+    create_plots(
+        samplers, coord=coord, kind=kind, n_points=n_points,
+        sample_coord=sample_coords, save_path=save_path,
+    )
 
 if __name__ == "__main__":
     main()

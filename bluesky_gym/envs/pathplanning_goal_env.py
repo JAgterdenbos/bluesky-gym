@@ -175,7 +175,7 @@ class PathPlanningGoalEnv(GoalEnv):
         self._rta_sampler = rta_sampler
 
         if self._rta_sampler is not None:
-            self._rta_sampler.min_time_fn = self._min_rta_time  # type: ignore
+            self._rta_sampler.min_fn = self._min_dist  # type: ignore
 
         self.window_width  = 512
         self.window_height = 512
@@ -425,8 +425,9 @@ class PathPlanningGoalEnv(GoalEnv):
             "desired_goal":  self.goal_vector.copy(),
         }
     
-    def _min_rta_time(self, X, runway: str) -> float:
-        rwy_info = RUNWAYS_SCHIPHOL_FAF[runway]
+    def _min_dist(self, X, runway: List[str] | str) -> float:
+        rwy = runway[0] if isinstance(runway, list) else runway
+        rwy_info = RUNWAYS_SCHIPHOL_FAF[rwy]
         
         iaf_lat, iaf_lon = fn.get_point_at_distance(
             rwy_info["lat"], rwy_info["lon"],
@@ -438,11 +439,10 @@ class PathPlanningGoalEnv(GoalEnv):
             iaf_lat, iaf_lon, self.lat, self.lon
         )
 
-        dis = dis * NM2M
-        dis = max(dis, 0)
-        min_rta = dis / SPEED
+        dis = dis * NM2KM
+        dis = min(max(dis, 0), MAX_DISTANCE)
 
-        return min_rta / MAX_TIME
+        return dis
 
     def _compute_goal_vector(self, runway: str) -> np.ndarray:
         """Encodes the runway IAF as a 3-D vector (x, y, t)."""
@@ -473,10 +473,17 @@ class PathPlanningGoalEnv(GoalEnv):
         ac_brg = np.radians(ac_brg)
         ac_dis = ac_dis * NM2KM / MAX_DISTANCE
 
+        """
         ac_x = np.sin(ac_brg) * ac_dis
         ac_y = np.cos(ac_brg) * ac_dis
+        """
 
-        goal_t = self._rta_sampler.sample(np.array([ac_x, ac_y]), self.current_runway) if self.use_rta else 0.0
+        goal_t = 0.0
+        if self.use_rta:
+            goal_dist = self._rta_sampler.sample(np.array([ac_dis, ac_brg]), runway)  # type: ignore
+            slack = 100 * self.np_random.uniform(0, 1)  # add some random slack to make it less deterministic
+            goal_dist = 1000 * (goal_dist + slack)  # convert from km to m and add slack
+            goal_t = goal_dist / SPEED / MAX_TIME  # convert distance to time and normalise
 
         return np.array([goal_x, goal_y, goal_t], dtype=np.float64)
 
@@ -529,7 +536,9 @@ class PathPlanningGoalEnv(GoalEnv):
 
     def _get_terminated(self):  
         def _get_rta_penalty():
-            return 0.0 if self._is_rta_successful() else -1.0 #TODO: should we make it if not on time -5 and if on time +5 when using rta?
+            if not self.use_rta:
+                return 0.0
+            return 5.0 if self._is_rta_successful() else -5.0
 
         self.terminated = False
         shapes = bs.tools.areafilter.basic_shapes

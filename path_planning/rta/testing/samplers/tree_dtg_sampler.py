@@ -6,13 +6,13 @@ from sklearn.ensemble import (
     HistGradientBoostingRegressor, # Added this
 )
 
-from .rta_sampler import RTASampler
+from .dtg_sampler import DTGSampler
 
 from typing import List, Optional
 
-class RFRTASampler(RTASampler, name="RFRTASampler"):
+class RFDTGSampler(DTGSampler, name="RFDTGSampler"):
     """
-    Random Forest predictor for RTA distributions.
+    Random Forest predictor for DTG distributions.
     """
 
     def __init__(
@@ -48,9 +48,9 @@ class RFRTASampler(RTASampler, name="RFRTASampler"):
         return model.predict(X)
 
 
-class ETRTASampler(RTASampler, name="ETRTASampler"):
+class ETDTGSampler(DTGSampler, name="ETDTGSampler"):
     """
-    Extremely Randomised Trees predictor for RTA distributions.
+    Extremely Randomised Trees predictor for DTG distributions.
     """
 
     def __init__(
@@ -86,9 +86,9 @@ class ETRTASampler(RTASampler, name="ETRTASampler"):
         return model.predict(X)
 
 
-class GBRTASampler(RTASampler, name="GBRTASampler"):
+class GBDTGSampler(DTGSampler, name="GBDTGSampler"):
     """
-    Gradient Boosting predictor for RTA distributions.
+    Gradient Boosting predictor for DTG distributions.
     """
 
     def __init__(
@@ -126,11 +126,11 @@ class GBRTASampler(RTASampler, name="GBRTASampler"):
         return model.predict(X)
 
 
-class HistGBRTASampler(RTASampler, name="HistGBRTASampler"):
+class HistGBDTGSampler(DTGSampler, name="HistGBDTGSampler"):
     """
-    Histogram-based Gradient Boosting predictor for RTA distributions.
+    Histogram-based Gradient Boosting predictor for DTG distributions.
 
-    A much faster alternative to GBRTASampler for large datasets, 
+    A much faster alternative to GBDTGSampler for large datasets, 
     integrated into scikit-learn. Very stable and handles missing values natively.
     """
 

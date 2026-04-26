@@ -30,18 +30,19 @@ from bluesky_gym.experiment import (
     MetricExtractor,
 )
 
-from bluesky_gym.envs.common.base_sampler import BaseSampler
+from path_planning.rta.sampling import GeoRunwaySampler
 
 # ---------------------------------------------------------------------------
 # Config subclasses
 # ---------------------------------------------------------------------------
 
-def _load_sampler(path: Optional[str] = None) -> Optional[BaseSampler]:
+def _load_sampler(path: Optional[str] = None) -> Optional[GeoRunwaySampler]:
     """Load the sampler from a file."""
     if path is None or not path:
         return None
+    
 
-    return BaseSampler.load(path)
+    return GeoRunwaySampler.load(path)
 
 @dataclass()
 class PathPlanningModelConfig(ModelConfig):
