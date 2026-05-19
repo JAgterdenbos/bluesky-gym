@@ -16,7 +16,7 @@ Core Logic & GCRL Strategy:
 2. GCRL Structure:
    The environment uses a Dict observation space compatible with 'gymnasium_robotics' 
    standards to separate the state from the targets:
-     - 'observation':   The agent's current state (normalised x, y, t).
+     - 'observation':   The agent's current state (normalised x, y, t, cos_hdg, sin_hdg).
      - 'achieved_goal': The current state transformed into the goal format.
      - 'desired_goal':  The target destination and RTA (normalised x, y, t).
 
@@ -143,7 +143,7 @@ class PathPlanningGoalEnv(GoalEnv):
 
     observation_space layout (required by HerReplayBuffer):
       {
-        "observation"   : Box(3,)  — normalised (x, y, t) of the aircraft
+        "observation"   : Box(3,)  — normalised (x, y, t, cos_hdg, sin_hdg) of the aircraft
         "achieved_goal" : Box(3,)  — same encoding as desired_goal, computed
                                      from current aircraft (x, y, t)
         "desired_goal"  : Box(3,)  — FAF position of the target runway,
@@ -180,7 +180,7 @@ class PathPlanningGoalEnv(GoalEnv):
         self.window_size   = (self.window_width, self.window_height)
 
         # ── observation space (GoalEnv layout) ────────────────────────────────
-        obs_shape  = (3,)  # (x, y, t)
+        obs_shape  = (5,)  # (x, y, t, cos_hdg sin_hdg)
         goal_shape = (3,)  # (goal_x, goal_y, rta)
         act_shape  = (2,)  # (sin_hdg, cos_hdg) or (dx, dy)
 
@@ -396,7 +396,7 @@ class PathPlanningGoalEnv(GoalEnv):
         """
         Returns the GoalEnv observation dict.
 
-          observation   - normalised (x, y) of the aircraft (same as before)
+          observation   - normalised (x, y, t), cos_hdg, sin_hdg of the aircraft (same as before)
           achieved_goal - aircraft position encoded *identically* to the goal
                           vector so compute_reward() can do a direct comparison
           desired_goal  - target runway FAF vector (constant within an episode)
@@ -411,7 +411,10 @@ class PathPlanningGoalEnv(GoalEnv):
         y = np.cos(brg) * dis
         t = self.simt / MAX_TIME
 
-        obs_vec = np.array([x, y, t], dtype=np.float64)
+        hdg = np.radians(bs.traf.hdg[0])
+        cos_hdg, sin_hdg = np.sin(hdg), np.cos(hdg) #The order of cos and sin are switched becasue heading uses North as 0 degrees not east!
+
+        obs_vec = np.array([x, y, t, cos_hdg, sin_hdg], dtype=np.float64)
 
         t_achieved = t if self.use_rta else 0.0
 

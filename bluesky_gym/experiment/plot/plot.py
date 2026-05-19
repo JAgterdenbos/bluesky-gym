@@ -19,11 +19,10 @@ from .eval_plots import plot_eval_summary, plot_eval_episodes, plot_eval_dashboa
 
 def plot(
     command:      str,
-    runs:         list[str] | None = None,
+    run_ids:      list[str] | None = None,
     discover_all: bool = False,
     from_csv:     str | None = None,
     files:        list[str] | None = None,
-    run_ids:      list[str] | None = None,
     metric:       str = "success_rate",
     labels:       list[str] | None = None,
     eval_indices: list[int] | None = None,
@@ -66,10 +65,10 @@ def plot(
             resolved_run_ids = [r for r, _ in discovered]
             all_rows = [_load_training_csv(p) for _, p in discovered]
         else:
-            if not runs:
-                print("❌ Error: Provide --runs, --all, or --from-csv for the training command.")
+            if not run_ids:
+                print("❌ Error: Provide --run_ids, --all, or --from-csv for the training command.")
                 return
-            resolved_run_ids = runs
+            resolved_run_ids = run_ids
             all_rows = [_load_training_csv(_find_training_csv(r)) for r in resolved_run_ids]
 
         # Map labels
@@ -108,7 +107,12 @@ def plot(
                     yaml_idx = (eval_indices[i] if eval_indices and i < len(eval_indices) else 0)
                     yaml_idx = yaml_idx if yaml_idx < len(yaml_files) else 0
                     yaml_d   = _load_eval_yaml(yaml_files[yaml_idx])
-            plot_eval_dashboard(label, rows, yaml_d, out, title, metrics)
+            
+            print(title, dash_labels, len(dash_labels))
+            dash_title = title
+            if dash_title and len(dash_labels) > 1:
+                dash_title = f"{dash_title} - {label}"
+            plot_eval_dashboard(label, rows, yaml_d, out, dash_title, metrics)
 
     elif command in ["eval-summary", "eval-episodes"]:
         ext = "yaml" if command == "eval-summary" else "csv"
@@ -281,7 +285,7 @@ def _build_parser() -> argparse.ArgumentParser:
             help=files_help,
         )
         src.add_argument(
-            "--run-ids",
+            "--run_ids",
             nargs="+",
             metavar="RUN_ID",
             help=(
@@ -445,7 +449,7 @@ def run_plot_cli(experiment_cls=None) -> None:
     if args.command == "training":
         plot(
             command="training",
-            runs=getattr(args, "runs", None),
+            run_ids=getattr(args, "run_ids", None),
             discover_all=getattr(args, "all", False),
             from_csv=getattr(args, "from_csv", None),
             smooth=args.smooth,

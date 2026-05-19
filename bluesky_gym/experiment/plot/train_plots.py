@@ -222,7 +222,7 @@ def plot_comparison_grid(
             lo  = np.nanmin(mat, axis=0)
             hi  = np.nanmax(mat, axis=0)
             mid = np.nanmean(mat, axis=0)
-            ax_diff.fill_between(step_arr, lo, hi, color="#888888", alpha=0.2, label="min–max range")
+            ax_diff.fill_between(step_arr, lo, hi, color="#888888", alpha=0.2, linestyle=":", label="min–max range")
             ax_diff.plot(step_arr, mid, color="#444444", linewidth=1.8, label="mean across runs")
             ax_diff.set_title("Reward Range Across Runs")
             ax_diff.set_xlabel("Environment Steps")

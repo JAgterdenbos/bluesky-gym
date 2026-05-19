@@ -56,3 +56,9 @@ def register_envs():
         entry_point="bluesky_gym.envs.pathplanning_goal_env:PathPlanningGoalEnv",
         max_episode_steps=30,
     )
+
+    register(
+        id="PathPlanningGoalEnv-v1",
+        entry_point="bluesky_gym.envs.pathplanning_goal_env_heading:PathPlanningGoalEnv",
+        max_episode_steps=30,
+    )

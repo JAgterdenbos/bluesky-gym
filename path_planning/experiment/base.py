@@ -121,8 +121,8 @@ class PathPlanningEnvConfig(EnvConfig):
 # Experiment
 # ---------------------------------------------------------------------------
 
-class PathPlanningExperiment(BaseExperiment):
-    """Experiment for PathPlanningGoalEnv-v0.
+class BasePathPlanningExperiment(BaseExperiment):
+    """Base Experiment for PathPlanningGoalEnv-v0.
 
     Plugs in:
       - SAC + HerReplayBuffer (or SAC without HER if use_her=False)

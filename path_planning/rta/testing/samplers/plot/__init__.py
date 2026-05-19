@@ -23,7 +23,7 @@ from .renderers import (
     Surface3DRenderer,
     make_renderer,
 )
-from .figure import plot_rta_distribution
+from .figure import plot_dtg_distribution
 
 __all__ = [
     "PlotKind",
@@ -34,5 +34,5 @@ __all__ = [
     "PolarContourRenderer",
     "Surface3DRenderer",
     "make_renderer",
-    "plot_rta_distribution",
+    "plot_dtg_distribution",
 ]

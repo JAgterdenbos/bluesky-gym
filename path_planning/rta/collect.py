@@ -120,14 +120,71 @@ class ParquetDataCollector(BaseDataCollector):
         if self._writer is not None:
             self._writer.close()
 
-def get_collector(output_path: str, chunk_size: int, fresh_start: bool = True):
-    """Factory function to return the correct collector based on file extension."""
-    if output_path.endswith(".parquet"):
-        return ParquetDataCollector(output_path, chunk_size, fresh_start)
-    elif output_path.endswith(".csv"):
-        return CSVDataCollector(output_path, chunk_size, fresh_start)
-    else:
-        raise ValueError(f"Unsupported file format for: {output_path}. Use .csv or .parquet")
+class VerboseDataCollector(BaseDataCollector):
+    """
+    Stores all episodes regardless of success, 
+    adding an 'is_success' column to the data.
+    """
+    
+    def finalise_episode(self, success: bool, backfill: Optional[dict] = None):
+        # 1. Prepare the update dictionary
+        update_data = backfill.copy() if backfill is not None else {}
+        update_data["is_success"] = success 
+
+        # 2. Apply updates (including success status) to every step
+        for step in self.current_episode_steps:
+            step.update(update_data)
+        
+        # 3. Always extend the buffer (ignoring the success gate)
+        self.buffer.extend(self.current_episode_steps)
+        
+        # 4. Increment success count only for chunking/flushing logic
+        self.successful_count += 1
+        
+        self.current_episode_steps = []
+
+        if self.successful_count >= self.chunk_size:
+            self._flush()
+
+class VerboseCSVCollector(VerboseDataCollector, CSVDataCollector):
+    """Combines verbose logic with CSV writing."""
+    pass
+
+class VerboseParquetCollector(VerboseDataCollector, ParquetDataCollector):
+    """Combines verbose logic with Parquet writing."""
+    pass
+
+def get_collector(output_path: str, chunk_size: int, fresh_start: bool = True, is_verbose: bool = False):
+    """
+    Factory function to return the correct collector.
+    
+    Args:
+        output_path: Path to the save file.
+        chunk_size: How many successful episodes to buffer before flushing.
+        fresh_start: If True, deletes existing file at output_path.
+        is_verbose: If True, stores all episodes (including failures).
+    """
+    ext = Path(output_path).suffix.lower()
+    
+    # Mapping table for easy extension
+    mapping = {
+        ".csv": {
+            True: VerboseCSVCollector,
+            False: CSVDataCollector
+        },
+        ".parquet": {
+            True: VerboseParquetCollector,
+            False: ParquetDataCollector
+        }
+    }
+
+    if ext not in mapping:
+        raise ValueError(f"Unsupported file format: {ext}. Use .csv or .parquet")
+
+    # Select the class based on extension and verbosity
+    collector_cls = mapping[ext][is_verbose]
+    
+    return collector_cls(output_path, chunk_size, fresh_start)
 
 def _get_args():
     import argparse
@@ -140,6 +197,8 @@ def _get_args():
     p.add_argument("--out", type=str, default="rta_data.csv", help="Output file path.")
     p.add_argument("--chunk", type=int, default=25, help="Number of steps to collect per episode.")
     p.add_argument("--verbose_frequency", type=int, default=100, help="Print progress every N episodes.")
+    p.add_argument("--verbose-store", action="store_true", default=False, help="Store all episodes, including failures.")
+    p.add_argument("--runways", type=str, nargs="*", default=None, help="Optional list of specific runways to collect (e.g. --runways 18R 36L)")
     return p.parse_args()
 
 def _path_length_km(info: dict) -> float:
@@ -153,19 +212,37 @@ def _path_length_km(info: dict) -> float:
     return float((path_rew / plw) * 1.852) # NM -> km
 
 def collect(env, model, collector, max_episodes, success_key, deterministic=False, verbose_frequency=100):
-    """Core logic for running episodes and recording successful data."""
     success_count = 0
+    total_attempts = 0  # Unique ID for every episode attempt
     
     print(f"🏃 Collecting {max_episodes} successful episodes...")
-    print(f"Progress: [0/{max_episodes}] episodes", end="", flush=True)
+    print(f"Progress: [{success_count}/{max_episodes}] successful episodes (Total attempts: 0)", end="", flush=True)
+    
     while success_count < max_episodes:
         obs, info = env.reset()
+        total_attempts += 1 
         done = truncated = False
         step = 0
 
-        # Add starting data into the buffer
+        while not (done or truncated):
+            # We use total_attempts for the 'episode' column
+            collector.collect_step(
+                episode  = total_attempts,
+                step     = step,
+                x        = float(obs["observation"][0]),
+                y        = float(obs["observation"][1]),
+                t        = float(obs["observation"][2]),
+                runway   = info["current_runway"],
+                path_len = _path_length_km(info),
+            )
+            
+            action, _ = model.predict(obs, deterministic=deterministic)
+            obs, reward, done, truncated, info = env.step(action)
+            step += 1
+        
+        # Record the final state of the episode
         collector.collect_step(
-            episode  = success_count + 1,
+            episode  = total_attempts,
             step     = step,
             x        = float(obs["observation"][0]),
             y        = float(obs["observation"][1]),
@@ -174,68 +251,64 @@ def collect(env, model, collector, max_episodes, success_key, deterministic=Fals
             path_len = _path_length_km(info),
         )
 
-        step += 1
-        
-        while not (done or truncated):
-            action, _ = model.predict(obs, deterministic=deterministic)
-            obs, reward, done, truncated, info = env.step(action)
-
-            # Record step-by-step data into the buffer
-            collector.collect_step(
-                episode  = success_count + 1,
-                step     = step,
-                x        = float(obs["observation"][0]),
-                y        = float(obs["observation"][1]),
-                t        = float(obs["observation"][2]),
-                runway   = info["current_runway"],
-                path_len = _path_length_km(info),
-            )
-            step += 1
-        
         is_success = info.get(success_key, False)
-
         rta = float(obs["observation"][2])
         total_dist_km = _path_length_km(info)
 
-        
-        # Backfill RTA (sim_time) into successful steps before flushing
         collector.finalise_episode(
             success=is_success,
             backfill = {"rta": rta, "total_dist_km": total_dist_km},
         )
-        
+
         if is_success:
             success_count += 1
 
-        #TODO: print initial loop for debugging ([0/max_episodes] episodes)
         if success_count % verbose_frequency == 0:
-            print(f"\rProgress: [{success_count}/{max_episodes}] episodes", end="")
+            print(f"\rProgress: [{success_count}/{max_episodes}] successful episodes (Total attempts: {total_attempts})", end="")
     
-    print(f"\rProgress: [{success_count}/{max_episodes}] episodes")
+    print(f"\n✅ Done. Total episodes run: {total_attempts}")
+
+def create_env_and_model(experiment_cls, run_id, runways = None, model_name="final_model.zip"):
+    from os.path import join
+
+    cfg = ExperimentConfig.load(
+        run_id, 
+        model_config_cls=experiment_cls.model_config_cls,
+        env_config_cls=experiment_cls.env_config_cls
+    )
+
+    if runways is not None:
+        cfg.env.env_kwargs.runways = runways
+
+    exp = experiment_cls(cfg)
+    env = exp.make_env(cfg.eval_env_kwargs)
+
+    model_path = join(cfg.save_path, model_name)
+    model = cfg.model.get_algorithm().load(model_path, env=env)
+
+    return env, model, cfg.env.success_key
 
 def run_collection_cli(experiment_cls):
     """Entry point for CLI-based data collection."""
-    from os.path import join
     import bluesky_gym
     bluesky_gym.register_envs()
 
     args = _get_args() # Retrieve CLI arguments
 
-    # 1. Load Config & Model
-    cfg = ExperimentConfig.load(
-        args.run_id, 
-        model_config_cls=experiment_cls.model_config_cls,
-        env_config_cls=experiment_cls.env_config_cls
+    env, model, succes_key = create_env_and_model(
+        experiment_cls=experiment_cls,
+        run_id=args.run_id,
+        runways=args.runways,
+        model_name="final_model.zip"
     )
     
-    exp = experiment_cls(cfg)
-    env = exp.make_env(cfg.eval_env_kwargs)
-
-    model_path = join(cfg.save_path, "final_model.zip")
-    model = cfg.model.get_algorithm().load(model_path, env=env)
-    
     # 2. Setup Collector
-    collector = get_collector(args.out, args.chunk, fresh_start=not args.no_fresh_start)
+    collector = get_collector(
+            args.out, 
+            args.chunk, 
+            fresh_start=not args.no_fresh_start,
+            is_verbose=args.verbose_store
+        )    
     
     # 3. Execute Collection with Resource Safety
     try:
@@ -244,7 +317,7 @@ def run_collection_cli(experiment_cls):
             model=model,
             collector=collector,
             max_episodes=args.episodes,
-            success_key=cfg.env.success_key,
+            success_key=succes_key,
             deterministic=args.deterministic,
             verbose_frequency=args.verbose_frequency
         )

@@ -39,8 +39,7 @@ Usage
   python main.py --help
 """
 
-from path_planning.experiment import PathPlanningExperiment
-from path_planning.registry import PathPlanningRegistry
+from path_planning.experiment import BasePathPlanningExperiment, PathPlanningRegistry
 
 from path_planning.rta import run_collection_cli, run_fit_and_plot_cli, run_analyse_cli, run_benchmark_cli
 
@@ -57,7 +56,7 @@ def main():
     }
 
     registry = PathPlanningRegistry()
-    registry.run_experiment(PathPlanningExperiment, custom_commands)
+    registry.run_experiment(BasePathPlanningExperiment, custom_commands)
 
 if __name__ == "__main__":
     main()

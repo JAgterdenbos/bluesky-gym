@@ -360,6 +360,8 @@ def plot_eval_episodes(
     ax_box.set_title("Reward Distribution by Group")
     ax_box.legend(fontsize=8)
 
+    min_v = 1
+
     # ── [0,1]  Success rate grouped bars ─────────────────────────────────────
     for i, (label, rows) in enumerate(zip(labels, all_rows)):
         by_group = {g: [r for r in rows if r["group"] == g] for g in all_groups}
@@ -369,14 +371,17 @@ def plot_eval_episodes(
         bars     = ax_sr.bar(x + offset, sr_vals, width=bw * 0.85,
                              color=_color(i), alpha=0.80, label=label, zorder=3)
         for bar, v in zip(bars, sr_vals):
+            min_v = min(min_v, v)
+            if v >= 0.999:
+                continue  # Skip labels for perfect scores to avoid clutter
             ax_sr.text(bar.get_x() + bar.get_width() / 2,
-                       bar.get_height() + 0.015,
-                       f"{v:.1%}", ha="center", fontsize=7, color="#333333", rotation=90)
+                       bar.get_height() + 0.003,
+                       f"{v:.1%}", ha="center", fontsize=4, color="#333333", rotation=90)
 
     ax_sr.set_xticks(x)
     ax_sr.set_xticklabels(all_groups, rotation=20, ha="right")
     ax_sr.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
-    ax_sr.set_ylim(0, 1.15)
+    ax_sr.set_ylim(min_v*0.95 - 0.02, 1.08)
     ax_sr.set_xlabel("Group")
     ax_sr.set_ylabel("Success Rate")
     ax_sr.set_title("Success Rate by Group")

@@ -24,7 +24,7 @@ Subclasses may override
 
 from __future__ import annotations
 
-import abc
+from abc import ABC, abstractmethod
 from typing import Optional, Type, TYPE_CHECKING
 
 import gymnasium as gym
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from .evaluate import MetricExtractor
 
 
-class BaseExperiment(abc.ABC):
+class BaseExperiment(ABC):
     """Abstract base for all bluesky-gym experiments.
  
     Class variables
@@ -64,7 +64,7 @@ class BaseExperiment(abc.ABC):
     # Abstract interface — must be implemented by every subclass          #
     # ------------------------------------------------------------------ #
 
-    @abc.abstractmethod
+    @abstractmethod
     def make_env(
         self,
         env_kwargs:  dict,
@@ -73,7 +73,7 @@ class BaseExperiment(abc.ABC):
         """Construct and return a single (optionally wrapped) Gymnasium env."""
         ...
 
-    @abc.abstractmethod
+    @abstractmethod
     def make_model(self, env: gym.Env):
         """Construct and return a model bound to `env`."""
         ...

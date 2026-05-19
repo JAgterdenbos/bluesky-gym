@@ -1,5 +1,5 @@
 """
-Axis renderers for RTA distribution plots.
+Axis renderers for DTG (distance-to-go) distribution plots.
 
 Each renderer knows how to draw one subplot given a pre-computed grid and mesh.
 Adding a new plot style means adding a new class — the orchestrator in figure.py
@@ -7,11 +7,12 @@ never needs to change.
 
 Public API
 ----------
-AxisRenderer    - structural Protocol (duck-typed; no inheritance required)
+AxisRenderer              - structural Protocol (duck-typed; no inheritance required)
 CartesianContourRenderer  - 2-D filled-contour on Cartesian axes
-PolarHeatmapRenderer      - pcolormesh on a polar axes
+PolarContourRenderer      - contourf on a polar axes
 Surface3DRenderer         - 3-D surface on a 3-D axes
 
+All colour values represent dist_to_go = total_dist_km − path_len (km).
 CoordSystem controls axis labelling / orientation only, never sampling.
 """
 
@@ -232,7 +233,7 @@ class Surface3DRenderer(AxisRenderer):
         except Exception:
             pass
 
-        ax.set_zlabel("RTA Remaining", labelpad=10) # TODO: move to the left
+        ax.set_zlabel("Distance to Go (km)", labelpad=10) # TODO: move to the left
         ax.set_zlim(vmin, vmax)
         ax.set_box_aspect((1, 1, 0.6))
         ax.view_init(elev=25, azim=-55)
@@ -278,7 +279,7 @@ class Surface3DRenderer(AxisRenderer):
             )
         ax.text(
             z_x, z_y, vmax + (vmax - vmin) * 0.1,
-            "RTA Remaining", color="black", ha="center", fontsize=10, fontweight="bold",
+            "Distance to Go (km)", color="black", ha="center", fontsize=10, fontweight="bold",
         )
 
         # Concentric rings

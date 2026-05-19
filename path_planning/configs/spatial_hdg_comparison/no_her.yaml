@@ -1,0 +1,39 @@
+model:
+  algorithm: SAC
+  learning_rate: 0.0003
+  verbose: 1
+  net_arch:
+    pi:
+    - 256
+    - 256
+    - 256
+    qf:
+    - 256
+    - 256
+    - 256
+  use_her: false
+  her_n_sampled_goal: 4
+  her_goal_selection_strategy: final
+session:
+  total_timesteps: 250000
+  callbacks:
+  - csv_logger
+  - checkpoint
+  - eval
+  - success_rate
+  pretrained_model_path: null
+  train_groups: null
+  eval_groups: null
+  eval_episodes: 500
+  do_train: true
+  do_evaluate: true
+  eval_freq: 5000
+  track_training_evals: true
+env:
+  env_kwargs:
+    action_mode: hdg
+    rta_sampler_path: null
+    runways: null
+  env_name: PathPlanningGoalEnv-v1
+  success_key: is_success
+  group_key: current_runway
