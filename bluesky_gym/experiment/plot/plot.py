@@ -13,8 +13,9 @@ import argparse
 import os
 
 from .data import _find_training_csv, _find_all_training_csvs, _find_eval_files, _load_eval_csv, _load_eval_yaml, _load_merged_csv, _load_training_csv, _resolve_eval_files, _list_eval_files
+from ..compare_runs import compare_evaluations, parse_rank_arg
 from .train_plots import plot_training_curves, plot_comparison_grid
-from .eval_plots import plot_eval_summary, plot_eval_episodes, plot_eval_dashboard
+from .eval_plots import plot_eval_summary, plot_eval_episodes, plot_eval_dashboard, plot_compare_evaluations
 
 
 def plot(
@@ -32,6 +33,7 @@ def plot(
     smooth:       int = 1,
     grid:         bool = False,
     metrics:      list[str] | None = None,
+    rank:         list[str] | None = None,
 ) -> None:
     """
     Programmatic entry point for plotting.
@@ -143,6 +145,35 @@ def plot(
             csv_data = [_load_eval_csv(f) for f in eval_files]
             plot_eval_episodes(plot_labels, csv_data, out, title)
 
+    elif command == "eval-compare":
+        if list_evals:
+            if not run_ids:
+                print("❌ Error: --list-evals requires --run-ids.")
+                return
+            print("📋 Available eval CSV files:")
+            _list_eval_files(run_ids, "csv")
+            return
+
+        rank_spec = parse_rank_arg(rank) if rank else None
+
+        result = compare_evaluations(
+            runs=run_ids,
+            discover_all=discover_all,
+            rank_spec=rank_spec,
+        )
+        if result is None:
+            return
+        r_ids, all_raw_rows, overall_summaries, per_group_summaries, effective_rank_spec = result
+        plot_labels = labels if labels and len(labels) == len(r_ids) else r_ids
+        plot_compare_evaluations(
+            run_ids=plot_labels,
+            all_raw_rows=all_raw_rows,
+            overall_summaries=overall_summaries,
+            per_group_summaries=per_group_summaries,
+            rank_spec=effective_rank_spec,
+            out_dir=out,
+            title=title,
+        )
     else:
         print(f"❌ Unknown command: {command}")
 
@@ -285,7 +316,7 @@ def _build_parser() -> argparse.ArgumentParser:
             help=files_help,
         )
         src.add_argument(
-            "--run_ids",
+            "--run-ids",
             nargs="+",
             metavar="RUN_ID",
             help=(
@@ -439,6 +470,60 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── eval-compare subcommand ─────────────────────────────────────────────
+    ec = sub.add_parser(
+        "eval-compare",
+        help="Cross-run evaluation comparison plot from raw episode CSVs.",
+        description=(
+            "Loads episode-level eval CSVs for one or more runs and renders a "
+            "multi-panel comparison figure: reward distributions, success rates "
+            "overall and by group, reward histograms, per-group boxplots, a "
+            "normalised ranked-metric overview, and per extra-metric violins. "
+            "Use --list-evals to inspect available CSVs per run, then "
+            "--eval-indices to select the right one."
+        ),
+    )
+    ec_src = ec.add_mutually_exclusive_group(required=True)
+    ec_src.add_argument(
+        "--run-ids", nargs="+", metavar="RUN_ID",
+        help="One or more run IDs to compare.",
+    )
+    ec_src.add_argument(
+        "--files", nargs="+", metavar="CSV_PATH",
+        help="Explicit paths to episode CSV files, one per run.",
+    )
+    ec.add_argument(
+        "--eval-indices", nargs="+", type=int, default=None, metavar="N",
+        help=(
+            "Per-run index selecting which eval CSV to use when a run has "
+            "multiple. One integer per run in --run-ids order. Default: 0."
+        ),
+    )
+    ec.add_argument(
+        "--list-evals", action="store_true", default=False,
+        help="List available eval CSVs per run and exit without plotting.",
+    )
+    ec.add_argument(
+        "--rank", nargs="+", default=None, metavar="METRIC:DIR",
+        help=(
+            "Space-separated metric:direction pairs overriding the default "
+            "rank directions. direction is 'max', 'min', or 'none'/'ignore' to exclude. "
+            "Example: --rank flight_time:min noise_reward:max step_count:none"
+        ),
+    )
+    ec.add_argument(
+        "--labels", nargs="+", default=None,
+        help="Custom legend labels, one per run. Defaults to run IDs.",
+    )
+    ec.add_argument(
+        "--out", type=str, default=None,
+        help="Directory to save the output PNG. Shows interactively if omitted.",
+    )
+    ec.add_argument(
+        "--title", type=str, default=None,
+        help="Override the default figure title.",
+    )
+
     return p
 
 
@@ -470,4 +555,16 @@ def run_plot_cli(experiment_cls=None) -> None:
             out=args.out,
             title=args.title,
             metrics=getattr(args, "metrics", None),
+        )
+    elif args.command == "eval-compare":
+        plot(
+            command="eval-compare",
+            run_ids=getattr(args, "run_ids", None),
+            files=getattr(args, "files", None),
+            eval_indices=getattr(args, "eval_indices", None),
+            list_evals=getattr(args, "list_evals", False),
+            rank=getattr(args, "rank", None),
+            labels=getattr(args, "labels", None),
+            out=args.out,
+            title=args.title,
         )

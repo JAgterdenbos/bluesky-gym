@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Type
 
 import numpy as np
 import gymnasium as gym
@@ -18,11 +18,32 @@ from path_planning.critic.continouos_critic import (
     dominance_metrics,
     SAC
 )
-from path_planning.critic.utils import heading_encoder, heading_obs_adapter
+from path_planning.critic.utils import heading_encoder, obs_adapter
+
+DEFAULT_GOAL_BONUS = 10.0
 
 # ---------------------------------------------------------------------------
 # Wrapper
 # ---------------------------------------------------------------------------
+
+def patch_goal_bonus(env: gym.Env, goal_bonus: float) -> None:
+    """
+    Monkey-patches _get_terminated on the unwrapped env to replace the
+    hardcoded 10.0 success reward with goal_bonus.
+    """
+    base = env.unwrapped
+    original = base._get_terminated.__func__  # unbound method
+
+    bonus_diff = goal_bonus - DEFAULT_GOAL_BONUS
+
+    def _get_terminated_patched(self):
+        result = original(self)
+        if self.death_cause == "success":
+            self.segment_reward += bonus_diff
+        return result
+
+    import types
+    base._get_terminated = types.MethodType(_get_terminated_patched, base)
 
 class RewardDecompositionWrapper(gym.Wrapper):
     """
@@ -85,8 +106,7 @@ class RewardDecompositionWrapper(gym.Wrapper):
                 sparse.append(0.0)
 
         return r_dense + np.array(sparse, dtype=np.float32)
-
-
+            
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -108,6 +128,9 @@ class RewardSweepEnvConfig(PathPlanningEnvConfig):
 class RewardSweepModelConfig(PathPlanningModelConfig):
     """Forces use_her=False — DecomposedSAC uses its own replay buffer."""
     use_her: bool = False
+    algorithm: type = DecomposedSAC
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +164,13 @@ class RewardScaleCriticExperiment(BaseCriticExperiment):
 
     def _extract_patch_kwargs(self, env_kwargs: dict) -> dict:
         """Pop goal_bonus so it goes to apply_env_patches, not gym.make()."""
-        return {"goal_bonus": env_kwargs.pop("goal_bonus", 10.0)}
+        return {"goal_bonus": env_kwargs.pop("goal_bonus", DEFAULT_GOAL_BONUS)}
 
     def apply_env_patches(self, env: gym.Env, **patch_kwargs) -> gym.Env:
         """Wrap the base env with the reward-decomposition layer."""
-        return RewardDecompositionWrapper(env, goal_bonus=patch_kwargs.get("goal_bonus", 10.0))
+        goal_bonus = patch_kwargs.get("goal_bonus", DEFAULT_GOAL_BONUS)
+        patch_goal_bonus(env, goal_bonus)
+        return RewardDecompositionWrapper(env, goal_bonus)
 
     # ------------------------------------------------------------------ #
     # Model                                                                #
@@ -171,37 +196,24 @@ class RewardScaleCriticExperiment(BaseCriticExperiment):
     # ------------------------------------------------------------------ #
 
     def build_probes(self, model) -> List[CriticProbe]:
-        """A single probe that captures the entire critic state."""
-        
-        def agg_all_metrics(q1, q2, obs, action):
+        """Q-value probe only. Dominance is computed post-hoc in on_probe_complete."""
+
+        def q_values_only(q1, q2, obs, action):
             import torch
-            # 1. Compute basic Q values (cheap)
             (a0, a1), (s0, s1) = model.critic.forward_decomposed(obs, action)
-            q_aug = float(torch.min(a0, a1).item())
-            q_sp  = float(torch.min(s0, s1).item())
-            
-            # 2. Compute gradients and dominance (expensive, but done once)
-            with torch.enable_grad():
-                metrics = self.analyse_dominance(
-                    obs[0].cpu().numpy(), 
-                    action[0].cpu().numpy()
-                )
-            
             return {
-                "q_aug":    q_aug,
-                "q_sparse": q_sp,
-                "q_total":  q_aug + q_sp,
-                "lambda":   metrics["lambda"],
-                "cos_theta": metrics["cos_theta"]
+                "q_aug":    float(torch.min(a0, a1).mean().item()),
+                "q_sparse": float(torch.min(s0, s1).mean().item()),
+                "q_total":  float((torch.min(a0, a1) + torch.min(s0, s1)).mean().item()),
             }
 
         return [
             CriticProbe(
-                name="decomp", # Results will be decomp_q_aug, decomp_lambda, etc.
+                name="decomp",
                 sweep_values=np.linspace(-np.pi, np.pi, 100),
                 encoder=heading_encoder,
-                obs_adapter=heading_obs_adapter,
-                agg=agg_all_metrics
+                obs_adapter=obs_adapter,
+                agg=q_values_only,
             )
         ]
 
@@ -240,3 +252,5 @@ class RewardScaleCriticExperiment(BaseCriticExperiment):
             "q_aug": q_aug,
             "q_sparse": q_sp
         }
+    
+#TODO: Run the experiment for 100_000 timesteps per goal_bonus value, sweep across a range of goal_bonus values, and plot the resulting dominance metrics to understand how reward scaling affects the critic's learning dynamics. The goal_bonus values should be something like [0, 1, 5, 10, 50, 100, 1000]. And what else should we do, for analysing the results? Maybe also plot the reward curves and success rates to see how performance correlates with dominance metrics?

@@ -15,13 +15,15 @@ model:
   her_n_sampled_goal: 4
   her_goal_selection_strategy: final
 session:
-  total_timesteps: 250000
+  total_timesteps: 350000
   callbacks:
   - csv_logger
   - checkpoint
   - eval
   - success_rate
   pretrained_model_path: null
+  pretrained_run_id: "20260504_140314"
+  pretrained_model_variant: final_model
   train_groups: null
   eval_groups: null
   eval_episodes: 500
@@ -32,7 +34,7 @@ session:
 env:
   env_kwargs:
     action_mode: hdg
-    rta_sampler_path: null
+    rta_sampler_path: path_planning/rta/data/models/runway_sampler_deterministic_polar_hdg_15.joblib
     runways: null
   env_name: PathPlanningGoalEnv-v1
   success_key: is_success

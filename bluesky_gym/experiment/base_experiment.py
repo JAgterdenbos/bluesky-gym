@@ -149,6 +149,38 @@ class BaseExperiment(ABC):
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
 
+    def load_model(self) -> None:
+        """Load a pretrained model into self._model without any training.
+ 
+        Requires cfg.session.pretrained_model_path to be set (either directly
+        or via pretrained_run_id -> _resolve_pretrained_path()).
+        """
+        cfg  = self.cfg
+        path = cfg.session.pretrained_model_path
+        if not path:
+            raise ValueError(
+                "load_model() called but cfg.session.pretrained_model_path is not set. "
+                "Set pretrained_model_path or pretrained_run_id in SessionConfig."
+            )
+ 
+        env = self.make_env(cfg.train_env_kwargs)
+        print(f"Loading pretrained model from {path} ...")
+        print(cfg.model.algorithm, cfg.model.get_algorithm().__name__)
+        model = cfg.model.get_algorithm().load(path, env=env)
+
+
+ 
+        if model is None:
+            raise ValueError(f"Model load failed for path: {path}")
+        if model.observation_space != env.observation_space:
+            raise ValueError("Pretrained model observation space does not match the environment!")
+        if model.action_space != env.action_space:
+            raise ValueError("Pretrained model action space does not match the environment!")
+ 
+        env.close()
+        self._model = model
+        print(f"Model loaded -> {path}")
+
     def train(self) -> None:
         """Build envs → model → learn → save."""
         cfg          = self.cfg
@@ -211,7 +243,10 @@ class BaseExperiment(ABC):
  
         if cfg.session.do_train:
             self.train()
-            model = getattr(self, "_model", None)
+        elif cfg.session.pretrained_model_path:
+            self.load_model()
+
+        model = getattr(self, "_model", None)
  
         if cfg.session.do_evaluate:
             if model is None:

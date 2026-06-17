@@ -16,3 +16,6 @@ def heading_obs_adapter(obs: Dict[str, torch.Tensor], val: float) -> Dict[str, t
         new_obs["observation"][:, 4] = np.sin(val)
         return new_obs
     return obs
+
+def obs_adapter(obs: Dict[str, torch.Tensor], val: float) -> Dict[str, torch.Tensor]:
+    return obs

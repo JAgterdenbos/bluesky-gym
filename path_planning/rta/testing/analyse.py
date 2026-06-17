@@ -122,8 +122,12 @@ def _load(path: str) -> pd.DataFrame:
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {missing}")
+    
+    # Check, Filter, and Remove
+    col_to_check = 'is_success'
+    if col_to_check in df.columns:
+        df = df[df[col_to_check]].drop(columns=[col_to_check])
     return df
-
 
 def _enrich(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()

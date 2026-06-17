@@ -419,3 +419,336 @@ def plot_eval_episodes(
 
     fig.suptitle(title or "Evaluation Comparison", fontsize=13, fontweight="bold")
     _save_or_show(fig, out_dir, "eval_episodes.png", plt)
+
+def _compute_pareto_front(
+    run_ids:   list[str],
+    summaries: list[dict],
+    rank_spec: dict,
+) -> tuple[list[str], dict[str, int]]:
+    """
+    Identify non-dominated runs given rank_spec objectives.
+
+    Returns (front_ids, dominated_count) where dominated_count[rid] is the
+    number of other runs that strictly dominate run rid.
+    """
+    metrics = [
+        m for m in rank_spec
+        if rank_spec[m] in (max, min) and any(
+            isinstance(s.get(m), (int, float)) and not np.isnan(s.get(m, float("nan")))
+            for s in summaries
+        )
+    ]
+
+    def _val(s: dict, m: str) -> float:
+        v = s.get(m, float("nan"))
+        if not isinstance(v, (int, float)):
+            return float("nan")
+        return -float(v) if rank_spec[m] is min else float(v)
+
+    dominated_count: dict[str, int] = {rid: 0 for rid in run_ids}
+    n = len(run_ids)
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            at_least_as_good = True
+            strictly_better  = False
+            for m in metrics:
+                vi = _val(summaries[i], m)
+                vj = _val(summaries[j], m)
+                if np.isnan(vi) or np.isnan(vj):
+                    continue
+                if vj < vi:
+                    at_least_as_good = False
+                    break
+                if vj > vi:
+                    strictly_better = True
+            if at_least_as_good and strictly_better:
+                dominated_count[run_ids[i]] += 1
+
+    front_ids = [rid for rid in run_ids if dominated_count[rid] == 0]
+    return front_ids, dominated_count
+
+
+def plot_compare_evaluations(
+    run_ids:             list[str],
+    all_raw_rows:        list[list[dict]],
+    overall_summaries:   list[dict],
+    per_group_summaries: list[dict],
+    rank_spec:           Optional[dict] = None,
+    out_dir:             Optional[str]  = None,
+    title:               Optional[str]  = None,
+) -> None:
+    """
+    Comprehensive multi-panel comparison figure for post-training evaluations.
+
+    Designed to consume the return value of compare_runs.compare_evaluations()
+    directly:
+
+        run_ids, all_raw_rows, overall_summaries, per_group_summaries, rank_spec
+            = compare_evaluations(...)
+        plot_compare_evaluations(run_ids, all_raw_rows, overall_summaries,
+                                 per_group_summaries, rank_spec)
+
+    Panels (2 × 3 grid)
+    -------------------
+    [0,0]  Overall success rate    — horizontal bars; Pareto-front runs starred.
+    [0,1]  Overall mean reward     — bars with ±std; Pareto-front runs starred.
+    [0,2]  Pareto domination rank  — horizontal bars showing dominated_count per
+                                     run (0 = on the front); front members starred.
+    [1,0]  Reward distributions    — overlapping violins from raw episode data.
+    [1,1]  Win-count scoreboard    — bar showing per-metric wins per run.
+    [1,2]  Pareto scatter          — 2-D scatter of the top-2 ranked objectives
+                                     with the Pareto front highlighted.  Falls
+                                     back to a dominance-count bar when <2
+                                     plottable objectives exist.
+
+    Parameters
+    ----------
+    rank_spec : dict mapping metric name → callable (max/min), as returned by
+                compare_evaluations().  Used to determine winners and Pareto
+                membership.  If None, no winner annotations are drawn.
+    """
+    _apply_style()
+    plt    = _plt()
+    ticker = _get_ticker()
+
+    n_runs    = len(run_ids)
+    run_color = {rid: _color(i) for i, rid in enumerate(run_ids)}
+    rank_spec = rank_spec or {}
+
+    # ── Pareto computation ────────────────────────────────────────────────────
+    front_ids: list[str] = []
+    dominated_count: dict[str, int] = {rid: 0 for rid in run_ids}
+    if rank_spec and n_runs > 1:
+        front_ids, dominated_count = _compute_pareto_front(
+            run_ids, overall_summaries, rank_spec
+        )
+
+    def _winners(summaries: list[dict], metric: str) -> set[str]:
+        fn = rank_spec.get(metric)
+        if fn is None or fn not in (max, min):
+            return set()
+        pairs = [
+            (rid, s.get(metric))
+            for rid, s in zip(run_ids, summaries)
+            if isinstance(s.get(metric), (int, float))
+            and not (isinstance(s.get(metric), float) and np.isnan(s.get(metric)))
+        ]
+        if not pairs:
+            return set()
+        best = fn(v for _, v in pairs)
+        return {rid for rid, v in pairs if v == best}
+
+    win_counts: dict[str, int] = {rid: 0 for rid in run_ids}
+    for metric in rank_spec:
+        for rid in _winners(overall_summaries, metric):
+            win_counts[rid] += 1
+
+    y_pos = np.arange(n_runs)
+
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+
+    # ── [0,0]  Overall success rate ──────────────────────────────────────────
+    ax      = axes[0, 0]
+    sr_vals = [s.get("success_rate", np.nan) for s in overall_summaries]
+    bars    = ax.barh(y_pos, sr_vals, color=[run_color[r] for r in run_ids],
+                      alpha=0.80, zorder=3)
+    for bar, rid, v in zip(bars, run_ids, sr_vals):
+        if np.isnan(v):
+            continue
+        star = "★ " if rid in front_ids else ""
+        ax.text(min(v + 0.03, 1.10), bar.get_y() + bar.get_height() / 2,
+                f"{star}{v:.1%}", va="center", fontsize=8, color="#333333")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(run_ids)
+    ax.set_xlim(0, 1.20)
+    ax.xaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
+    ax.set_xlabel("Success Rate")
+    ax.set_title("Overall Success Rate  (★ = Pareto front)")
+
+    # ── [0,1]  Overall mean reward ───────────────────────────────────────────
+    ax       = axes[0, 1]
+    rew_vals = np.array([s.get("mean_total_reward", np.nan) for s in overall_summaries])
+    rew_stds = np.array([s.get("std_total_reward",  np.nan) for s in overall_summaries])
+    bars = ax.bar(
+        y_pos, rew_vals,
+        yerr=np.where(np.isnan(rew_stds), 0, rew_stds),
+        color=[run_color[r] for r in run_ids],
+        alpha=0.80, capsize=4, zorder=3,
+        error_kw=dict(elinewidth=1, ecolor="#555555"),
+    )
+    for bar, rid, v in zip(bars, run_ids, rew_vals):
+        if np.isnan(v):
+            continue
+        star = "★" if rid in front_ids else ""
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + abs(bar.get_height()) * 0.02 + 0.01,
+                f"{star}{v:.3f}", ha="center", va="bottom", fontsize=8, color="#333333")
+    ax.set_xticks(y_pos)
+    ax.set_xticklabels(run_ids, rotation=15, ha="right")
+    ax.set_ylabel("Mean Total Reward")
+    ax.set_title("Overall Mean Reward (±std)  (★ = Pareto front)")
+
+    # ── [0,2]  Pareto domination rank ────────────────────────────────────────
+    ax          = axes[0, 2]
+    sorted_dom  = sorted(run_ids, key=lambda r: dominated_count[r])
+    dom_vals    = [dominated_count[r] for r in sorted_dom]
+    y_dom       = np.arange(len(sorted_dom))
+    bar_colors  = [
+        run_color[r] if r not in front_ids else run_color[r]
+        for r in sorted_dom
+    ]
+    bars = ax.barh(y_dom, dom_vals, color=bar_colors, alpha=0.80, zorder=3)
+    for bar, rid, v in zip(bars, sorted_dom, dom_vals):
+        star = "★ " if rid in front_ids else "  "
+        label_str = f"{star}{rid}  (dominated by {v})"
+        ax.text(
+            max(v + 0.05, 0.1),
+            bar.get_y() + bar.get_height() / 2,
+            str(v), va="center", fontsize=9, fontweight="bold", color="#333333",
+        )
+    ax.set_yticks(y_dom)
+    ax.set_yticklabels([("★ " if r in front_ids else "  ") + r for r in sorted_dom])
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    ax.set_xlabel("Number of runs that dominate this run")
+    ax.set_title("Pareto Domination Rank  (0 = non-dominated)")
+
+    # ── [1,0]  Reward distributions ──────────────────────────────────────────
+    ax               = axes[1, 0]
+    all_rewards_flat = [r["total_reward"] for rows in all_raw_rows for r in rows]
+    if all_rewards_flat and n_runs > 1:
+        vp = ax.violinplot(
+            [[r["total_reward"] for r in rows] for rows in all_raw_rows],
+            positions=np.arange(n_runs),
+            showmedians=True, showextrema=False,
+        )
+        for pc, rid in zip(vp["bodies"], run_ids):
+            pc.set_facecolor(run_color[rid])
+            pc.set_alpha(0.55)
+        vp["cmedians"].set_color("#333333")
+        vp["cmedians"].set_linewidth(2)
+        ax.set_xticks(np.arange(n_runs))
+        ax.set_xticklabels(run_ids, rotation=15, ha="right")
+    elif all_rewards_flat:
+        ax.hist([r["total_reward"] for r in all_raw_rows[0]],
+                bins=15, color=run_color[run_ids[0]], alpha=0.75, zorder=3)
+        ax.set_xticks([])
+    ax.set_ylabel("Total Reward")
+    ax.set_title("Reward Distribution (violin)")
+
+    # ── [1,1]  Win-count scoreboard ──────────────────────────────────────────
+    ax          = axes[1, 1]
+    sorted_runs = sorted(win_counts, key=lambda r: win_counts[r], reverse=True)
+    wc_vals     = [win_counts[r] for r in sorted_runs]
+    y_sc        = np.arange(len(sorted_runs))
+    bars        = ax.barh(y_sc, wc_vals,
+                          color=[run_color[r] for r in sorted_runs],
+                          alpha=0.80, zorder=3)
+    for bar, v in zip(bars, wc_vals):
+        ax.text(v + 0.05, bar.get_y() + bar.get_height() / 2,
+                str(v), va="center", fontsize=9, fontweight="bold", color="#333333")
+    ax.set_yticks(y_sc)
+    ax.set_yticklabels(sorted_runs)
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    ax.set_title("Per-Metric Win Count")
+
+    if rank_spec:
+        def dir_labels(fn):
+            if fn is max:
+                return '↑'
+            elif fn is min:
+                return '↓'
+            else:
+                return '-'
+    
+        direction_strs = [
+            f"{m}({dir_labels(fn)})"
+            for m, fn in rank_spec.items()
+        ]
+        ax.set_xlabel(
+            f"Metrics won (of {len(rank_spec)}): " + ", ".join(direction_strs),
+            fontsize=7,
+        )
+    else:
+        ax.set_xlabel("Metrics won")
+
+    # ── [1,2]  Pareto scatter (top-2 objectives) or fallback ─────────────────
+    ax = axes[1, 2]
+    # Collect objectives that have valid values for every run
+    plottable = [
+        m for m in rank_spec
+        if sum(
+            1 for s in overall_summaries
+            if isinstance(s.get(m), (int, float))
+            and not np.isnan(s.get(m, float("nan")))
+        ) == n_runs
+    ]
+
+    if len(plottable) >= 2:
+        mx, my = plottable[0], plottable[1]
+        dir_x = rank_spec[mx]
+        dir_y = rank_spec[my]
+
+        xs = np.array([s.get(mx, np.nan) for s in overall_summaries])
+        ys = np.array([s.get(my, np.nan) for s in overall_summaries])
+
+        # Plot all runs
+        for i, (rid, x, y) in enumerate(zip(run_ids, xs, ys)):
+            is_front = rid in front_ids
+            marker   = "*" if is_front else "o"
+            size     = 220 if is_front else 80
+            zorder   = 5 if is_front else 3
+            ax.scatter(x, y, color=run_color[rid], marker=marker,
+                       s=size, zorder=zorder, linewidths=0.5,
+                       edgecolors="#333333" if is_front else "none")
+            ax.annotate(
+                ("★ " if is_front else "") + rid,
+                (x, y),
+                textcoords="offset points",
+                xytext=(6, 4),
+                fontsize=7,
+                color="#333333",
+            )
+
+        # Draw step-line connecting Pareto-front points (sorted by x)
+        if len(front_ids) >= 2:
+            front_pts = sorted(
+                [(s.get(mx, np.nan), s.get(my, np.nan))
+                 for rid, s in zip(run_ids, overall_summaries)
+                 if rid in front_ids],
+                key=lambda p: p[0],
+                reverse=(dir_x is max),
+            )
+            fx, fy = zip(*front_pts)
+            ax.step(fx, fy, where="post", color="#888888",
+                    linewidth=1.2, linestyle="--", zorder=2, label="Pareto front")
+            ax.legend(fontsize=8)
+
+        hint_x = "↑" if dir_x is max else "↓"
+        hint_y = "↑" if dir_y is max else "↓"
+        ax.set_xlabel(f"{mx} {hint_x}", fontsize=9)
+        ax.set_ylabel(f"{my} {hint_y}", fontsize=9)
+        ax.set_title(f"Pareto Scatter: {mx} vs {my}")
+
+    else:
+        # Fallback: dominance-count bar (same data as [0,2] but vertical)
+        sorted_dom2 = sorted(run_ids, key=lambda r: dominated_count[r])
+        dom_vals2   = [dominated_count[r] for r in sorted_dom2]
+        y_d2        = np.arange(len(sorted_dom2))
+        ax.bar(y_d2, dom_vals2,
+               color=[run_color[r] for r in sorted_dom2],
+               alpha=0.80, zorder=3)
+        ax.set_xticks(y_d2)
+        ax.set_xticklabels(
+            [("★ " if r in front_ids else "") + r for r in sorted_dom2],
+            rotation=15, ha="right",
+        )
+        ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+        ax.set_ylabel("Dominated by N other runs")
+        ax.set_title("Pareto Domination Count  (0 = non-dominated)")
+
+    fig.suptitle(title or "Evaluation Comparison — Model/Run Ranking",
+                 fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0.01, 0.01, 0.99, 0.97))
+    _save_or_show(fig, out_dir, "eval_compare.png", plt)

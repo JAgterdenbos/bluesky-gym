@@ -237,7 +237,7 @@ class BaseCriticExperiment(BasePathPlanningExperiment):
 
     def make_env(self, env_kwargs=None, render_mode=None):
         patch_kwargs = self._extract_patch_kwargs(env_kwargs or {})
-        env = super().make_env(env_kwargs, render_mode)
+        env = super().make_env(env_kwargs or {}, render_mode)
         return self.apply_env_patches(env, **patch_kwargs)
 
     def _extract_patch_kwargs(self, env_kwargs: dict) -> dict:

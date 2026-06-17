@@ -133,7 +133,7 @@ ACTION_FREQUENCY = int(ACTION_TIME / SIM_DT)
 
 DISTANCE_MARGIN = 4.5 # km    
 
-RTA_TOLERANCE = 5 * 60 / MAX_TIME # 5 minutes
+RTA_TOLERANCE = 1 * 60 / MAX_TIME # 1 minutes
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -295,6 +295,7 @@ class PathPlanningGoalEnv(GoalEnv):
         step_rewards = np.array([i.get("step_reward", 0.0) for i in infos], dtype=np.float32)
         goal_reward = np.where(success, 10.0, 0.0)
         fail_penalty = np.where(terminal_failure, -1.0, 0.0)
+
         return (goal_reward + step_rewards + fail_penalty).astype(np.float32)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -486,10 +487,12 @@ class PathPlanningGoalEnv(GoalEnv):
         return np.array([goal_x, goal_y, goal_t], dtype=np.float64)
 
     def _get_info(self) -> dict:
-        on_time = self._is_rta_successful()
+        on_time = abs(self.goal_vector[2] - (self.simt / MAX_TIME)) <= RTA_TOLERANCE if self.use_rta else True
         correct_runway = (self.death_cause == "success")
 
         is_success = on_time and correct_runway
+
+        hdg = np.radians(bs.traf.hdg[0])
 
         return {
             "is_success":         is_success,   # required by GoalSuccessLoggerCallback
@@ -504,7 +507,8 @@ class PathPlanningGoalEnv(GoalEnv):
             "current_runway":     self.current_runway,
             "goal_vector":        self.goal_vector.tolist(),
             "on_time":            on_time,
-            "correct_runway":     correct_runway
+            "correct_runway":     correct_runway,
+            "heading":                hdg,
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -524,19 +528,20 @@ class PathPlanningGoalEnv(GoalEnv):
         self.step_reward    += tick_reward
         self.segment_reward += tick_reward
 
-
-    def _is_rta_successful(self):
-        return np.abs(self.goal_vector[2] - (self.simt / MAX_TIME)) <= RTA_TOLERANCE if self.use_rta else True
-
     # ──────────────────────────────────────────────────────────────────────────
     # Terminal conditions
     # ──────────────────────────────────────────────────────────────────────────
 
     def _get_terminated(self):  
-        def _get_rta_penalty():
+        def _get_rta_penalty_mult():
             if not self.use_rta:
-                return 0.0
-            return 5.0 if self._is_rta_successful() else -5.0
+                return 1.0
+            
+            abs_x = abs(self.goal_vector[2] - (self.simt / MAX_TIME))
+            if abs_x <= RTA_TOLERANCE:
+                return 1.0 - (abs_x / RTA_TOLERANCE)**2  # quadratic penalty within the tolerance window
+            return 0.0
+
 
         self.terminated = False
         shapes = bs.tools.areafilter.basic_shapes
@@ -547,7 +552,7 @@ class PathPlanningGoalEnv(GoalEnv):
 
         target_sink = Path(np.reshape(shapes[f"SINK{self.current_runway}"].coordinates, (-1, 2)))
         if target_sink.intersects_path(line_ac):
-            self.segment_reward += 10.0 + _get_rta_penalty()
+            self.segment_reward += (10.0 * _get_rta_penalty_mult())
             self.death_cause = "success"
             self.terminated = True
             return self.terminated
@@ -820,57 +825,16 @@ class PathPlanningGoalEnv(GoalEnv):
         y_wpt = ((-np.cos(np.deg2rad(qdr)) * dis) / (MAX_DISTANCE * 2)) * self.window_height
         pygame.draw.circle(self.surface, (255, 0, 0), (x_wpt, y_wpt), 5)
 
-        # --- Draw Vector to Goal ---
-        rwy_info = RUNWAYS_SCHIPHOL_FAF[self.current_runway]
-        goal_lat, goal_lon = fn.get_point_at_distance(
-            rwy_info["lat"], rwy_info["lon"],
-            FAF_DISTANCE,
-            rwy_info["track"] - 180,
+        # --- Draw Heading Line ---
+        hdg = bs.traf.hdg[0]  # degrees, 0=North
+        HDG_LEN = 20  # pixels
+        hx = HDG_LEN *  np.sin(np.deg2rad(hdg))
+        hy = HDG_LEN * -np.cos(np.deg2rad(hdg))
+        pygame.draw.line(
+            self.surface, (0, 0, 0),
+            (x_ac, y_ac), (x_ac + hx, y_ac + hy), 2
         )
-
-        g_qdr, g_dis = bs.tools.geo.kwikqdrdist(
-            self.screen_coords[0], self.screen_coords[1], goal_lat, goal_lon
-        )
-        g_dis_km = g_dis * NM2KM
-        x_goal = ((np.sin(np.deg2rad(g_qdr)) * g_dis_km) / (MAX_DISTANCE * 2)) * self.window_width
-        y_goal = ((-np.cos(np.deg2rad(g_qdr)) * g_dis_km) / (MAX_DISTANCE * 2)) * self.window_height
         
-        # Get the raw displacement in screen pixels
-        dx = x_goal - x_ac
-        dy = y_goal - y_ac
-        dist = np.sqrt(dx**2 + dy**2)
-
-        # 2. Normalize and Scale (only if dist > 0 to avoid division by zero)
-        
-        # Calculate the end point of the unit-direction vector
-        if dist > 0:
-            POINTER_LEN = 40  # Constant length in pixels
-            ux = (dx / dist) * POINTER_LEN
-            uy = (dy / dist) * POINTER_LEN
-        else :
-            ux, uy = 0, 0  # No direction if we're exactly at the goal
-        x_end = x_ac + ux
-        y_end = y_ac + uy
-
-        pointer_color = (0, 120, 255) # Deep sky blue
-        
-        # 3. Draw the line
-        pygame.draw.line(self.surface, pointer_color, (x_ac, y_ac), (x_end, y_end), 3)
-
-        # 4. Add the Arrowhead so it looks like a proper vector
-        angle = np.arctan2(uy, ux)
-        arrow_size = 8
-        arrow_angle = np.pi / 6 # 30 degrees
-        
-        # Right whisker
-        pygame.draw.line(self.surface, pointer_color, (x_end, y_end), 
-                        (x_end - arrow_size * np.cos(angle - arrow_angle), 
-                        y_end - arrow_size * np.sin(angle - arrow_angle)), 3)
-        # Left whisker
-        pygame.draw.line(self.surface, pointer_color, (x_end, y_end), 
-                        (x_end - arrow_size * np.cos(angle + arrow_angle), 
-                        y_end - arrow_size * np.sin(angle + arrow_angle)), 3)
-
         # --- Draw Text Information ---
         # Calculate real-world distance based on our normalized observation vector
         obs = self._get_obs()

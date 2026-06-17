@@ -26,14 +26,37 @@ def main():
     min_samples_leaf = 1
     random_state = 42
 
+    spatial_only = True
+    use_her = False
+    use_hdg = False
+    is_main = True
+
     data = "deterministic" if deterministic else "stochastic"
     coords = "polar" if polar_coords else "cartesian"
 
-    save_path = f"path_planning/rta/data/models/runway_sampler_{data}_{coords}_{n_estimators}.joblib"
+    system = "spatial" if spatial_only else "temporal"
+    model_type = "HER" if use_her else "no_HER"
 
-    data_path = f"path_planning/rta/data/rta_data_{data}.parquet"
+    extra_obs = "_hdg" if use_hdg else ""
+
+    if is_main:
+        extra_obs = f"{extra_obs}_main"
+
+    save_path = f"path_planning/rta/data/models/runway_sampler_{data}_{coords}{extra_obs}_{n_estimators}.joblib"
+
+    data_path = f"path_planning/rta/data/{system}/{model_type}{extra_obs}/rta_data_{data}.parquet"
     print(f"Loading data from {data_path}")
     df = pd.read_parquet(data_path, engine="pyarrow") # type: ignore
+
+    required = {"x", "y", "t", "runway", "total_dist_km", "path_len"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    # Check, Filter, and Remove
+    col_to_check = 'is_success'
+    if col_to_check in df.columns:
+        df = df[df[col_to_check]].drop(columns=[col_to_check])
 
     df["dist_to_go"] = df["total_dist_km"] - df["path_len"]
 

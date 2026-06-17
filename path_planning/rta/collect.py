@@ -192,10 +192,10 @@ def _get_args():
     p = argparse.ArgumentParser(description="Collect rta data step-by-step per successful episode.")
     p.add_argument("run_id", type=str, help="The ID of the run to collect data from.")
     p.add_argument("--episodes", type=int, default=100, help="Number of successful episodes to collect.")
-    p.add_argument("--deterministic", action="store_true", default=False, help="Use deterministic actions.")
+    p.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions.")
     p.add_argument("--no-fresh-start", action="store_true", default=False, help="Append to existing data.")
     p.add_argument("--out", type=str, default="rta_data.csv", help="Output file path.")
-    p.add_argument("--chunk", type=int, default=25, help="Number of steps to collect per episode.")
+    p.add_argument("--chunk", type=int, default=25, help="Number of episodes to collect per file flush.")
     p.add_argument("--verbose_frequency", type=int, default=100, help="Print progress every N episodes.")
     p.add_argument("--verbose-store", action="store_true", default=False, help="Store all episodes, including failures.")
     p.add_argument("--runways", type=str, nargs="*", default=None, help="Optional list of specific runways to collect (e.g. --runways 18R 36L)")
@@ -211,11 +211,14 @@ def _path_length_km(info: dict) -> float:
         
     return float((path_rew / plw) * 1.852) # NM -> km
 
-def collect(env, model, collector, max_episodes, success_key, deterministic=False, verbose_frequency=100):
+def collect(env, model, collector, max_episodes, success_key, stochastic=False, verbose_frequency=100):
     success_count = 0
     total_attempts = 0  # Unique ID for every episode attempt
+
+    is_spatial = not env.unwrapped.use_rta #Note: this assumes that env is wrapped by a gym Monitor
+    rta_key = "observation" if is_spatial else "desired_goal"
     
-    print(f"🏃 Collecting {max_episodes} successful episodes...")
+    print(f"🏃 Collecting {max_episodes} successful episodes... (mode: {"spatial" if is_spatial else "spatial-temporal"})")
     print(f"Progress: [{success_count}/{max_episodes}] successful episodes (Total attempts: 0)", end="", flush=True)
     
     while success_count < max_episodes:
@@ -234,30 +237,39 @@ def collect(env, model, collector, max_episodes, success_key, deterministic=Fals
                 t        = float(obs["observation"][2]),
                 runway   = info["current_runway"],
                 path_len = _path_length_km(info),
+                heading  = info.get("heading", 0)
             )
             
-            action, _ = model.predict(obs, deterministic=deterministic)
+            action, _ = model.predict(obs, deterministic=not stochastic)
             obs, reward, done, truncated, info = env.step(action)
             step += 1
         
+        t = float(obs["observation"][2])
+
         # Record the final state of the episode
         collector.collect_step(
             episode  = total_attempts,
             step     = step,
             x        = float(obs["observation"][0]),
             y        = float(obs["observation"][1]),
-            t        = float(obs["observation"][2]),
+            t        = t,
             runway   = info["current_runway"],
             path_len = _path_length_km(info),
+            heading  = info.get("heading", 0)
         )
 
         is_success = info.get(success_key, False)
-        rta = float(obs["observation"][2])
+        rta = float(obs[rta_key][2])
         total_dist_km = _path_length_km(info)
+
+        backfill = {"rta": rta, "total_dist_km": total_dist_km}
+
+        if not is_spatial:
+            backfill["delay"] = rta - t
 
         collector.finalise_episode(
             success=is_success,
-            backfill = {"rta": rta, "total_dist_km": total_dist_km},
+            backfill = backfill,
         )
 
         if is_success:
@@ -318,7 +330,7 @@ def run_collection_cli(experiment_cls):
             collector=collector,
             max_episodes=args.episodes,
             success_key=succes_key,
-            deterministic=args.deterministic,
+            stochastic=args.stochastic,
             verbose_frequency=args.verbose_frequency
         )
     finally:

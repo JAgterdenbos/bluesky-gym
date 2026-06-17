@@ -9,7 +9,7 @@ from pathlib import Path
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from .samplers import SamplerRegistry
+from path_planning.rta.testing.samplers import SamplerRegistry
 
 from typing import Optional, List, Dict, Any
 
@@ -130,6 +130,11 @@ def load_and_prep_data(
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {missing}")
+    
+    # Check, Filter, and Remove
+    col_to_check = 'is_success'
+    if col_to_check in df.columns:
+        df = df[df[col_to_check]].drop(columns=[col_to_check])
 
     df["dist_to_go"] = df["total_dist_km"] - df["path_len"]
 
@@ -719,6 +724,7 @@ def benchmark(
     n_bins: int = 5,
     use_log_target: bool = False,
     epsilon: float = 1e-6,
+    no_plot: bool = False,
 ):
     out_path = Path(save_dir) if save_dir is not None else None
 
@@ -783,21 +789,39 @@ def benchmark(
             print(f"\n⚠️  {len(tied)} models tied best for R² "
                   f"(within {TIE_TOLERANCE:.0%}): "
                   f"{', '.join(tied['Model'].tolist())}")
+
+    # ── Text Alternative for Plots ─────────────────────────────────────────
+    if no_plot:
+        print(f"\n{'─' * 75}")
+        print("🗺️  Per-Runway R² Matrix (CV mean across folds):")
+        print(f"{'─' * 75}")
+        if not per_rwy_df.empty:
+            print(per_rwy_df.to_string())
+            
+        best_name = results_df.iloc[0]["Model"] if not results_df.empty else None
+        if best_name and best_y_true.size > 0 and best_y_pred.size > 0:
+            residuals = best_y_pred - best_y_true
+            print(f"\n{'─' * 75}")
+            print(f"📈  Error Residuals Profile — {best_name} (Last CV Fold):")
+            print(f"{'─' * 75}")
+            print(f"  Mean Error (Bias)      : {residuals.mean():+.4f} km")
+            print(f"  Std Dev of Error (SD)  : {residuals.std():.4f} km")
+            print(f"  Max Underestimation    : {residuals.min():+.4f} km")
+            print(f"  Max Overestimation     : {residuals.max():+.4f} km")
+
     print("=" * 75)
 
     # ── Plots ──────────────────────────────────────────────────────────────
-    if not results_df.empty:
-        plot_benchmark_metrics(results_df, save_dir=out_path)
-        plot_runway_heatmap(per_rwy_df, save_dir=out_path)
-        plot_bin_metrics(bin_metrics_df, results_df,
-                         bin_labels=bin_labels, save_dir=out_path)
+    if not no_plot:
+        if not results_df.empty:
+            plot_benchmark_metrics(results_df, save_dir=out_path)
+            plot_runway_heatmap(per_rwy_df, save_dir=out_path)
+            plot_bin_metrics(bin_metrics_df, results_df,
+                             bin_labels=bin_labels, save_dir=out_path)
 
-    best_name = results_df.iloc[0]["Model"] if not results_df.empty else None
-    if best_name and best_y_true.size > 0 and best_y_pred.size > 0:
-        plot_parity_and_residuals(best_y_true, best_y_pred, best_name, save_dir=out_path)
-
-
-# ── CLI ────────────────────────────────────────────────────────────────────────
+        best_name = results_df.iloc[0]["Model"] if not results_df.empty else None
+        if best_name and best_y_true.size > 0 and best_y_pred.size > 0:
+            plot_parity_and_residuals(best_y_true, best_y_pred, best_name, save_dir=out_path)
 
 def run_benchmark_cli(experiment_cls=None):
     import argparse
@@ -823,6 +847,8 @@ def run_benchmark_cli(experiment_cls=None):
                         help="Number of equal-frequency distance bins for per-bin MAE (default 5)")
     parser.add_argument("--log_target",    action="store_true",
                         help="Apply a log transformation to the target variable to stabilize variance.")
+    parser.add_argument("--no-plot",       action="store_true",
+                        help="Disable generation of plots.")
     args = parser.parse_args()
 
     TIE_TOLERANCE = args.tie_tol
@@ -836,6 +862,7 @@ def run_benchmark_cli(experiment_cls=None):
         min_test_dist=args.min_test_dist,
         n_bins=args.n_bins,
         use_log_target=args.log_target,
+        no_plot=args.no_plot,
     )
 
 if __name__ == "__main__":

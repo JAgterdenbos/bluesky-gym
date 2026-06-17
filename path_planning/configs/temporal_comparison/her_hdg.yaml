@@ -11,7 +11,7 @@ model:
     - 256
     - 256
     - 256
-  use_her: false
+  use_her: true
   her_n_sampled_goal: 4
   her_goal_selection_strategy: final
 session:
@@ -22,7 +22,7 @@ session:
   - eval
   - success_rate
   pretrained_model_path: null
-  pretrained_run_id: null
+  pretrained_run_id: "20260504_140314"
   pretrained_model_variant: final_model
   train_groups: null
   eval_groups: null
@@ -34,8 +34,8 @@ session:
 env:
   env_kwargs:
     action_mode: hdg
-    rta_sampler_path: null
+    rta_sampler_path: path_planning/rta/data/models/runway_sampler_deterministic_polar_hdg_15.joblib
     runways: null
-  env_name: PathPlanningGoalEnv-v0
+  env_name: PathPlanningGoalEnv-v1
   success_key: is_success
   group_key: current_runway

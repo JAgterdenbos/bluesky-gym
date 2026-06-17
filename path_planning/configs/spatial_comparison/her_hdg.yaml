@@ -11,7 +11,7 @@ model:
     - 256
     - 256
     - 256
-  use_her: false
+  use_her: true
   her_n_sampled_goal: 4
   her_goal_selection_strategy: final
 session:
@@ -36,6 +36,6 @@ env:
     action_mode: hdg
     rta_sampler_path: null
     runways: null
-  env_name: PathPlanningGoalEnv-v0
+  env_name: PathPlanningGoalEnv-v1
   success_key: is_success
   group_key: current_runway

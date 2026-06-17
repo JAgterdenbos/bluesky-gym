@@ -29,10 +29,15 @@ def _load_training_csv(path: str) -> list[dict]:
 
 
 def _safe_float(v: Optional[str]) -> float:
-    if v is None or str(v).strip() in ("", "nan", "None"):
+    # 1. Handle None or empty/placeholder strings safely
+    if v is None or str(v).strip().lower() in ("", "nan", "none", "n/a"):
         return float("nan")
-    return float(v)
-
+    
+    # 2. Try to convert, and return float("nan") immediately if it fails
+    try:
+        return float(v)
+    except ValueError:
+        return float("nan")
 
 def _find_training_csv(run_id: str, base: str = "./experiments") -> str:
     pattern = os.path.join(base, f"*/*/logs/{run_id}/training_evals.csv")

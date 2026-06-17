@@ -217,6 +217,9 @@ class BasePathPlanningExperiment(BaseExperiment):
                 "on_time":        lambda info, _ok: float(
                     info.get("on_time", float("nan"))
                 ),
+                "death_cause":    lambda info, ok: (
+                    info.get("death_cause", "n/a") if not ok else "n/a"
+                )
             },
-            display=["flight_time", "path_length_km", "noise_reward", "correct_runway", "on_time"],
+            display=["flight_time", "path_length_km", "noise_reward", "correct_runway", "on_time", "death_cause"],
         )

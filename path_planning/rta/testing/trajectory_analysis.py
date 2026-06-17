@@ -5,41 +5,46 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
+from matplotlib.ticker import FormatStrFormatter
 import argparse
 import re
 import os
 
-# ── 1. Style & Helper Functions ───────────────────────────────────────────────
-BG        = "#0d0d0d"
-GRID      = "#2a2a2a"
-SUCCESS_C = "#00ff88"
-FAIL_C    = "#ff4444"
-FAIL_CMAP = "YlOrRd"
+# ── 1. Style & Helper Functions (Thesis Light Mode) ───────────────────────────
+BG         = "#ffffff"  # Crisp white background for print/thesis
+GRID       = "#e5e5e5"  # Faint gray for clean grid lines
+TEXT_DARK  = "#222222"  # Off-black for optimal text readability
+TEXT_MUTED = "#555555"  # Soft dark gray for labels and ticks
+
+SUCCESS_C  = "#1a8754"  # Professional academic green
+FAIL_C     = "#b51d1d"  # Deep crimson red for high-contrast failures
+FAIL_CMAP  = "Reds"     # Smooth high-contrast gradient for white background
 
 def style_ax(ax, title="", xlabel="", ylabel=""):
     ax.set_facecolor(BG)
-    ax.tick_params(colors="#aaaaaa", labelsize=8)
+    ax.tick_params(colors=TEXT_MUTED, labelsize=8)
     for spine in ax.spines.values():
-        spine.set_edgecolor(GRID)
-    ax.xaxis.label.set_color("#aaaaaa")
-    ax.yaxis.label.set_color("#aaaaaa")
-    ax.set_title(title, color="white", fontsize=10, pad=6)
+        spine.set_edgecolor("#cccccc")  # Clean, light border lines
+    ax.xaxis.label.set_color(TEXT_MUTED)
+    ax.yaxis.label.set_color(TEXT_MUTED)
+    ax.set_title(title, color=TEXT_DARK, fontsize=10, fontweight="semibold", pad=6)
     ax.set_xlabel(xlabel, fontsize=8)
     ax.set_ylabel(ylabel, fontsize=8)
-    ax.grid(color=GRID, linewidth=0.4)
+    ax.grid(color=GRID, linewidth=0.5)
 
 def add_eham(ax, label=True):
-    ax.scatter(0, 0, color="yellow", s=100, zorder=10, marker="+", linewidths=2)
+    # Professional dark blue crosshair for the airport location
+    ax.scatter(0, 0, color="#0056b3", s=100, zorder=10, marker="+", linewidths=2)
     if label:
-        ax.annotate("EHAM", (0,0), color="yellow", fontsize=7,
+        ax.annotate("EHAM", (0,0), color="#0056b3", fontsize=7, fontweight="bold",
                     xytext=(0.03, 0.03), textcoords="data")
 
 def add_centreline(ax, rwy_name, heading_deg):
     angle_rad = np.radians(90 - heading_deg)
     dx = np.cos(angle_rad)
     dy = np.sin(angle_rad)
-    ax.axline((0, 0), (dx, dy), color="#ffffff", linewidth=0.6, linestyle="--",
-              alpha=0.25, zorder=1, label=f"{rwy_name} centreline")
+    ax.axline((0, 0), (dx, dy), color=TEXT_MUTED, linewidth=0.6, linestyle="--",
+              alpha=0.4, zorder=1, label=f"{rwy_name} centreline")
 
 def heading_error(h, target_heading):
     err = (h - target_heading) % 360
@@ -67,7 +72,13 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
         return
 
     print(f"Loading data from {data_path}...")
-    df = pd.read_csv(data_path)
+    
+    _, ext = os.path.splitext(data_path.lower())
+    if ext in ['.parquet', '.pq']:
+        df = pd.read_parquet(data_path, engine='pyarrow')
+    else:
+        df = pd.read_csv(data_path)
+        
     df = df[df["runway"] == rwy]
 
     if df.empty:
@@ -118,7 +129,6 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     )
     ep_meta = ep_meta.merge(ep_coords, on="episode")
 
-    # Use the dynamic scale passed from CLI
     ep_meta["chord_km"] = np.sqrt(
         (ep_meta["ex"] - ep_meta["sx"])**2 + 
         (ep_meta["ey"] - ep_meta["sy"])**2
@@ -138,10 +148,10 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     # ── Figure layout ──
     fig = plt.figure(figsize=(26, 22), facecolor=BG)
     fig.suptitle(f"{rwy} Trajectory Analysis — {algo}",
-                 color="white", fontsize=17, fontweight="bold", y=0.99)
+                 color=TEXT_DARK, fontsize=17, fontweight="bold", y=0.99)
 
     gs = gridspec.GridSpec(
-        3, 3, figure=fig, hspace=0.42, wspace=0.32,
+        3, 3, figure=fig, hspace=0.45, wspace=0.35,  # Slightly opened up spacing
         left=0.05, right=0.97, top=0.96, bottom=0.05
     )
 
@@ -154,6 +164,9 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     ax_hdg   = fig.add_subplot(gs[2, 0])
     ax_heat  = fig.add_subplot(gs[2, 1])
     ax_tort  = fig.add_subplot(gs[2, 2])
+
+    # Shared academic legend style configuration
+    leg_style = dict(facecolor="#f8f9fa", labelcolor=TEXT_DARK, edgecolor="#e5e5e5", fontsize=7)
 
     # 1. All trajectories
     style_ax(ax_traj, f"All Trajectories ({rwy})", f"Normalised x (×{scale} km)", f"Normalised y (×{scale} km)")
@@ -171,7 +184,7 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     ax_traj.legend(handles=[
         Line2D([0],[0], color=SUCCESS_C, alpha=0.7, label=f"Success (n={len(success_eps)})"),
         Line2D([0],[0], color=FAIL_C,    alpha=0.8, label=f"Failure  (n={len(failure_eps)})"),
-    ], facecolor="#1a1a1a", labelcolor="white", fontsize=7)
+    ], loc="upper right", **leg_style)
 
     # 2. Termination points
     style_ax(ax_term, f"Termination Points ({rwy})", f"Normalised x (×{scale} km)", f"Normalised y (×{scale} km)")
@@ -180,10 +193,26 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     term_s = last_steps[last_steps["episode"].isin(success_eps)]
     term_f = last_steps[last_steps["episode"].isin(failure_eps)]
 
-    ax_term.scatter(term_s["x"], term_s["y"], c=SUCCESS_C, alpha=0.12, s=6,  label=f"Success (n={len(term_s)})")
-    ax_term.scatter(term_f["x"], term_f["y"], c=FAIL_C,    alpha=0.85, s=30, label=f"Failure (n={len(term_f)})", edgecolors="white", linewidths=0.3)
+    if not term_s.empty:
+        jitter_s = np.random.normal(0, 0.003, size=len(term_s))
+        ax_term.scatter(term_s["x"], term_s["y"] + jitter_s, c=SUCCESS_C, alpha=0.08, s=6,  
+                        label=f"Success (n={len(term_s)})", clip_on=False)
+        
+    if not term_f.empty:
+        jitter_f = np.random.normal(0, 0.003, size=len(term_f))
+        ax_term.scatter(term_f["x"], term_f["y"] + jitter_f, c=FAIL_C, alpha=0.85, s=30, 
+                        label=f"Failure (n={len(term_f)})", edgecolors="white", linewidths=0.3, clip_on=False)
+
     add_eham(ax_term)
-    ax_term.legend(facecolor="#1a1a1a", labelcolor="white", fontsize=7)
+
+    all_x = pd.concat([term_s["x"], term_f["x"]]) if not term_s.empty or not term_f.empty else pd.Series([0])
+    all_y = pd.concat([term_s["y"], term_f["y"]]) if not term_s.empty or not term_f.empty else pd.Series([0])
+    max_val = max(all_x.abs().max(), all_y.abs().max())
+    limit = min(1.0, max(0.25, max_val * 1.1))
+    ax_term.set_xlim(-limit, limit)
+    ax_term.set_ylim(-limit, limit)
+    
+    ax_term.legend(loc="lower left", **leg_style)
 
     # 3. Polar approach-direction
     fs_s = first_steps[first_steps["episode"].isin(success_eps)]
@@ -203,20 +232,25 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     ax_polar.bar(centres, f_den, width=width, color=FAIL_C,    alpha=0.7, label="Failure",  zorder=3)
     ax_polar.set_theta_zero_location("N")
     ax_polar.set_theta_direction(-1)
-    ax_polar.tick_params(colors="#aaaaaa", labelsize=7)
-    ax_polar.set_title("Spawn Direction from EHAM", color="white", fontsize=10, pad=14)
-    ax_polar.legend(facecolor="#1a1a1a", labelcolor="white", fontsize=7, loc="lower left", bbox_to_anchor=(-0.15, -0.1))
-    ax_polar.grid(color=GRID, linewidth=0.4)
+    ax_polar.tick_params(colors=TEXT_MUTED, labelsize=7)
+    ax_polar.set_title("Spawn Direction from EHAM", color=TEXT_DARK, fontsize=10, pad=14)
+    ax_polar.legend(loc="lower left", bbox_to_anchor=(-0.15, -0.1), **leg_style)
+    ax_polar.grid(color=GRID, linewidth=0.5)
 
-    # 4. Failures coloured by episode progress
+    # 4. Failures coloured by episode progress (With Success Background Context)
     style_ax(ax_steps, "Failures — coloured by episode progress", f"Normalised x (×{scale} km)", f"Normalised y (×{scale} km)")
     add_centreline(ax_steps, rwy, rwy_heading)
+
+    # REFINEMENT: Faint context lines for successes so plot doesn't look empty
+    for ep in success_eps:
+        t = df[df["episode"] == ep]
+        ax_steps.plot(t["x"], t["y"], color="#ececec", alpha=0.01, linewidth=0.3, zorder=1)
 
     cmap_fail = plt.get_cmap(FAIL_CMAP)
     for ep in failure_eps:
         t = df[df["episode"] == ep]
         progress = episode_max_step[ep] / global_max_step
-        ax_steps.plot(t["x"], t["y"], color=cmap_fail(1 - progress), alpha=0.6, linewidth=1.0)
+        ax_steps.plot(t["x"], t["y"], color=cmap_fail(1 - progress), alpha=0.7, linewidth=1.1, zorder=2)
 
     add_eham(ax_steps)
     ax_steps.set_xlim(-1, 1); ax_steps.set_ylim(-1, 1)
@@ -224,10 +258,10 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     sm = ScalarMappable(cmap=cmap_fail, norm=Normalize(0, 1))
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax_steps, fraction=0.035, pad=0.02)
-    cbar.set_label("Episode progress (0=early fail, 1=late fail)", color="#aaaaaa", fontsize=7)
-    cbar.ax.yaxis.set_tick_params(color="#aaaaaa", labelsize=7)
-    plt.setp(cbar.ax.yaxis.get_ticklabels(), color="#aaaaaa")
-    cbar.outline.set_edgecolor(GRID)
+    cbar.set_label("Episode progress (0=early fail, 1=late fail)", color=TEXT_MUTED, fontsize=7)
+    cbar.ax.yaxis.set_tick_params(color=TEXT_MUTED, labelsize=7)
+    plt.setp(cbar.ax.yaxis.get_ticklabels(), color=TEXT_MUTED)
+    cbar.outline.set_edgecolor("#cccccc")
 
     # 5. Path length distribution
     style_ax(ax_pathl, "Path Length Distribution", "Total distance (km)", "Density")
@@ -239,7 +273,7 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
         ax_pathl.axvline(ep_s["total_dist_km"].mean(), color=SUCCESS_C, linestyle="--", linewidth=1, label=f"Mean success: {ep_s['total_dist_km'].mean():.0f} km")
     if not ep_f.empty:
         ax_pathl.axvline(ep_f["total_dist_km"].mean(), color="#ff8800", linestyle="--", linewidth=1, label=f"Mean failure: {ep_f['total_dist_km'].mean():.0f} km")
-    ax_pathl.legend(facecolor="#1a1a1a", labelcolor="white", fontsize=7)
+    ax_pathl.legend(loc="best", **leg_style)  # REFINEMENT: dynamic positioning
 
     # 6. RTA distribution
     style_ax(ax_rta, "RTA Distribution", "Required Time of Arrival (normalised)", "Density")
@@ -251,7 +285,7 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
         ax_rta.axvline(ep_s["rta"].mean(), color=SUCCESS_C, linestyle="--", linewidth=1, label=f"Mean success: {ep_s['rta'].mean():.3f}")
     if not ep_f.empty:
         ax_rta.axvline(ep_f["rta"].mean(), color="#ff8800", linestyle="--", linewidth=1, label=f"Mean failure: {ep_f['rta'].mean():.3f}")
-    ax_rta.legend(facecolor="#1a1a1a", labelcolor="white", fontsize=7)
+    ax_rta.legend(loc="best", **leg_style)  # REFINEMENT: dynamic positioning
 
     # 7. Final approach heading error
     style_ax(ax_hdg, f"Final Approach Heading Error ({rwy} = {rwy_heading}°)", "Heading error (degrees)", "Density")
@@ -262,12 +296,12 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
 
     ax_hdg.hist(hdg_s, bins=bins_hdg, density=True, color=SUCCESS_C, alpha=0.5, label="Success")
     ax_hdg.hist(hdg_f, bins=bins_hdg, density=True, color=FAIL_C,    alpha=0.7, label="Failure")
-    ax_hdg.axvline(0, color="white", linewidth=1.0, linestyle="-", alpha=0.4, label=f"Perfect alignment ({rwy_heading}°)")
+    ax_hdg.axvline(0, color=TEXT_MUTED, linewidth=1.0, linestyle="-", alpha=0.4, label=f"Perfect alignment ({rwy_heading}°)")
     if not hdg_s.empty:
         ax_hdg.axvline(hdg_s.mean(), color=SUCCESS_C, linestyle="--", linewidth=1, label=f"Mean success: {hdg_s.mean():.1f}°")
     if not hdg_f.empty:
         ax_hdg.axvline(hdg_f.mean(), color="#ff8800", linestyle="--", linewidth=1, label=f"Mean failure: {hdg_f.mean():.1f}°")
-    ax_hdg.legend(facecolor="#1a1a1a", labelcolor="white", fontsize=7)
+    ax_hdg.legend(loc="best", **leg_style)  # REFINEMENT: dynamic positioning
 
     # 8. RTA × bearing heatmap
     style_ax(ax_heat, "Failure Rate: Spawn Bearing × RTA", "Spawn bearing bin (°)", "RTA (normalised)")
@@ -285,11 +319,15 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
                 float(str(pivot_rate.index[-1])), float(str(pivot_rate.index[0]))],
         origin="upper"
     )
+    
+    # REFINEMENT: Enforce standardized decimal lengths for y-axis formatting
+    ax_heat.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+    
     cbar2 = fig.colorbar(im, ax=ax_heat, fraction=0.035, pad=0.02)
-    cbar2.set_label("Failure rate", color="#aaaaaa", fontsize=7)
-    cbar2.ax.yaxis.set_tick_params(color="#aaaaaa", labelsize=7)
-    plt.setp(cbar2.ax.yaxis.get_ticklabels(), color="#aaaaaa")
-    cbar2.outline.set_edgecolor(GRID)
+    cbar2.set_label("Failure rate", color=TEXT_MUTED, fontsize=7)
+    cbar2.ax.yaxis.set_tick_params(color=TEXT_MUTED, labelsize=7)
+    plt.setp(cbar2.ax.yaxis.get_ticklabels(), color=TEXT_MUTED)
+    cbar2.outline.set_edgecolor("#cccccc")
     ax_heat.set_xticks(bear_bins[::2])
     ax_heat.set_xticklabels([f"{b}°" for b in bear_bins[::2]], fontsize=7)
 
@@ -312,45 +350,30 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
         if not tort_f.empty:
             ax_tort.axvline(tort_f.mean(), color="#ff8800", linestyle="--", linewidth=1, label=f"Mean failure: {tort_f.mean():.2f}×")
             
-        ax_tort.legend(facecolor="#1a1a1a", labelcolor="white", fontsize=7)
+        ax_tort.legend(loc="best", **leg_style)  # REFINEMENT: dynamic positioning
 
     # ── Save ──
     os.makedirs(out_dir, exist_ok=True)
+    # Changing output extension to .png makes a vector format that is infinitely zoomable in LaTeX
     filename = os.path.join(out_dir, f"{rwy}_trajectory_analysis_{algo}.png")
-    plt.savefig(filename, dpi=dpi, bbox_inches="tight", facecolor=BG)
-    print(f"Saved: {filename}")
+    plt.savefig(filename, dpi=300, bbox_inches="tight", facecolor=BG)
+    print(f"Saved publication-quality vector plot: {filename}")
 
 # ── 3. CLI Execution ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate runway trajectory analysis plots.")
     
-    # Required arguments
-    parser.add_argument("-r", "--rwy", type=str, required=True, 
-                        help="Runway identifier (e.g., '36R', '18C').")
-    parser.add_argument("-a", "--algo", type=str, required=True, 
-                        help="Algorithm name used for titling and saving (e.g., 'HER', 'no_HER').")
-    parser.add_argument("-d", "--data", type=str, required=True, 
-                        help="Full path to the CSV data file.")
-    
-    # Optional configuration arguments
-    parser.add_argument("--heading", type=int, default=None, 
-                        help="Target runway heading in degrees. If omitted, auto-calculated from runway name.")
-    parser.add_argument("--scale", type=int, default=300, 
-                        help="Scale factor for normalization (default: 300 km).")
-    parser.add_argument("-o", "--out-dir", type=str, default=".", 
-                        help="Directory to save the resulting plot (default: current directory).")
-    parser.add_argument("--dpi", type=int, default=150, 
-                        help="DPI for the saved plot image (default: 150).")
+    parser.add_argument("-r", "--rwy", type=str, required=True, help="Runway identifier.")
+    parser.add_argument("-a", "--algo", type=str, required=True, help="Algorithm name.")
+    parser.add_argument("-d", "--data", type=str, required=True, help="Full data file path.")
+    parser.add_argument("--heading", type=int, default=None, help="Target runway heading.")
+    parser.add_argument("--scale", type=int, default=300, help="Scale factor (default: 300 km).")
+    parser.add_argument("-o", "--out-dir", type=str, default=".", help="Output directory.")
+    parser.add_argument("--dpi", type=int, default=300, help="DPI resolution for rendering.")
 
     args = parser.parse_args()
 
-    # Execute
     plot_runway_analysis(
-        rwy=args.rwy,
-        algo=args.algo,
-        data_path=args.data,
-        heading=args.heading,
-        scale=args.scale,
-        out_dir=args.out_dir,
-        dpi=args.dpi
+        rwy=args.rwy, algo=args.algo, data_path=args.data, heading=args.heading,
+        scale=args.scale, out_dir=args.out_dir, dpi=args.dpi
     )
