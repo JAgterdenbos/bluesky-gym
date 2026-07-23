@@ -12,3 +12,5 @@ dist/
 /path_planning/rta/testing/plots
 path_planning/rta/data/
 *.png
+
+graphify-out/

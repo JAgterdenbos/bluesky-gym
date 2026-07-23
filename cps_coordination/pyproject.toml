@@ -1,0 +1,21 @@
+[project]
+name = "cps-coordination"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Hierarchical CPS Coordination Layer for 4D RTA path planning in BlueSky-Gym."
+dependencies = [
+    "bluesky-gym",
+    "path-planning",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.7",
+    "pyyaml>=6.0",
+    "statsmodels>=0.14",
+]
+
+[project.scripts]
+cps-sim = "cps_coordination.__main__:main"
+
+[tool.uv.sources]
+bluesky-gym  = { workspace = true }
+path-planning = { workspace = true }

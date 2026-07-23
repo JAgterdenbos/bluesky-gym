@@ -1,0 +1,117 @@
+# cps_coordination/configs/cps_base.yaml
+# ----------------------------------------
+# Default configuration for CPSCoordinationExperiment.
+#
+# Priority chain: dataclass defaults → this YAML file → CLI flags.
+#
+# Load with:
+#   python -m cps_coordination train --config cps_coordination/configs/cps_base.yaml
+
+model:
+  # CPS coordination hyper-parameters
+  k_cps: 3                        # Maximum positional shift from FCFS rank (k-CPS window)
+  delta_t_plan: 60                # Replanning interval ΔT_plan (simulation seconds)
+  delta_update: 1.0               # Minimum TTA change δ_update to push a worker update (s)
+  runway_assignment_mode: dynamic # "static" | "dynamic"
+
+  # Inherited from ModelConfig — not used for training; kept for framework compatibility
+  learning_rate: 0.0003
+  verbose: 1
+
+session:
+  total_timesteps: 0              # No training steps; evaluation-only experiment
+  do_train: false
+  do_evaluate: true
+  eval_episodes: 50
+
+  # Point at a pre-trained path_planning run to use as the frozen worker policy.
+  # Override at runtime:  --session-pretrained-run-id 20260301_120000
+  pretrained_run_id: null
+  pretrained_model_path: null
+  pretrained_model_variant: final_model
+
+  train_groups: null
+  eval_groups: null
+  eval_freq: 5000
+  track_training_evals: false
+  callbacks:
+    - csv_logger
+
+env:
+  env_name: PathPlanningGoalEnv-v0
+  group_key: current_runway
+  success_key: is_success
+
+  env_kwargs:
+    action_mode: hdg
+    v_app: 140.0            # Nominal approach speed V_app (knots)
+    rta_sampler_path: null  # Path to a fitted GeoRunwaySampler (.pkl)
+    runways: null           # null → use all available runways
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RECAT-EU time-based separation matrix (seconds)
+# Source: EUROCONTROL RECAT-EU, Doc. 14 — Time-Based Separation (TBS) values.
+#
+# Matrix convention:
+#   recat_eu[leading_wake_category][trailing_wake_category] = separation (s)
+#
+# Wake turbulence categories:
+#   A = Super-heavy    (e.g. A380, AN-124)
+#   B = Upper-heavy    (e.g. B747, B777)
+#   C = Lower-heavy    (e.g. B767, A330)
+#   D = Upper-medium   (e.g. B737-900, A321)
+#   E = Lower-medium   (e.g. B737-700, A320)
+#   F = Light          (e.g. C172, PA28)
+# ──────────────────────────────────────────────────────────────────────────────
+recat_eu:
+  A:
+    A: 120
+    B: 100
+    C:  80
+    D: 120
+    E: 140
+    F: 180
+  B:
+    A:  80
+    B:  80
+    C:  80
+    D: 100
+    E: 120
+    F: 140
+  C:
+    A:  80
+    B:  80
+    C:  80
+    D:  80
+    E: 100
+    F: 120
+  D:
+    A:  80
+    B:  80
+    C:  80
+    D:  80
+    E:  80
+    F: 100
+  E:
+    A:  80
+    B:  80
+    C:  80
+    D:  80
+    E:  80
+    F:  80
+  F:
+    A:  80
+    B:  80
+    C:  80
+    D:  80
+    E:  80
+    F:  80
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CPS evaluation parameters (read by CPSCoordinationExperiment.evaluate())
+# ──────────────────────────────────────────────────────────────────────────────
+cps_eval:
+  n_aircraft_per_episode: 5       # N_a: simultaneous aircraft per episode
+  separation_tolerance_s: 5.0     # Slack (s) within which C_sep compliance is credited
+  ripple_lag: 1                   # Lag for ρ_ripple autocorrelation (always 1 per methodology)
+  throughput_window_h: 1.0        # Time window (hours) for Γ / Γ_r calculation

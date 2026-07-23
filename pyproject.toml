@@ -53,4 +53,4 @@ include = [
 ]
 
 [tool.uv.workspace]
-members = ["path_planning"]
+members = ["path_planning", "cps_coordination"]
