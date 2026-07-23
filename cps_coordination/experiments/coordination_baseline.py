@@ -39,6 +39,7 @@ Comparison baseline
 from __future__ import annotations
 
 import csv
+import math
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -51,7 +52,14 @@ import yaml
 from stable_baselines3 import SAC
 from stable_baselines3.common.monitor import Monitor
 
-from bluesky_gym.envs.pathplanning_goal_env import MAX_TIME as _ENV_MAX_TIME
+from bluesky_gym.envs.pathplanning_goal_env import (
+    ACTION_TIME,
+    ALL_RUNWAYS,
+    MAX_DISTANCE,
+    MAX_TIME as _ENV_MAX_TIME,
+    SPEED,
+)
+from bluesky_gym.envs.multi_agent_pathplanning_env import MultiAgentPathPlanningGoalEnv
 
 from bluesky_gym.experiment import (
     BaseExperiment,
@@ -320,23 +328,11 @@ class CPSCoordinationExperiment(BaseExperiment):
         env_kwargs: dict,
         render_mode: Optional[str] = None,
     ) -> gym.Env:
-        """Create a Monitor-wrapped PathPlanningGoalEnv-v0 worker environment.
+        """Create a Monitor-wrapped single-agent worker env.
 
-        The ``rta_sampler_path`` key (if present) is popped from
-        ``env_kwargs`` before passing to ``gym.make()``; the sampler is
-        loaded separately and injected as a keyword argument.
-
-        Parameters
-        ----------
-        env_kwargs : dict
-            Forwarded to ``gym.make()``; ``rta_sampler_path`` is intercepted.
-        render_mode : str or None
-            Passed to ``gym.make()``.
-
-        Returns
-        -------
-        gym.Env
-            Monitor-wrapped environment.
+        Used only for framework compatibility (e.g. an "enjoy"/preview
+        single-episode path) — the CPS coordination evaluation loop itself
+        uses :meth:`_make_multi_agent_env` and never calls this.
         """
         import bluesky_gym
 
@@ -346,24 +342,29 @@ class CPSCoordinationExperiment(BaseExperiment):
         if env_name is None:
             raise ValueError("env_name is not set in CPSEnvConfig.")
 
-        sampler_path = env_kwargs.pop("rta_sampler_path", None)
-        rta_sampler = None
-        if sampler_path:
-            from path_planning.rta.sampling import GeoRunwaySampler
-
-            rta_sampler = GeoRunwaySampler.load(sampler_path)
-
-        # v_app is a CPS-layer parameter; the underlying env does not accept it
-        env_kwargs.pop("v_app", None)
-
-        env = gym.make(
-            env_name,
-            render_mode=render_mode,
-            rta_sampler=rta_sampler,
-            **env_kwargs,
-        )
+        env = gym.make(env_name, render_mode=render_mode, **env_kwargs)
         env.reset()
         return Monitor(env)
+
+    def _make_multi_agent_env(self, n_aircraft: int) -> MultiAgentPathPlanningGoalEnv:
+        """Build the single-BlueSky-instance multi-aircraft env used by the
+        CPS coordination evaluation loop.
+
+        ``n_aircraft`` is used as both ``max_concurrent_aircraft`` and
+        ``n_aircraft_total`` for now — i.e. one "wave" of N_a aircraft per
+        episode, matching the original single-wave-per-episode semantics.
+        A true rolling arrival stream (n_aircraft_total > max_concurrent)
+        is a later scaling concern (roadmap step 9), not required for the
+        k=0/k>0 CPS sequencing pipeline validation this supports today.
+        """
+        env_kwargs = self.cfg.eval_env_kwargs
+        runways = env_kwargs.get("runways")
+        return MultiAgentPathPlanningGoalEnv(
+            runways=runways,
+            action_mode=env_kwargs.get("action_mode", "hdg"),
+            max_concurrent_aircraft=n_aircraft,
+            n_aircraft_total=n_aircraft,
+        )
 
     def make_model(self, env: gym.Env):  # type: ignore[override]
         """Load the frozen SAC worker policy; no training is performed.
@@ -432,26 +433,20 @@ class CPSCoordinationExperiment(BaseExperiment):
         """Run the CPS coordination evaluation loop.
 
         This override replaces the default single-episode evaluation with a
-        multi-aircraft coordination loop that measures all CPS-specific
-        metrics.  A parallel *baseline* run (same frozen worker, no CPS) is
-        executed to compute Δε (tracking degradation).
+        multi-aircraft coordination loop (one shared ``MultiAgentPathPlanningGoalEnv``
+        instance, reused across episodes) that measures all CPS-specific
+        metrics.
 
-        Algorithm per episode
-        ---------------------
-        1. Spawn N_a independent env instances; reset each to obtain an
-           initial observation and runway assignment.
-        2. Build an initial fleet of :class:`AircraftState` records.
-        3. At each simulation step:
-           a. Refresh ETAs via ETASurrogate (if a sampler path is set).
-           b. Call :meth:`CPSManager.update_fleet`; collect callsigns
-              whose TTA changed by more than δ_update.
-           c. For changed callsigns, inject the new TTA as the ``desired_goal``
-              in the worker observation.
-           d. Step all active environments with the frozen worker prediction.
-           e. Record landings, separation gaps, and RTA errors.
-        4. After all aircraft have landed (or been truncated), accumulate
-           episode-level records.
-        5. Compute aggregate metrics across all episodes and save logs.
+        Algorithm per episode (see :meth:`_run_episode`)
+        -------------------------------------------------
+        1. Reset the shared env to spawn this episode's N_a aircraft.
+        2. At each decision step: build :class:`AircraftState` records from
+           the env's current active aircraft, run ``CPSManager.update_fleet``,
+           push any resulting runway/TTA changes into the env, predict with
+           the frozen worker in a single batched call, and step.
+        3. Repeat until every aircraft scheduled for this episode has landed
+           or been truncated.
+        4. Compute aggregate metrics across all episodes and save logs.
 
         Parameters
         ----------
@@ -477,10 +472,12 @@ class CPSCoordinationExperiment(BaseExperiment):
             runway_assignment_mode=mcfg.runway_assignment_mode,
             delta_t_plan=mcfg.delta_t_plan,
             delta_update=mcfg.delta_update,
+            available_runways=list(cfg.env.env_kwargs.runways or ALL_RUNWAYS),
         )
 
         n_episodes = cfg.session.eval_episodes
         n_aircraft = self._get_n_aircraft()
+        env = self._make_multi_agent_env(n_aircraft)
 
         all_records: List[_EpisodeRecord] = []
         results: dict[str, list[bool]] = defaultdict(list)
@@ -489,23 +486,27 @@ class CPSCoordinationExperiment(BaseExperiment):
             f"\nCPS Coordination Evaluation"
             f"\n  episodes={n_episodes}, aircraft/episode={n_aircraft}"
             f"\n  k_cps={mcfg.k_cps}, mode={mcfg.runway_assignment_mode}"
+            f"\n  eta_surrogate={'loaded' if surrogate else 'none (naive ETA estimate)'}"
             f"\n  frozen worker: {cfg.session.pretrained_model_path}\n"
         )
 
-        for ep_idx in range(n_episodes):
-            ep_records = self._run_episode(
-                model=model,
-                cps_manager=cps_manager,
-                surrogate=surrogate,
-                n_aircraft=n_aircraft,
-                deterministic=deterministic,
-                ep_idx=ep_idx,
-            )
-            all_records.extend(ep_records)
-            cps_manager.reset()
+        try:
+            for ep_idx in range(n_episodes):
+                ep_records = self._run_episode(
+                    env=env,
+                    model=model,
+                    cps_manager=cps_manager,
+                    surrogate=surrogate,
+                    deterministic=deterministic,
+                    ep_idx=ep_idx,
+                )
+                all_records.extend(ep_records)
+                cps_manager.reset()
 
-            for rec in ep_records:
-                results[rec.runway_id].append(rec.success)
+                for rec in ep_records:
+                    results[rec.runway_id].append(rec.success)
+        finally:
+            env.close()
 
         metrics = self._compute_aggregate_metrics(all_records, recat_matrix)
         self._print_metrics(metrics)
@@ -519,30 +520,43 @@ class CPSCoordinationExperiment(BaseExperiment):
 
     def _run_episode(
         self,
+        env: MultiAgentPathPlanningGoalEnv,
         model,
         cps_manager: CPSManager,
         surrogate: Optional[ETASurrogate],
-        n_aircraft: int,
         deterministic: bool,
         ep_idx: int,
+        seed: Optional[int] = None,
     ) -> List[_EpisodeRecord]:
-        """Run one episode with N_a independent environments.
+        """Run one episode in the shared multi-aircraft env.
 
-        Each environment represents one aircraft.  The frozen worker acts in
-        each env; CPSManager assigns TTAs which are injected as the
-        ``desired_goal`` in the worker's observation dict.
+        Per decision step: build :class:`AircraftState` records from the
+        env's current active aircraft, run ``CPSManager.update_fleet``,
+        push any resulting runway/TTA changes into the env via
+        ``set_runway``/``set_tta``, refresh the observation batch, predict
+        with the frozen worker in a single batched call, and step. Repeat
+        until every aircraft scheduled for this episode has landed or been
+        truncated (``env.is_episode_done()``).
+
+        Note: with ``max_concurrent_aircraft == n_aircraft_total`` (today's
+        one-wave-per-episode config, see :meth:`_make_multi_agent_env`),
+        each per-slot acid spawns exactly once per episode, so keying
+        ``records`` by acid is safe. A rolling-arrival-stream config
+        (n_aircraft_total > max_concurrent) would need a different key,
+        since acids are reused per-slot across respawns.
 
         Parameters
         ----------
+        env : MultiAgentPathPlanningGoalEnv
+            Shared multi-aircraft env (reset here; not created/closed here).
         model : SAC
             Frozen worker policy.
         cps_manager : CPSManager
             Sequence manager (reset before each episode by the caller).
         surrogate : ETASurrogate or None
-            ETA prediction model.  ``None`` → no ETA refresh; ETAs are
-            initialised from initial observations only.
-        n_aircraft : int
-            Number of aircraft (independent env instances) per episode.
+            ETA prediction model. ``None`` → ETAs come only from the naive
+            straight-line estimate computed at fleet-build time (see
+            :meth:`_estimate_naive_eta`) and are never refreshed.
         deterministic : bool
             Whether to use deterministic policy predictions.
         ep_idx : int
@@ -553,110 +567,63 @@ class CPSCoordinationExperiment(BaseExperiment):
         List[_EpisodeRecord]
             One record per aircraft in this episode.
         """
-        cfg = self.cfg
-        env_kwargs = dict(cfg.eval_env_kwargs)
-
-        # Spawn N_a environment instances
-        envs: List[gym.Env] = [
-            self.make_env(dict(env_kwargs)) for _ in range(n_aircraft)
-        ]
-        obs_list: List[Any] = []
-        info_list: List[dict] = []
-
-        # Synthetic callsigns for this episode
-        acids = [f"AC{ep_idx:03d}_{i:02d}" for i in range(n_aircraft)]
-
-        for env in envs:
-            obs, info = env.reset()
-            obs_list.append(obs)
-            info_list.append(info)
-
-        # Build initial fleet records
-        fleet: List[AircraftState] = [
-            AircraftState(
-                acid=acids[i],
-                state=self._obs_to_state(obs_list[i]),
-                runway_id=str(info_list[i].get("current_runway", "27")),
-                eta=float(info_list[i].get("sim_time", 0.0)),
-                wake_cat="C",  # default; extend with actual WTC lookup
-            )
-            for i in range(n_aircraft)
-        ]
-
-        done_flags = [False] * n_aircraft
-        trunc_flags = [False] * n_aircraft
+        obs, info_list = env.reset(seed=seed)
+        sim_time = 0.0
         records: Dict[str, _EpisodeRecord] = {}
-        sim_time: float = 0.0
+        last_tta: Dict[str, float] = {}
 
-        # Tracking: last assigned TTA and solo RTA error per aircraft
-        last_tta: Dict[str, float] = {ac.acid: 0.0 for ac in fleet}
-        solo_rta_errors: Dict[str, float] = {ac.acid: float("nan") for ac in fleet}
+        while not env.is_episode_done():
+            fleet = self._build_fleet(obs, info_list, sim_time)
+            acid_to_slot = {info["acid"]: info["slot"] for info in info_list}
 
-        while not all(d or t for d, t in zip(done_flags, trunc_flags)):
             # --- CPS coordination step ---
             changed = cps_manager.update_fleet(
                 aircraft=fleet,
                 current_time=sim_time,
                 surrogate=surrogate,
             )
+
+            # Dynamic runway reassignment isn't gated by delta_update, so
+            # check every active aircraft, not just `changed`.
+            for ac in fleet:
+                slot = acid_to_slot[ac.acid]
+                if ac.runway_id != env.current_runway[slot]:
+                    env.set_runway(slot, ac.runway_id)
+
             for acid in changed:
                 tta = cps_manager.get_tta(acid)
                 if tta is not None:
                     last_tta[acid] = tta
+                    env.set_tta(acid_to_slot[acid], tta)
 
-            # --- Step each active environment ---
-            for i, (ac, env) in enumerate(zip(fleet, envs)):
-                if done_flags[i] or trunc_flags[i]:
-                    continue
+            # Refresh after set_runway/set_tta before the frozen policy acts.
+            obs, info_list = env.get_active_batch()
+            actions, _ = model.predict(obs, deterministic=deterministic)
+            _obs_terminal, _rewards, terminated, truncated, info_terminal = env.step(actions)
 
-                obs = obs_list[i]
-
-                # Inject updated TTA as desired_goal if the observation is a dict
-                if isinstance(obs, dict) and "desired_goal" in obs:
-                    obs = dict(obs)  # shallow copy
-                    # Overwrite the RTA component of desired_goal with CPS TTA.
-                    # The env encodes goal time as t / MAX_TIME (see pathplanning_goal_env.py),
-                    # so the raw TTA (seconds) must be normalised before injection.
-                    desired = obs["desired_goal"].copy()
-                    desired[-1] = last_tta[ac.acid] / _ENV_MAX_TIME
-                    obs["desired_goal"] = desired
-
-                action, _ = model.predict(obs, deterministic=deterministic)
-                next_obs, _rew, done, trunc, info = env.step(action)
-
-                obs_list[i] = next_obs
-                done_flags[i] = bool(done)
-                trunc_flags[i] = bool(trunc)
-
-                # Update aircraft state for next ETA prediction
-                ac.state = self._obs_to_state(next_obs)
-                if "current_runway" in info:
-                    ac.runway_id = str(info["current_runway"])
-
-                # On terminal step, record landing data
-                if done or trunc:
+            for row, info in enumerate(info_terminal):
+                if terminated[row] or truncated[row]:
+                    acid = info["acid"]
                     landing_time = float(info.get("sim_time", sim_time))
                     success = bool(info.get("is_success", False))
-
-                    rta_error_cps = abs(landing_time - last_tta[ac.acid])
-                    # solo error: how far the worker would land without CPS TTA
-                    rta_error_solo = float(info.get("rta_error", rta_error_cps))
-                    solo_rta_errors[ac.acid] = rta_error_solo
-
-                    recovered = (
-                        rta_error_cps < rta_error_solo
-                        and rta_error_solo > float(
-                            self._cfg_or_default("cps_eval", {}).get(
-                                "separation_tolerance_s", 5.0
-                            )
-                        )
+                    assigned_tta = last_tta.get(acid, float("nan"))
+                    rta_error_cps = (
+                        abs(landing_time - assigned_tta)
+                        if not math.isnan(assigned_tta) else float("nan")
                     )
+                    # TODO (roadmap step 7): genuine solo baseline needs a
+                    # second matched-seed pass injecting ac.eta (raw,
+                    # unconstrained ETASurrogate prediction) via set_tta
+                    # instead of the CPS-scheduled TTA — not computable from
+                    # a single CPS-coordinated rollout alone.
+                    rta_error_solo = float("nan")
+                    recovered = False
 
-                    records[ac.acid] = _EpisodeRecord(
-                        acid=ac.acid,
-                        runway_id=ac.runway_id,
-                        wake_cat=ac.wake_cat,
-                        assigned_tta=last_tta[ac.acid],
+                    records[acid] = _EpisodeRecord(
+                        acid=acid,
+                        runway_id=str(info.get("current_runway", "")),
+                        wake_cat="C",
+                        assigned_tta=assigned_tta,
                         actual_landing_time=landing_time,
                         rta_error_cps=rta_error_cps,
                         rta_error_solo=rta_error_solo,
@@ -664,13 +631,58 @@ class CPSCoordinationExperiment(BaseExperiment):
                         success=success,
                     )
 
-            sim_time += 1.0
-
-        # Close envs
-        for env in envs:
-            env.close()
+            sim_time += ACTION_TIME
+            obs, info_list = env.get_active_batch()
 
         return list(records.values())
+
+    def _build_fleet(
+        self, obs: dict, info_list: List[dict], current_time: float
+    ) -> List[AircraftState]:
+        """Construct ``AircraftState`` records from the env's current batch.
+
+        Note: (x, y) here are the env's Schiphol-centred normalised
+        coordinates — correct for CPSManager's own bookkeeping, but *not*
+        the IAF-relative frame ETASurrogate's training features expect (see
+        eta_surrogate.py's module docstring). Wiring a real fitted surrogate
+        needs that geometry reconciled; until then ``surrogate`` is only
+        exercised via :meth:`_build_surrogate`'s fallback path and ETAs
+        default to :meth:`_estimate_naive_eta`.
+        """
+        fleet = []
+        for row, info in enumerate(info_list):
+            x, y = float(obs["observation"][row][0]), float(obs["observation"][row][1])
+            elapsed_steps = info["sim_time"] / ACTION_TIME
+            heading_deg = float(np.degrees(info["heading"]))
+            eta = self._estimate_naive_eta(obs["observation"][row], info, current_time)
+            fleet.append(
+                AircraftState(
+                    acid=info["acid"],
+                    state=np.array([x, y, elapsed_steps, heading_deg], dtype=np.float32),
+                    runway_id=str(info["current_runway"]),
+                    eta=eta,
+                    wake_cat="C",
+                )
+            )
+        return fleet
+
+    @staticmethod
+    def _estimate_naive_eta(obs_row: np.ndarray, info: dict, current_time: float) -> float:
+        """Straight-line ETA estimate: current_time + (distance to the
+        assigned runway's IAF, at constant SPEED).
+
+        Used as CPSManager's ETA source whenever a fitted ETASurrogate isn't
+        wired in (see :meth:`_build_fleet`'s note on the coordinate-frame gap)
+        — good enough to validate the k-CPS sequencing pipeline end-to-end
+        (roadmap steps 3-4), not a substitute for the trained surrogate's
+        prediction.
+        """
+        goal_vector = info["goal_vector"]
+        dx = float(goal_vector[0]) - float(obs_row[0])
+        dy = float(goal_vector[1]) - float(obs_row[1])
+        dist_km = math.hypot(dx, dy) * MAX_DISTANCE
+        remaining_s = (dist_km * 1000.0) / SPEED
+        return current_time + remaining_s
 
     # ------------------------------------------------------------------ #
     # Aggregate metric computation
@@ -851,11 +863,22 @@ class CPSCoordinationExperiment(BaseExperiment):
     # ------------------------------------------------------------------ #
 
     def _build_surrogate(self) -> Optional[ETASurrogate]:
-        """Construct an ETASurrogate from the configured sampler path, or None."""
-        sampler_path = self.cfg.env.env_kwargs.rta_sampler_path  # type: ignore[attr-defined]
-        if not sampler_path:
+        """Construct an ETASurrogate from CPSModelConfig.eta_surrogate_path.
+
+        Falls back to the canonical ``cps_coordination/models/eta_surrogate.pkl``
+        if the field is unset and that file exists; returns ``None`` (naive
+        straight-line ETA estimate, see ``_estimate_naive_eta``) otherwise.
+        """
+        mcfg = cast(CPSModelConfig, self.cfg.model)
+        path = mcfg.eta_surrogate_path
+        if not path:
+            default_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "models", "eta_surrogate.pkl")
+            )
+            path = default_path if os.path.exists(default_path) else None
+        if not path:
             return None
-        return ETASurrogate.from_sampler_path(sampler_path, sim_dt=1.0)
+        return ETASurrogate.from_sampler_path(path, sim_dt=1.0)
 
     def _load_recat_matrix(self) -> Dict[str, Dict[str, float]]:
         """Load the RECAT-EU matrix from cps_base.yaml, or use a safe default.
@@ -910,23 +933,3 @@ class CPSCoordinationExperiment(BaseExperiment):
             return data.get(section, default)
         return default
 
-    @staticmethod
-    def _obs_to_state(obs: Any) -> np.ndarray:
-        """Extract the flat state vector from a Gymnasium observation.
-
-        For Dict observations (HER-compatible), uses the ``"observation"``
-        key.  For Box observations, returns the array directly.
-
-        Parameters
-        ----------
-        obs : Any
-            Observation from ``env.step()`` or ``env.reset()``.
-
-        Returns
-        -------
-        np.ndarray
-            1-D float32 feature vector for the ETASurrogate.
-        """
-        if isinstance(obs, dict):
-            return np.asarray(obs.get("observation", obs), dtype=np.float32).flatten()
-        return np.asarray(obs, dtype=np.float32).flatten()

@@ -35,7 +35,7 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, get_args, TYPE_CHECKING
+from typing import Dict, List, Literal, Optional, Tuple, get_args, TYPE_CHECKING
 
 import numpy as np
 
@@ -148,6 +148,10 @@ class CPSManager:
         self._fleet_index: Dict[str, int] = {}
         self._prev_ttas: Dict[str, float] = {}
         self._last_plan_time: float = -math.inf
+        # Last (tta, wake_cat) committed per runway, persisted across
+        # replanning cycles even after the responsible aircraft leaves the
+        # active fleet — see _greedy_schedule.
+        self._runway_last_committed: Dict[str, Tuple[float, str]] = {}
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -247,6 +251,7 @@ class CPSManager:
         self._fleet_index = {}
         self._prev_ttas = {}
         self._last_plan_time = -math.inf
+        self._runway_last_committed = {}
         if self._trajectory_buffer is not None:
             self._trajectory_buffer.reset()
 
@@ -330,7 +335,15 @@ class CPSManager:
 
           TTA_i = max(ETA_i, TTA_{prev_on_same_runway} + ΔT_sep(prev, i))
 
-        Each runway is tracked independently.
+        Each runway is tracked independently. The "previous aircraft on this
+        runway" is seeded from ``self._runway_last_committed`` (persisted
+        across replanning cycles) whenever *sequence* doesn't itself contain
+        an earlier aircraft for that runway — otherwise, once an aircraft
+        lands and leaves the active fleet, a later cycle's ``sequence``
+        no longer contains it and the separation guarantee against it would
+        silently be forgotten (confirmed as a real bug: two aircraft
+        scheduled on the same runway in different replanning cycles could
+        land closer together than RECAT-EU allows).
 
         Parameters
         ----------
@@ -340,13 +353,20 @@ class CPSManager:
 
         for ac in sequence:
             rwy = ac.runway_id
-            if rwy not in runway_last:
-                ac.tta = ac.eta
-            else:
+            if rwy in runway_last:
                 prev = runway_last[rwy]
                 sep = self._get_separation(prev.wake_cat, ac.wake_cat)
                 ac.tta = max(ac.eta, prev.tta + sep)
+            elif rwy in self._runway_last_committed:
+                prev_tta, prev_wake_cat = self._runway_last_committed[rwy]
+                sep = self._get_separation(prev_wake_cat, ac.wake_cat)
+                ac.tta = max(ac.eta, prev_tta + sep)
+            else:
+                ac.tta = ac.eta
             runway_last[rwy] = ac
+
+        for rwy, ac in runway_last.items():
+            self._runway_last_committed[rwy] = (ac.tta, ac.wake_cat)
 
     def _get_separation(self, leading_cat: str, trailing_cat: str) -> float:
         """Look up RECAT-EU minimum time separation (seconds).

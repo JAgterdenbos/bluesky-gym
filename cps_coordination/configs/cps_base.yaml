@@ -13,6 +13,8 @@ model:
   delta_t_plan: 60                # Replanning interval ΔT_plan (simulation seconds)
   delta_update: 1.0               # Minimum TTA change δ_update to push a worker update (s)
   runway_assignment_mode: dynamic # "static" | "dynamic"
+  eta_surrogate_path: null        # Path to a fitted ETASurrogate (.pkl); null → fall back to
+                                   # cps_coordination/models/eta_surrogate.pkl if it exists
 
   # Inherited from ModelConfig — not used for training; kept for framework compatibility
   learning_rate: 0.0003
@@ -44,8 +46,6 @@ env:
 
   env_kwargs:
     action_mode: hdg
-    v_app: 140.0            # Nominal approach speed V_app (knots)
-    rta_sampler_path: null  # Path to a fitted GeoRunwaySampler (.pkl)
     runways: null           # null → use all available runways
 
 # ──────────────────────────────────────────────────────────────────────────────

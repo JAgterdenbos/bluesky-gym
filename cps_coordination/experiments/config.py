@@ -14,9 +14,11 @@ Exported classes
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import List, Optional, Type
 
+from bluesky_gym.envs.pathplanning_goal_env import ACTION_TIME
 from bluesky_gym.experiment import (
     EnvConfig,
     EnvKwargsConfig,
@@ -63,6 +65,12 @@ class CPSModelConfig(ModelConfig):
     runway_assignment_mode: str = "dynamic"
     """Runway assignment strategy: ``"static"`` or ``"dynamic"``."""
 
+    eta_surrogate_path: Optional[str] = None
+    """Path to a fitted :class:`ETASurrogate` (joblib pickle). ``None`` falls
+    back to the canonical ``cps_coordination/models/eta_surrogate.pkl`` if it
+    exists, else CPSManager runs without ETA prediction (initial ETA
+    estimates are never refreshed after fleet construction)."""
+
     def __post_init__(self) -> None:
         # Set CPSManager as the sentinel algorithm for path / display purposes.
         # We do NOT call super().__post_init__() because that would try to
@@ -81,6 +89,25 @@ class CPSModelConfig(ModelConfig):
             raise ValueError(
                 f"runway_assignment_mode must be 'static' or 'dynamic', "
                 f"got '{self.runway_assignment_mode}'."
+            )
+        # The worker only reacts to a new desired_goal once per ACTION_TIME
+        # (120s) decision step, so a replanning interval shorter than that
+        # (or not a clean multiple of it) burns CPS replanning compute the
+        # worker can never actually observe the intermediate result of.
+        if self.delta_t_plan < ACTION_TIME:
+            warnings.warn(
+                f"delta_t_plan={self.delta_t_plan}s is shorter than the worker's "
+                f"decision cadence ACTION_TIME={ACTION_TIME}s — replans between "
+                "decision steps are wasted since the worker only sees the TTA "
+                "current at its next step() call.",
+                stacklevel=2,
+            )
+        elif self.delta_t_plan % ACTION_TIME != 0:
+            warnings.warn(
+                f"delta_t_plan={self.delta_t_plan}s is not a clean multiple of "
+                f"ACTION_TIME={ACTION_TIME}s — replanning cadence will drift "
+                "relative to the worker's decision cadence.",
+                stacklevel=2,
             )
 
     def get_algorithm(self) -> Type:
@@ -103,20 +130,11 @@ class CPSEnvKwargsConfig(EnvKwargsConfig):
     Auto-generated CLI flags
     ------------------------
       --env-action-mode       str           Worker action mode ("hdg" | "wpt").
-      --env-v-app             float         Nominal approach speed (knots).
-      --env-rta-sampler-path  str or None   Path to a fitted GeoRunwaySampler.
       --env-runways           list[str]     Active runway identifiers.
     """
 
     action_mode: str = "hdg"
-    """Action mode passed to PathPlanningGoalEnv-v0."""
-
-    v_app: float = 140.0
-    """Nominal approach speed in knots (V_app).  Used for ETA conversion."""
-
-    rta_sampler_path: Optional[str] = None
-    """Path to a serialised ``GeoRunwaySampler``; if ``None``, the worker
-    environment operates without RTA goals (spatial-only policy)."""
+    """Action mode passed to the worker environment."""
 
     runways: Optional[List[str]] = field(default_factory=lambda: None)
     """Subset of active runways.  ``None`` → use all runways registered
