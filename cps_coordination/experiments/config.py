@@ -150,12 +150,24 @@ class CPSEnvConfig(EnvConfig):
 
     Auto-generated CLI flags (in addition to nested CPSEnvKwargsConfig)
     ------------------------
-      --env-env-name      str   Gymnasium environment ID.
+      --env-env-name      str   Experiment-path namespace (NOT a gym.make() id — see below).
       --env-group-key     str   Info-dict key for episode grouping.
       --env-success-key   str   Info-dict key for success signal.
+
+    ``env_name`` is deliberately **not** ``"PathPlanningGoalEnv-v0"``: it feeds
+    ``ExperimentConfig._build_paths()``, which creates
+    ``./experiments/{env_name}/{algo}/{logs,models}/{run_id}/`` on every
+    ``ExperimentConfig`` construction (i.e. every CPS eval run). Reusing the
+    worker's own env id would scatter empty run-id folders into the same
+    directory tree as the actual trained-worker checkpoints
+    (``experiments/PathPlanningGoalEnv-v0/SAC/models/...``). The frozen
+    worker's real gym id is hardcoded separately in
+    ``coordination_baseline.py``'s ``make_env`` (the only place that needs it,
+    and only for framework-compat single-episode preview — the real CPS eval
+    loop uses ``MultiAgentPathPlanningGoalEnv`` directly, never ``gym.make``).
     """
 
     env_kwargs: CPSEnvKwargsConfig = field(default_factory=CPSEnvKwargsConfig)
-    env_name: str = "PathPlanningGoalEnv-v0"
+    env_name: str = "CPSCoordination"
     group_key: str = "current_runway"
     success_key: str = "is_success"

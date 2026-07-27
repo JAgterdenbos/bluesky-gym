@@ -112,7 +112,7 @@ Priority chain: dataclass defaults → this YAML → CLI flags. Key sections:
 
 - `model` — k-CPS hyperparameters (`k_cps`, `delta_t_plan`, `delta_update`, `runway_assignment_mode`, `eta_surrogate_path`)
 - `session` — evaluation-only session settings, `pretrained_run_id`/`pretrained_model_path` for the frozen worker, `eval_episodes`
-- `env` — `env_name: PathPlanningGoalEnv-v0`, `group_key`, `success_key`, `env_kwargs` (`action_mode`, `runways`)
+- `env` — `env_name: CPSCoordination` (experiment-path namespace only, kept distinct from the frozen worker's own `PathPlanningGoalEnv-v0` so eval runs land under `experiments/CPSCoordination/...` instead of scattering into the worker's training-run directory tree), `group_key`, `success_key`, `env_kwargs` (`action_mode`, `runways`)
 - `recat_eu` — RECAT-EU time-based separation matrix (seconds) by leading/trailing wake-turbulence category (A–F)
 - `cps_eval` — evaluation parameters read by `CPSCoordinationExperiment.evaluate()`: `n_aircraft_per_episode`, `separation_tolerance_s`, `ripple_lag`, `throughput_window_h`
 

@@ -96,7 +96,6 @@ from bluesky_gym.envs.pathplanning_goal_env import (
     OVERLAPPING_RUNWAYS,
     FAF_DISTANCE,
     IAF_DISTANCE,
-    MIN_DISTANCE,
     MAX_DISTANCE,
     MAX_TIME,
     SPEED,
@@ -104,7 +103,6 @@ from bluesky_gym.envs.pathplanning_goal_env import (
     SIM_DT,
     ACTION_TIME,
     ACTION_FREQUENCY,
-    DISTANCE_MARGIN,
     RTA_TOLERANCE,
     POPULATION_WEIGHT,
     PATH_LENGTH_WEIGHT,
@@ -640,9 +638,19 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
     # ------------------------------------------------------------------ #
 
     def _get_spawn(self):
+        """Spawn at a fixed edge radius (random bearing only).
+
+        Deliberately diverges from ``PathPlanningGoalEnv._get_spawn`` (which
+        draws spawn *distance* uniformly across the whole annulus — intentional
+        domain randomization for training the frozen worker across variable
+        distance-to-go). For CPS coordination evaluation, aircraft should
+        model arrivals entering at a fixed sector/TMA boundary, so distance is
+        pinned at the existing 0.95 * MAX_DISTANCE upper bound (already used
+        as the old sampling range's ceiling, with headroom below the
+        1.05 * MAX_DISTANCE out_of_bounds threshold) rather than resampled.
+        """
         spawn_bearing = self.np_random.uniform(0, 360)
-        min_spawn_dist = (MIN_DISTANCE + DISTANCE_MARGIN) / MAX_DISTANCE
-        spawn_distance = self.np_random.uniform(min_spawn_dist, 0.95) * MAX_DISTANCE
+        spawn_distance = 0.95 * MAX_DISTANCE
         spawn_lat, spawn_lon = fn.get_point_at_distance(
             SCHIPHOL[0], SCHIPHOL[1], spawn_distance, spawn_bearing
         )

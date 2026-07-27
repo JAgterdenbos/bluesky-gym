@@ -40,7 +40,11 @@ session:
     - csv_logger
 
 env:
-  env_name: PathPlanningGoalEnv-v0
+  # Experiment-path namespace only (./experiments/{env_name}/...) — NOT the
+  # frozen worker's gym.make() id. Deliberately distinct from
+  # "PathPlanningGoalEnv-v0" so CPS eval runs don't write into that env's own
+  # training-run directory tree. See CPSEnvConfig's docstring.
+  env_name: CPSCoordination
   group_key: current_runway
   success_key: is_success
 

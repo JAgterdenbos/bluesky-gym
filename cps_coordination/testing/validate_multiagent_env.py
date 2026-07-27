@@ -3,9 +3,24 @@ Regression gates for Phase III roadmap steps 1-2.
 
 Step 1: at ``max_concurrent_aircraft=1, n_aircraft_total=1``,
 ``MultiAgentPathPlanningGoalEnv`` must reproduce ``PathPlanningGoalEnv-v0``
-bit-for-bit given the same seed and action sequence. This isolates "did the
-single-aircraft logic get generalised correctly" from "does multi-aircraft
-slot/index bookkeeping work" before any real concurrency is introduced.
+bit-for-bit given an *identical spawn point* and action sequence. This
+isolates "did the single-aircraft stepping/reward/termination logic get
+generalised correctly" from "does multi-aircraft slot/index bookkeeping
+work" before any real concurrency is introduced.
+
+Both envs' ``_get_spawn`` are monkeypatched to a fixed value for this check
+only — production code is untouched. This is necessary because the two envs'
+``_get_spawn`` are deliberately *not* identical: ``PathPlanningGoalEnv``
+spawns at a uniformly-random distance (intentional domain randomization for
+training the frozen worker across variable distance-to-go, see
+``docs/paper/Thesis_Paper_draft.pdf``'s DTG-based training rationale), while
+``MultiAgentPathPlanningGoalEnv`` was changed to spawn at a fixed edge radius
+(0.95 * MAX_DISTANCE) for CPS coordination evaluation, modelling aircraft
+entering at a fixed sector/TMA boundary rather than the worker's training
+distribution. Pinning both to the same spawn point for this check re-isolates
+the invariant it was designed for (stepping mechanics) from that now-
+intentional spawn-distribution divergence, rather than comparing two
+different random distributions and calling any mismatch a bug.
 
 Step 2: at ``max_concurrent_aircraft=2, n_aircraft_total=3`` (so a mid-episode
 ``bs.traf.delete()`` and a respawn into the freed slot are both exercised),
@@ -23,11 +38,32 @@ import numpy as np
 import gymnasium as gym
 
 import bluesky_gym
+import bluesky_gym.envs.common.functions as fn
 from bluesky_gym.envs.multi_agent_pathplanning_env import MultiAgentPathPlanningGoalEnv
+from bluesky_gym.envs.pathplanning_goal_env import SCHIPHOL
 
 SEED = 42
 ACTION_SEED = 123
 MAX_STEPS = 300  # generous upper bound; episodes end well before MAX_TIME/ACTION_TIME
+
+# Fixed spawn point for the step-1 bit-for-bit check (see module docstring for
+# why both envs' _get_spawn are monkeypatched to this rather than relying on
+# matching seeds to independently produce the same draw).
+_FIXED_SPAWN_BEARING = 45.0
+_FIXED_SPAWN_DISTANCE_KM = 200.0
+_FIXED_SPAWN_LAT, _FIXED_SPAWN_LON = fn.get_point_at_distance(
+    SCHIPHOL[0], SCHIPHOL[1], _FIXED_SPAWN_DISTANCE_KM, _FIXED_SPAWN_BEARING
+)
+_FIXED_SPAWN_HEADING = (_FIXED_SPAWN_BEARING + 180) % 360
+
+
+def _fixed_spawn():
+    """Stub matching ``_get_spawn``'s ``(lat, lon, heading)`` return, with no
+    ``np_random`` draws — keeps the subsequent runway-choice draw in sync
+    between the two envs, since neither env's real ``_get_spawn`` consumes
+    the same number of random draws any more (single-agent draws 2 — bearing
+    and distance; multi-agent now draws only 1 — bearing, distance fixed)."""
+    return _FIXED_SPAWN_LAT, _FIXED_SPAWN_LON, _FIXED_SPAWN_HEADING
 
 # Max plausible per-decision-step displacement in normalised (x, y) units:
 # aircraft ground speed is on the order of SPEED=125 m/s, ACTION_TIME=120s
@@ -41,6 +77,7 @@ JUMP_THRESHOLD = 0.15
 def _run_single_agent(seed: int, actions: np.ndarray):
     bluesky_gym.register_envs()
     env = gym.make("PathPlanningGoalEnv-v0").unwrapped
+    env._get_spawn = _fixed_spawn
     obs, info = env.reset(seed=seed)
     trace = [(obs, 0.0, False, False, info)]
     for i in range(MAX_STEPS):
@@ -54,6 +91,7 @@ def _run_single_agent(seed: int, actions: np.ndarray):
 
 def _run_multi_agent(seed: int, actions: np.ndarray):
     env = MultiAgentPathPlanningGoalEnv(max_concurrent_aircraft=1, n_aircraft_total=1)
+    env._get_spawn = _fixed_spawn
     obs_batched, info_list = env.reset(seed=seed)
     trace = [(obs_batched, 0.0, False, False, info_list[0])]
     for i in range(MAX_STEPS):

@@ -79,6 +79,13 @@ from cps_coordination.experiments.config import (
     CPSModelConfig,
 )
 
+# The frozen worker's actual registered gym id. Deliberately NOT read from
+# ``cfg.env.env_name`` — that field is now the experiment-path namespace
+# (see CPSEnvConfig docstring), kept distinct from "PathPlanningGoalEnv-v0"
+# so CPS eval runs don't scatter empty run-id folders into the trained
+# worker's own experiments/PathPlanningGoalEnv-v0/SAC/ directory tree.
+_WORKER_ENV_ID = "PathPlanningGoalEnv-v0"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Registry
@@ -288,6 +295,13 @@ class _EpisodeRecord:
     rta_error_solo: float             # |actual_time - unconstrained ETA| (baseline)
     recovered: bool                   # Whether an RTA violation was corrected
     success: bool
+    arrival_index: int = -1           # n-th aircraft to spawn this episode (join key
+                                       # for the two-pass baseline — robust to acid
+                                       # reuse under a rolling-arrival-stream config,
+                                       # unlike joining by acid directly).
+    death_cause: Optional[str] = None
+    traj_x: List[float] = field(default_factory=list)  # populated only when
+    traj_y: List[float] = field(default_factory=list)  # _run_episode(track_trajectory=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -338,11 +352,7 @@ class CPSCoordinationExperiment(BaseExperiment):
 
         bluesky_gym.register_envs()
 
-        env_name = self.cfg.env.env_name
-        if env_name is None:
-            raise ValueError("env_name is not set in CPSEnvConfig.")
-
-        env = gym.make(env_name, render_mode=render_mode, **env_kwargs)
+        env = gym.make(_WORKER_ENV_ID, render_mode=render_mode, **env_kwargs)
         env.reset()
         return Monitor(env)
 
@@ -466,14 +476,23 @@ class CPSCoordinationExperiment(BaseExperiment):
         recat_matrix = self._load_recat_matrix()
         surrogate = self._build_surrogate()
 
-        cps_manager = CPSManager(
-            k_cps=mcfg.k_cps,
-            recat_matrix=recat_matrix,
-            runway_assignment_mode=mcfg.runway_assignment_mode,
-            delta_t_plan=mcfg.delta_t_plan,
-            delta_update=mcfg.delta_update,
-            available_runways=list(cfg.env.env_kwargs.runways or ALL_RUNWAYS),
-        )
+        def _new_cps_manager() -> CPSManager:
+            return CPSManager(
+                k_cps=mcfg.k_cps,
+                recat_matrix=recat_matrix,
+                runway_assignment_mode=mcfg.runway_assignment_mode,
+                delta_t_plan=mcfg.delta_t_plan,
+                delta_update=mcfg.delta_update,
+                available_runways=list(cfg.env.env_kwargs.runways or ALL_RUNWAYS),
+            )
+
+        # Two independent CPSManager instances — one per pass — so that the
+        # CPS run's replanning state (_runway_last_committed/_prev_ttas) never
+        # leaks into the solo run's, or vice versa (see roadmap step 7: the
+        # solo baseline must be a genuinely independent rollout, not derived
+        # from the CPS trajectory after the fact).
+        cps_manager = _new_cps_manager()
+        solo_manager = _new_cps_manager()
 
         n_episodes = cfg.session.eval_episodes
         n_aircraft = self._get_n_aircraft()
@@ -492,16 +511,42 @@ class CPSCoordinationExperiment(BaseExperiment):
 
         try:
             for ep_idx in range(n_episodes):
-                ep_records = self._run_episode(
+                # Matched-seed two-pass baseline (roadmap step 7): the CPS run
+                # and the solo/unconstrained control must see the identical
+                # spawn/runway draw, or any landing-time difference is
+                # confounded with random variation rather than caused by CPS
+                # coordination. Re-running the *same* env with the same seed
+                # (rather than deriving "solo" from the CPS trajectory after
+                # the fact) is required because the two rollouts are causally
+                # different from the first decision step onward.
+                ep_seed = ep_idx
+
+                cps_records = self._run_episode(
                     env=env,
                     model=model,
                     cps_manager=cps_manager,
                     surrogate=surrogate,
                     deterministic=deterministic,
                     ep_idx=ep_idx,
+                    seed=ep_seed,
+                    tta_mode="cps",
                 )
-                all_records.extend(ep_records)
                 cps_manager.reset()
+
+                solo_records = self._run_episode(
+                    env=env,
+                    model=model,
+                    cps_manager=solo_manager,
+                    surrogate=surrogate,
+                    deterministic=deterministic,
+                    ep_idx=ep_idx,
+                    seed=ep_seed,
+                    tta_mode="solo",
+                )
+                solo_manager.reset()
+
+                ep_records = self._join_two_pass(cps_records, solo_records)
+                all_records.extend(ep_records)
 
                 for rec in ep_records:
                     results[rec.runway_id].append(rec.success)
@@ -527,6 +572,8 @@ class CPSCoordinationExperiment(BaseExperiment):
         deterministic: bool,
         ep_idx: int,
         seed: Optional[int] = None,
+        tta_mode: str = "cps",
+        track_trajectory: bool = False,
     ) -> List[_EpisodeRecord]:
         """Run one episode in the shared multi-aircraft env.
 
@@ -538,12 +585,26 @@ class CPSCoordinationExperiment(BaseExperiment):
         until every aircraft scheduled for this episode has landed or been
         truncated (``env.is_episode_done()``).
 
-        Note: with ``max_concurrent_aircraft == n_aircraft_total`` (today's
-        one-wave-per-episode config, see :meth:`_make_multi_agent_env`),
-        each per-slot acid spawns exactly once per episode, so keying
-        ``records`` by acid is safe. A rolling-arrival-stream config
-        (n_aircraft_total > max_concurrent) would need a different key,
-        since acids are reused per-slot across respawns.
+        Two-pass solo baseline (roadmap step 7)
+        ----------------------------------------
+        ``tta_mode`` selects what gets injected via ``env.set_tta`` each
+        step, but otherwise runs the identical loop (same fleet-building,
+        same ``cps_manager.update_fleet`` call, same dynamic-runway sync):
+
+        - ``"cps"``  — inject ``cps_manager.get_tta(acid)`` (the k-CPS
+          greedy-scheduled TTA), gated by ``changed`` (only when the
+          scheduled TTA actually shifted) — today's behaviour.
+        - ``"solo"`` — inject ``ac.eta`` directly (the surrogate's raw,
+          unconstrained per-aircraft ETA prediction *before* k-CPS
+          scheduling), every step, for every active aircraft. This is the
+          frozen worker's own unconstrained target, uncontaminated by the
+          CPS scheduler's positional shifting.
+
+        The caller (``evaluate()``) runs both modes against the *same* env
+        with the *same* seed and joins the two aircraft-indexed record sets
+        by ``arrival_index`` — never by acid, since a rolling-arrival-stream
+        config would reuse acids per-slot and a literal-callsign join could
+        pair the wrong physical flights across passes.
 
         Parameters
         ----------
@@ -552,7 +613,9 @@ class CPSCoordinationExperiment(BaseExperiment):
         model : SAC
             Frozen worker policy.
         cps_manager : CPSManager
-            Sequence manager (reset before each episode by the caller).
+            Sequence manager for *this pass* (reset before each episode by
+            the caller) — must be a separate instance per pass so replanning
+            state never leaks between the CPS and solo rollouts.
         surrogate : ETASurrogate or None
             ETA prediction model. ``None`` → ETAs come only from the naive
             straight-line estimate computed at fleet-build time (see
@@ -561,20 +624,40 @@ class CPSCoordinationExperiment(BaseExperiment):
             Whether to use deterministic policy predictions.
         ep_idx : int
             Episode index (used for logging).
+        tta_mode : str
+            ``"cps"`` or ``"solo"`` — see above.
 
         Returns
         -------
         List[_EpisodeRecord]
-            One record per aircraft in this episode.
+            One record per aircraft in this episode, in arrival order.
+            ``rta_error_solo`` is left as NaN here in both modes — the
+            caller fills it in during the join (see :meth:`_join_two_pass`).
         """
+        if tta_mode not in ("cps", "solo"):
+            raise ValueError(f"tta_mode must be 'cps' or 'solo', got {tta_mode!r}")
+
         obs, info_list = env.reset(seed=seed)
         sim_time = 0.0
         records: Dict[str, _EpisodeRecord] = {}
         last_tta: Dict[str, float] = {}
+        arrival_order: Dict[str, int] = {}
+        trajectories: Dict[str, Tuple[List[float], List[float]]] = defaultdict(lambda: ([], []))
 
         while not env.is_episode_done():
+            for info in info_list:
+                acid = info["acid"]
+                if acid not in arrival_order:
+                    arrival_order[acid] = len(arrival_order)
+
             fleet = self._build_fleet(obs, info_list, sim_time)
             acid_to_slot = {info["acid"]: info["slot"] for info in info_list}
+
+            if track_trajectory:
+                for ac in fleet:
+                    xs, ys = trajectories[ac.acid]
+                    xs.append(float(ac.state[0]))
+                    ys.append(float(ac.state[1]))
 
             # --- CPS coordination step ---
             changed = cps_manager.update_fleet(
@@ -590,11 +673,16 @@ class CPSCoordinationExperiment(BaseExperiment):
                 if ac.runway_id != env.current_runway[slot]:
                     env.set_runway(slot, ac.runway_id)
 
-            for acid in changed:
-                tta = cps_manager.get_tta(acid)
-                if tta is not None:
-                    last_tta[acid] = tta
-                    env.set_tta(acid_to_slot[acid], tta)
+            if tta_mode == "cps":
+                for acid in changed:
+                    tta = cps_manager.get_tta(acid)
+                    if tta is not None:
+                        last_tta[acid] = tta
+                        env.set_tta(acid_to_slot[acid], tta)
+            else:  # "solo" — inject the raw, unconstrained ETA every step.
+                for ac in fleet:
+                    last_tta[ac.acid] = ac.eta
+                    env.set_tta(acid_to_slot[ac.acid], ac.eta)
 
             # Refresh after set_runway/set_tta before the frozen policy acts.
             obs, info_list = env.get_active_batch()
@@ -611,13 +699,8 @@ class CPSCoordinationExperiment(BaseExperiment):
                         abs(landing_time - assigned_tta)
                         if not math.isnan(assigned_tta) else float("nan")
                     )
-                    # TODO (roadmap step 7): genuine solo baseline needs a
-                    # second matched-seed pass injecting ac.eta (raw,
-                    # unconstrained ETASurrogate prediction) via set_tta
-                    # instead of the CPS-scheduled TTA — not computable from
-                    # a single CPS-coordinated rollout alone.
-                    rta_error_solo = float("nan")
                     recovered = False
+                    traj_x, traj_y = trajectories[acid] if track_trajectory else ([], [])
 
                     records[acid] = _EpisodeRecord(
                         acid=acid,
@@ -626,9 +709,13 @@ class CPSCoordinationExperiment(BaseExperiment):
                         assigned_tta=assigned_tta,
                         actual_landing_time=landing_time,
                         rta_error_cps=rta_error_cps,
-                        rta_error_solo=rta_error_solo,
+                        rta_error_solo=float("nan"),
                         recovered=recovered,
                         success=success,
+                        arrival_index=arrival_order[acid],
+                        death_cause=info.get("death_cause"),
+                        traj_x=list(traj_x),
+                        traj_y=list(traj_y),
                     )
 
             sim_time += ACTION_TIME
@@ -636,18 +723,61 @@ class CPSCoordinationExperiment(BaseExperiment):
 
         return list(records.values())
 
+    @staticmethod
+    def _join_two_pass(
+        cps_records: List[_EpisodeRecord],
+        solo_records: List[_EpisodeRecord],
+    ) -> List[_EpisodeRecord]:
+        """Join a CPS-pass and solo-pass record set by ``arrival_index``.
+
+        Returns the CPS-pass records (runway/success/assigned_tta/landing
+        time all come from the CPS-coordinated rollout) with ``rta_error_solo``
+        filled in from the matching solo-pass record's own tracking error
+        (``rta_error_cps`` field of that record, since :meth:`_run_episode`
+        computes "error vs. whatever was actually injected" identically in
+        both modes — in solo mode that's the unconstrained ETA). Joining by
+        ``arrival_index`` rather than ``acid`` keeps this correct even under
+        a future rolling-arrival-stream config where per-slot acids repeat.
+
+        An arrival present in one pass but not the other (e.g. a truncation
+        that changes step timing enough to shift a later spawn) is dropped
+        with a printed warning rather than silently producing a NaN Δε.
+        """
+        solo_by_arrival = {rec.arrival_index: rec for rec in solo_records}
+
+        joined: List[_EpisodeRecord] = []
+        for cps_rec in cps_records:
+            solo_rec = solo_by_arrival.get(cps_rec.arrival_index)
+            if solo_rec is None:
+                print(
+                    f"WARNING: no solo-pass match for arrival_index="
+                    f"{cps_rec.arrival_index} (acid={cps_rec.acid!r}); "
+                    "dropping from this episode's joined records."
+                )
+                continue
+            cps_rec.rta_error_solo = solo_rec.rta_error_cps
+            joined.append(cps_rec)
+        return joined
+
     def _build_fleet(
         self, obs: dict, info_list: List[dict], current_time: float
     ) -> List[AircraftState]:
         """Construct ``AircraftState`` records from the env's current batch.
 
-        Note: (x, y) here are the env's Schiphol-centred normalised
-        coordinates — correct for CPSManager's own bookkeeping, but *not*
-        the IAF-relative frame ETASurrogate's training features expect (see
-        eta_surrogate.py's module docstring). Wiring a real fitted surrogate
-        needs that geometry reconciled; until then ``surrogate`` is only
-        exercised via :meth:`_build_surrogate`'s fallback path and ETAs
-        default to :meth:`_estimate_naive_eta`.
+        ``eta`` is seeded here with :meth:`_estimate_naive_eta` (a
+        straight-line placeholder) for every aircraft — this is what
+        ``CPSManager`` sees before its first replanning cycle, and what it
+        falls back to permanently when no surrogate is supplied. When
+        ``update_fleet(..., surrogate=<real ETASurrogate>)`` is called (as
+        :meth:`evaluate` does via :meth:`_build_surrogate`), ``_refresh_etas``
+        overwrites every aircraft's ``eta`` in place with
+        ``surrogate.predict_eta_fleet(...)`` each planning cycle — see
+        ``cps_manager.py``. (x, y) here are the env's Schiphol-centred
+        normalised coordinates; ``cartesian_to_polar`` computes the
+        surrogate's ``r``/``theta`` features from that same raw frame at both
+        training and inference time, so no coordinate reconciliation is
+        needed (see the "Coordinate-frame finding" in the Phase III plan and
+        ``eta_surrogate.py``'s module docstring).
         """
         fleet = []
         for row, info in enumerate(info_list):
@@ -878,7 +1008,15 @@ class CPSCoordinationExperiment(BaseExperiment):
             path = default_path if os.path.exists(default_path) else None
         if not path:
             return None
-        return ETASurrogate.from_sampler_path(path, sim_dt=1.0)
+        # sim_dt here is "seconds per unit of the model's predicted step
+        # count", NOT bluesky's SIM_DT (5s physics tick). The surrogate is
+        # trained against path_planning/rta/collect.py's "step" column,
+        # which increments once per env.step() call (i.e. once per
+        # ACTION_TIME=120s decision step, not once per 5s physics tick) —
+        # see cps_coordination/testing/surrogate_data.py's steps_to_go
+        # derivation. Passing SIM_DT or 1.0 here would undervalue every
+        # predicted ETA by ~24x-120x.
+        return ETASurrogate.from_sampler_path(path, sim_dt=ACTION_TIME)
 
     def _load_recat_matrix(self) -> Dict[str, Dict[str, float]]:
         """Load the RECAT-EU matrix from cps_base.yaml, or use a safe default.

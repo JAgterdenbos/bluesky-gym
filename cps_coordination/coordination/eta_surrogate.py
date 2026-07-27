@@ -25,8 +25,12 @@ so they survive joblib serialisation.
 
 Canonical feature set (13 columns, in order)
 --------------------------------------------
- 0  r                   √(x²+y²)
- 1  θ                   bearing angle from IAF, radians
+ 0  r                   √(x²+y²), from the raw Schiphol-centred (x, y) —
+                        NOT IAF-relative (see ``cartesian_to_polar``)
+ 1  θ                   bearing angle, from the raw Schiphol-centred (x, y) —
+                        NOT IAF-relative; only ``along_track_dist``/
+                        ``cross_track_error``/``heading_error`` (rows 7-9)
+                        use the IAF-relative ``dx = x - iaf_x``
  2  rwy_code            LabelEncoder integer
  3  elapsed_steps       episode step count
  4  sin_ψ               sin(heading_rad)
@@ -65,8 +69,17 @@ def cartesian_to_polar(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convert normalised Cartesian position to polar coordinates.
 
-    The origin is assumed to be the IAF.  Angles follow the bearing
-    convention: θ = 0 points north, increases clockwise.
+    The origin is the raw Schiphol-centred frame (the same ``(x, y)``
+    ``_build_feature_matrix`` receives) — NOT the IAF. Both
+    ``eta_surrogate.py::_build_feature_matrix`` and
+    ``surrogate_data.py::build_feature_matrix`` (used by both
+    ``select_surrogate_features.py`` and ``train_surrogate.py``) call this on raw
+    Schiphol-centred coordinates identically at training and inference time,
+    so there is no train/inference frame mismatch despite the name
+    similarity to the IAF-relative features computed elsewhere in the same
+    feature vector (``along_track_dist``/``cross_track_error``/
+    ``heading_error``, which do use IAF-relative ``dx, dy``). Angles follow
+    the bearing convention: θ = 0 points north, increases clockwise.
 
     Parameters
     ----------
