@@ -120,10 +120,21 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         Maximum number of aircraft simultaneously active ("slots").
     n_aircraft_total : int
         Total number of arrivals to generate over the episode. A new
-        aircraft is spawned into any freed slot immediately after the
-        aircraft occupying it terminates, until this many have been
-        spawned. The episode ends once this many have spawned *and*
+        aircraft is spawned into any freed slot once its scheduled arrival
+        time (see ``spawn_window_s``) has elapsed, until this many have
+        been spawned. The episode ends once this many have spawned *and*
         terminated.
+    spawn_window_s : float
+        Width (seconds) of the arrival window. Each arrival's scheduled
+        spawn time is drawn i.i.d. ``Uniform(0, spawn_window_s)`` at
+        ``reset()`` (sorted, so arrivals are offered in ascending time
+        order); an arrival spawns into a free slot once its scheduled time
+        has elapsed *and* a slot is free (the schedule is a lower bound on
+        spawn time, not an exact instant — a slot may still be occupied).
+        Default ``0.0`` reproduces the original behavior exactly: every
+        arrival is eligible from time zero, so the initial wave spawns
+        immediately at ``reset()`` and any freed slot refills on the next
+        decision step.
     """
 
     metadata = {"render_modes": [], "render_fps": 0}
@@ -135,6 +146,7 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         action_mode: str = "hdg",
         max_concurrent_aircraft: int = 5,
         n_aircraft_total: int = 20,
+        spawn_window_s: float = 0.0,
     ):
         if action_mode != "hdg":
             raise NotImplementedError(
@@ -150,6 +162,7 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
 
         self.max_concurrent_aircraft = max_concurrent_aircraft
         self.n_aircraft_total = n_aircraft_total
+        self.spawn_window_s = spawn_window_s
 
         # Per-slot single-aircraft space (documentation/registry contract) —
         # runtime obs/action arrays stack this along a leading batch axis.
@@ -229,6 +242,7 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         self.total_reward: List[float] = [0.0] * n
         self.average_noise: List[float] = [0.0] * n
         self.average_path: List[float] = [0.0] * n
+        self._slot_spawn_time: List[float] = [0.0] * n
         self._n_spawned = 0
         self._n_terminated = 0
 
@@ -251,9 +265,18 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         self._reset_slot_state()
         self._acid_to_idx = {}
 
-        n_initial = min(self.max_concurrent_aircraft, self.n_aircraft_total)
-        for slot in range(n_initial):
-            self._spawn_into_slot(slot)
+        self._episode_time = 0.0
+        self._next_arrival_idx = 0
+        if self.spawn_window_s > 0:
+            self._spawn_schedule = np.sort(
+                self.np_random.uniform(0.0, self.spawn_window_s, size=self.n_aircraft_total)
+            )
+        else:
+            # Every arrival eligible from time zero — reproduces the
+            # original single-wave-then-instant-refill behavior exactly.
+            self._spawn_schedule = np.zeros(self.n_aircraft_total)
+
+        self._maybe_spawn_scheduled_arrivals()
 
         self._active_slots = [s for s in range(self.max_concurrent_aircraft)
                                if self.acid_slots[s] is not None]
@@ -311,6 +334,7 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         trunc_arr = np.array([truncated[slot] for slot in slots])
         info_list = [frozen_info[slot] for slot in slots]
 
+        self._episode_time += ACTION_TIME
         self._finalize_step(slots, terminated, truncated, idxs)
 
         return obs_batched, rewards, term_arr, trunc_arr, info_list
@@ -350,6 +374,7 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         self.prev_lat[slot] = float(bs.traf.lat[idx])
         self.prev_lon[slot] = float(bs.traf.lon[idx])
         self.simt[slot] = 0.0
+        self._slot_spawn_time[slot] = self._episode_time
         self.has_tta[slot] = False
         self.death_cause[slot] = None
         self.step_reward[slot] = 0.0
@@ -377,16 +402,33 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
                 self._n_terminated += 1
             self._reindex_all()
 
-            remaining_to_spawn = self.n_aircraft_total - self._n_spawned
-            for slot in done_slots:
-                if remaining_to_spawn <= 0:
-                    break
-                self._spawn_into_slot(slot)
-                remaining_to_spawn -= 1
+        self._maybe_spawn_scheduled_arrivals()
 
         self._active_slots = [
             s for s in range(self.max_concurrent_aircraft) if self.acid_slots[s] is not None
         ]
+
+    def _maybe_spawn_scheduled_arrivals(self) -> None:
+        """Spawn any arrivals whose scheduled time has elapsed into free slots.
+
+        ``_spawn_schedule`` (sorted ascending, built in :meth:`reset`) is a
+        lower bound on each arrival's spawn time, not an exact instant — an
+        arrival only spawns once its scheduled time has elapsed *and* a
+        slot is free. Free slots are filled lowest-index first, which
+        reproduces today's deterministic slot-fill order exactly when
+        ``spawn_window_s == 0`` (every scheduled time is 0, so this reduces
+        to "fill every free slot immediately").
+        """
+        free_slots = [
+            s for s in range(self.max_concurrent_aircraft) if self.acid_slots[s] is None
+        ]
+        for slot in free_slots:
+            if self._next_arrival_idx >= self.n_aircraft_total:
+                break
+            if self._spawn_schedule[self._next_arrival_idx] > self._episode_time:
+                break
+            self._spawn_into_slot(slot)
+            self._next_arrival_idx += 1
 
     # ------------------------------------------------------------------ #
     # Observation
@@ -485,10 +527,22 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         assignment right after spawn). Only the temporal (t) component of
         ``desired_goal`` is touched; the spatial target is set separately by
         :meth:`set_runway`.
+
+        ``tta_seconds`` is CPSManager's absolute target on the episode's
+        global clock (necessarily so — RECAT-EU sequencing compares TTAs
+        across aircraft with different spawn times on one shared timeline).
+        Every temporal quantity in this env's own observation/goal space is
+        *local*, zeroed at this slot's own spawn instant (matching the
+        frozen worker's training convention), so the absolute TTA must be
+        converted to "seconds since this aircraft's spawn" before being
+        written into ``goal_vector``. For any slot spawned at global time 0
+        (every slot under the default ``spawn_window_s=0``, and always true
+        for a slot's very first occupant) this is a no-op: local == global.
         """
         if self.acid_slots[slot] is None:
             return
-        self.goal_vector[slot][2] = tta_seconds / MAX_TIME
+        local_tta = tta_seconds - self._slot_spawn_time[slot]
+        self.goal_vector[slot][2] = local_tta / MAX_TIME
         self.has_tta[slot] = True
 
     # ------------------------------------------------------------------ #
@@ -620,6 +674,14 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
             "is_success": is_success,
             "death_cause": self.death_cause[slot],
             "sim_time": self.simt[slot],
+            # Absolute (global-clock) spawn instant of this slot's current
+            # aircraft. "sim_time" above is local (elapsed since spawn, for
+            # the frozen worker's own per-episode timing/rewards) -- a
+            # caller comparing landing times *across* aircraft with
+            # different spawn offsets (throughput, separation compliance,
+            # RTA error against a CPSManager-assigned absolute TTA) needs
+            # spawn_time + sim_time, not sim_time alone.
+            "spawn_time": self._slot_spawn_time[slot],
             "step_reward": self.step_reward[slot],
             "total_reward": self.total_reward[slot],
             "average_path_rew": self.average_path[slot],
@@ -645,12 +707,12 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
         domain randomization for training the frozen worker across variable
         distance-to-go). For CPS coordination evaluation, aircraft should
         model arrivals entering at a fixed sector/TMA boundary, so distance is
-        pinned at the existing 0.95 * MAX_DISTANCE upper bound (already used
-        as the old sampling range's ceiling, with headroom below the
+        pinned at a fixed 0.9 * MAX_DISTANCE radius (a bit inside the old
+        0.95 * MAX_DISTANCE ceiling, with headroom below the
         1.05 * MAX_DISTANCE out_of_bounds threshold) rather than resampled.
         """
         spawn_bearing = self.np_random.uniform(0, 360)
-        spawn_distance = 0.95 * MAX_DISTANCE
+        spawn_distance = 0.9 * MAX_DISTANCE
         spawn_lat, spawn_lon = fn.get_point_at_distance(
             SCHIPHOL[0], SCHIPHOL[1], spawn_distance, spawn_bearing
         )

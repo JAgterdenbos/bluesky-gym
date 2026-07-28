@@ -37,6 +37,7 @@ from typing import Dict, List, Optional
 from bluesky_gym.experiment.config import ExperimentConfig, SessionConfig
 
 from cps_coordination.coordination.cps_manager import CPSManager
+from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
 from cps_coordination.experiments.config import CPSEnvConfig, CPSEnvKwargsConfig, CPSModelConfig
 from cps_coordination.experiments.coordination_baseline import (
     CPSCoordinationExperiment,
@@ -180,6 +181,9 @@ def main() -> None:
             delta_t_plan=args.delta_t_plan,
             delta_update=args.delta_update,
             available_runways=list(cfg.env.env_kwargs.runways) if args.runways else None,
+            # See coordination_baseline.py::evaluate()'s _new_cps_manager for why
+            # this is required (unwired -> zeroed lag features -> degraded ETA).
+            trajectory_buffer=TrajectoryBuffer(),
         )
 
     cps_manager = _new_manager()

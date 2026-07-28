@@ -15,7 +15,7 @@ spawns at a uniformly-random distance (intentional domain randomization for
 training the frozen worker across variable distance-to-go, see
 ``docs/paper/Thesis_Paper_draft.pdf``'s DTG-based training rationale), while
 ``MultiAgentPathPlanningGoalEnv`` was changed to spawn at a fixed edge radius
-(0.95 * MAX_DISTANCE) for CPS coordination evaluation, modelling aircraft
+(0.9 * MAX_DISTANCE) for CPS coordination evaluation, modelling aircraft
 entering at a fixed sector/TMA boundary rather than the worker's training
 distribution. Pinning both to the same spawn point for this check re-isolates
 the invariant it was designed for (stepping mechanics) from that now-

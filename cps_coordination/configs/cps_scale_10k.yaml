@@ -1,0 +1,118 @@
+# cps_coordination/configs/cps_scale_10k.yaml
+# ----------------------------------------
+# Production configuration for the M=10,000-episode CPS coordination
+# scale-up evaluation (Phase III roadmap Step 10).
+#
+# This is a config + launch-script generation step only — it is NOT meant
+# to be run locally end-to-end. Use
+# cps_coordination/testing/run_batch_eval.py to launch the sweep on a
+# cluster/runner, and cps_coordination/testing/smoke_test_step10.py for a
+# capped local M=10 sanity check. See
+# .claude/step10_execution_and_data_collection_plan.md for the full
+# handoff instructions.
+#
+# Priority chain: dataclass defaults -> this YAML file -> CLI flags.
+#
+# Note on scope: unlike cps_base.yaml's `model.k_cps`/`model.
+# runway_assignment_mode`, this config intentionally leaves those two
+# fields at their CPSModelConfig defaults — run_batch_eval.py sweeps both
+# per the --k-cps-sweep/--mode-sweep CLI flags (default 0/1/3 x
+# static/dynamic, 6 combinations) rather than fixing a single value here.
+
+model:
+  # CPS coordination hyper-parameters. k_cps / runway_assignment_mode are
+  # NOT set here - run_batch_eval.py overrides them per sweep combination.
+  delta_t_plan: 120               # Aligned with ACTION_TIME=120s (avoids the
+                                   # CPSModelConfig.validate() cadence-mismatch warning)
+  delta_update: 1.0               # Minimum TTA change delta_update to push a worker update (s)
+  eta_surrogate_path: cps_coordination/models/eta_surrogate.pkl
+
+  # Inherited from ModelConfig - not used for training; kept for framework compatibility
+  learning_rate: 0.0003
+  verbose: 1
+
+session:
+  total_timesteps: 0              # No training steps; evaluation-only experiment
+  do_train: false
+  do_evaluate: true
+  eval_episodes: 10000            # M = 10,000 per (k_cps, runway_assignment_mode) combination
+
+  # Point at a pre-trained path_planning run to use as the frozen worker policy.
+  # Must be overridden at runtime - there is no default worker checkpoint baked
+  # into this file:  --run-id 20260301_120000  (run_batch_eval.py CLI flag)
+  pretrained_run_id: null
+  pretrained_model_path: null
+  pretrained_model_variant: final_model
+
+  train_groups: null
+  eval_groups: null
+  eval_freq: 5000
+  track_training_evals: false
+  callbacks:
+    - csv_logger
+
+env:
+  # Experiment-path namespace only (./experiments/{env_name}/...) - NOT the
+  # frozen worker's gym.make() id. See CPSEnvConfig's docstring.
+  env_name: CPSCoordination
+  group_key: current_runway
+  success_key: is_success
+
+  env_kwargs:
+    action_mode: hdg
+    runways: null           # null -> use all 12 available runways
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RECAT-EU separation matrix: intentionally NOT duplicated here. run_batch_eval.py
+# (like run_cps_eval.py and CPSCoordinationExperiment._load_recat_matrix) loads
+# the recat_eu matrix from cps_base.yaml, so there is a single source of truth
+# for the separation values and a future matrix edit only needs to be made once.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CPS evaluation parameters (read directly by run_batch_eval.py / by
+# CPSCoordinationExperiment.evaluate() via _cfg_or_default/_get_n_aircraft).
+#
+# This extends cps_base.yaml's existing cps_eval: section with the env-sizing
+# and spawn-timing knobs Step 10 needs. There is deliberately no CPSEvalConfig
+# dataclass - n_aircraft_per_episode et al. already live in this free-form
+# section (see CPSCoordinationExperiment._get_n_aircraft/_cfg_or_default), so
+# the new keys below follow that same established pattern rather than
+# inventing a dataclass that doesn't fit the framework.
+# ──────────────────────────────────────────────────────────────────────────────
+cps_eval:
+  n_aircraft_per_episode: 5       # Legacy single-wave field, kept for
+                                   # CPSCoordinationExperiment.evaluate() compat.
+                                   # run_batch_eval.py uses max_concurrent_aircraft/
+                                   # total_arrivals_per_episode below instead.
+  max_concurrent_aircraft: 5      # Maximum simultaneously active aircraft ("slots")
+  total_arrivals_per_episode: 10  # Total arrivals generated per episode (rolling
+                                   # arrival stream: > max_concurrent_aircraft means
+                                   # later arrivals spawn into slots as they free up)
+  spawn_window_s: 1800.0          # Each arrival's scheduled spawn time is drawn
+                                   # i.i.d. Uniform(0, spawn_window_s) at episode
+                                   # reset (MultiAgentPathPlanningGoalEnv's
+                                   # spawn_window_s param) - models arrivals
+                                   # entering the sector over a 30-minute window
+                                   # rather than all at once.
+  separation_tolerance_s: 5.0     # Slack (s) within which C_sep compliance is credited
+  ripple_lag: 1                   # Lag for rho_ripple autocorrelation (always 1 per methodology)
+  throughput_window_h: 1.0        # Time window (hours) for Gamma / Gamma_r calculation
+
+  # wake_cat is NOT a config field: it is hardcoded to "C" in
+  # coordination_baseline.py::_build_fleet (uniform-aircraft-type assumption,
+  # confirmed intentional for this thesis phase - see project memory). There is
+  # nothing to set here; documented for anyone looking for a fixed_wake_cat knob.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Telemetry / logging parameters, read by run_batch_eval.py.
+# ──────────────────────────────────────────────────────────────────────────────
+logging:
+  chunk_size: 250                 # Episodes buffered per Parquet flush (per combo,
+                                   # per stream - see telemetry.py::build_collectors)
+  two_pass_solo: true             # Documents that both the CPS pass and the
+                                   # unconstrained solo pass always run per episode
+                                   # (coordination_baseline.py::_run_episode's
+                                   # tta_mode="cps"/"solo") - there is no
+                                   # single-pass mode today, so this is descriptive
+                                   # rather than a live toggle.

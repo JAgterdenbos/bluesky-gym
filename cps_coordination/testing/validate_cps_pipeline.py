@@ -51,6 +51,7 @@ import numpy as np
 from bluesky_gym.envs.pathplanning_goal_env import MAX_TIME
 from bluesky_gym.experiment.config import ExperimentConfig, SessionConfig
 from cps_coordination.coordination.cps_manager import CPSManager
+from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
 from cps_coordination.experiments.config import CPSEnvConfig, CPSEnvKwargsConfig, CPSModelConfig
 from cps_coordination.experiments.coordination_baseline import CPSCoordinationExperiment
 
@@ -92,6 +93,7 @@ def _run_with_cps(
         delta_t_plan=120,
         delta_update=1.0,
         available_runways=experiment.cfg.env.env_kwargs.runways,
+        trajectory_buffer=TrajectoryBuffer(),
     )
     records = experiment._run_episode(
         env=env, model=model, cps_manager=cps_manager, surrogate=None,
@@ -478,6 +480,7 @@ def check_step7_two_pass_solo_baseline() -> bool:
             delta_t_plan=120,
             delta_update=1.0,
             available_runways=experiment.cfg.env.env_kwargs.runways,
+            trajectory_buffer=TrajectoryBuffer(),
         )
 
     cps_manager = _new_manager()
@@ -575,6 +578,7 @@ def check_step9_surrogate_exercised() -> bool:
             delta_t_plan=120,
             delta_update=1.0,
             available_runways=experiment.cfg.env.env_kwargs.runways,
+            trajectory_buffer=TrajectoryBuffer(),
         )
 
     # --- (a) direct: does one update_fleet(surrogate=<real>) call actually

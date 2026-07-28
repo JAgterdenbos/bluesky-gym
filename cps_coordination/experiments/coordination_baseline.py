@@ -73,6 +73,7 @@ from bluesky_gym.experiment import (
 
 from cps_coordination.coordination.cps_manager import AircraftState, CPSManager
 from cps_coordination.coordination.eta_surrogate import ETASurrogate
+from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
 from cps_coordination.experiments.config import (
     CPSEnvConfig,
     CPSEnvKwargsConfig,
@@ -356,16 +357,22 @@ class CPSCoordinationExperiment(BaseExperiment):
         env.reset()
         return Monitor(env)
 
-    def _make_multi_agent_env(self, n_aircraft: int) -> MultiAgentPathPlanningGoalEnv:
+    def _make_multi_agent_env(
+        self,
+        n_aircraft: int,
+        n_aircraft_total: Optional[int] = None,
+        spawn_window_s: float = 0.0,
+    ) -> MultiAgentPathPlanningGoalEnv:
         """Build the single-BlueSky-instance multi-aircraft env used by the
         CPS coordination evaluation loop.
 
-        ``n_aircraft`` is used as both ``max_concurrent_aircraft`` and
-        ``n_aircraft_total`` for now — i.e. one "wave" of N_a aircraft per
-        episode, matching the original single-wave-per-episode semantics.
-        A true rolling arrival stream (n_aircraft_total > max_concurrent)
-        is a later scaling concern (roadmap step 9), not required for the
-        k=0/k>0 CPS sequencing pipeline validation this supports today.
+        ``n_aircraft`` is ``max_concurrent_aircraft``. ``n_aircraft_total``
+        defaults to ``n_aircraft`` (one "wave" of N_a aircraft per episode,
+        matching the original single-wave-per-episode semantics used by
+        every roadmap step through Step 9) — pass a larger value to get a
+        genuine rolling arrival stream (Step 10's M=10,000 scale-up config).
+        ``spawn_window_s`` defaults to ``0.0`` (every arrival eligible from
+        time zero, i.e. today's instant-spawn/instant-refill behavior).
         """
         env_kwargs = self.cfg.eval_env_kwargs
         runways = env_kwargs.get("runways")
@@ -373,7 +380,8 @@ class CPSCoordinationExperiment(BaseExperiment):
             runways=runways,
             action_mode=env_kwargs.get("action_mode", "hdg"),
             max_concurrent_aircraft=n_aircraft,
-            n_aircraft_total=n_aircraft,
+            n_aircraft_total=n_aircraft_total if n_aircraft_total is not None else n_aircraft,
+            spawn_window_s=spawn_window_s,
         )
 
     def make_model(self, env: gym.Env):  # type: ignore[override]
@@ -484,6 +492,13 @@ class CPSCoordinationExperiment(BaseExperiment):
                 delta_t_plan=mcfg.delta_t_plan,
                 delta_update=mcfg.delta_update,
                 available_runways=list(cfg.env.env_kwargs.runways or ALL_RUNWAYS),
+                # Without this, lag features (delta_atd/cumabs_cte/heading_volatility)
+                # are implicitly zero on every ETASurrogate call -- out-of-distribution
+                # input for a model trained with those features populated (they
+                # survived feature-importance reduction, see
+                # cps_coordination/models/surrogate_feature_selection.yaml), which is
+                # what was silently degrading ETA accuracy well outside RTA_TOLERANCE.
+                trajectory_buffer=TrajectoryBuffer(),
             )
 
         # Two independent CPSManager instances — one per pass — so that the
@@ -506,6 +521,7 @@ class CPSCoordinationExperiment(BaseExperiment):
             f"\n  episodes={n_episodes}, aircraft/episode={n_aircraft}"
             f"\n  k_cps={mcfg.k_cps}, mode={mcfg.runway_assignment_mode}"
             f"\n  eta_surrogate={'loaded' if surrogate else 'none (naive ETA estimate)'}"
+            f"\n  wake_separation={'reduced x' + str(mcfg.wake_separation_scale) if mcfg.reduced_wake_separation else 'full RECAT-EU'}"
             f"\n  frozen worker: {cfg.session.pretrained_model_path}\n"
         )
 
@@ -692,7 +708,20 @@ class CPSCoordinationExperiment(BaseExperiment):
             for row, info in enumerate(info_terminal):
                 if terminated[row] or truncated[row]:
                     acid = info["acid"]
-                    landing_time = float(info.get("sim_time", sim_time))
+                    # "sim_time" is local (elapsed since this aircraft's own
+                    # spawn); assigned_tta/cps_manager.get_tta/ac.eta are all
+                    # on the episode's global clock (CPSManager sequences
+                    # TTAs across aircraft with different spawn times, so
+                    # they have to be). Converting to a global landing time
+                    # here is a no-op whenever spawn_time == 0 (every
+                    # existing single-wave config), and is required for
+                    # rta_error_cps/rta_error_solo to compare like with
+                    # like, and for actual_landing_time to be meaningfully
+                    # comparable *across* aircraft downstream (throughput,
+                    # separation compliance, ripple index all sort/diff
+                    # landing times between different aircraft).
+                    spawn_time = float(info.get("spawn_time", 0.0))
+                    landing_time = spawn_time + float(info.get("sim_time", sim_time))
                     success = bool(info.get("is_success", False))
                     assigned_tta = last_tta.get(acid, float("nan"))
                     rta_error_cps = (
@@ -1024,6 +1053,13 @@ class CPSCoordinationExperiment(BaseExperiment):
         The matrix is stored as a top-level ``recat_eu`` key in the YAML
         config so it is editable without touching Python source.  Falls back
         to a conservative 90-second flat matrix if no YAML is available.
+
+        When ``CPSModelConfig.reduced_wake_separation`` is set, every value is
+        scaled by ``wake_separation_scale`` before being returned — this is
+        the single source both ``CPSManager``'s greedy scheduler and the
+        ``C_sep`` compliance metric read from (``evaluate()`` loads this once
+        and passes the same dict to both), so the two stay consistent with
+        each other under the reduced-separation scenario.
         """
         config_path = os.path.join(
             os.path.dirname(__file__),
@@ -1037,13 +1073,27 @@ class CPSCoordinationExperiment(BaseExperiment):
                 data = yaml.safe_load(fh) or {}
             matrix = data.get("recat_eu", {})
             if matrix:
-                return {
+                matrix = {
                     lead: {trail: float(v) for trail, v in row.items()}
                     for lead, row in matrix.items()
                 }
-        # Conservative fallback: 90 s for all category pairs
-        cats = ["A", "B", "C", "D", "E", "F"]
-        return {lead: {trail: 90.0 for trail in cats} for lead in cats}
+            else:
+                matrix = None
+        else:
+            matrix = None
+        if matrix is None:
+            # Conservative fallback: 90 s for all category pairs
+            cats = ["A", "B", "C", "D", "E", "F"]
+            matrix = {lead: {trail: 90.0 for trail in cats} for lead in cats}
+
+        mcfg = cast(CPSModelConfig, self.cfg.model)
+        if mcfg.reduced_wake_separation:
+            scale = mcfg.wake_separation_scale
+            matrix = {
+                lead: {trail: v * scale for trail, v in row.items()}
+                for lead, row in matrix.items()
+            }
+        return matrix
 
     def _get_n_aircraft(self) -> int:
         """Read n_aircraft_per_episode from cps_base.yaml or default to 5."""

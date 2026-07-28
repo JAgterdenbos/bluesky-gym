@@ -71,6 +71,26 @@ class CPSModelConfig(ModelConfig):
     exists, else CPSManager runs without ETA prediction (initial ETA
     estimates are never refreshed after fleet construction)."""
 
+    reduced_wake_separation: bool = False
+    """If True, scale every RECAT-EU separation value (``_load_recat_matrix``)
+    by ``wake_separation_scale`` before it reaches both the greedy scheduler
+    and the C_sep compliance metric — an idealized reduced-separation ATC
+    scenario (e.g. Time-Based Separation / wake-sensor-equipped operations),
+    not today's full RECAT-EU minima. The frozen worker's own delay-absorption
+    capacity (~20 min of path-stretching, measured empirically from its
+    training-time RTA sampler) is far smaller than the multi-aircraft delays
+    full RECAT-EU separation can force onto a shared runway — this flag lets
+    the CPS coordination methodology be evaluated against a frozen worker
+    without first requiring a wider-trained DTG/RTA sampler (tracked as
+    future work). ``False`` (default) uses the real, unscaled matrix."""
+
+    wake_separation_scale: float = 0.5
+    """Multiplier applied to the RECAT-EU matrix when
+    ``reduced_wake_separation=True`` (e.g. 0.5 = half the real minima).
+    Exposed as its own field, not hardcoded, so a sweep across separation
+    stringency is a single CLI flag away. Ignored when
+    ``reduced_wake_separation=False``."""
+
     def __post_init__(self) -> None:
         # Set CPSManager as the sentinel algorithm for path / display purposes.
         # We do NOT call super().__post_init__() because that would try to
@@ -85,6 +105,10 @@ class CPSModelConfig(ModelConfig):
             raise ValueError(f"delta_t_plan must be > 0, got {self.delta_t_plan}.")
         if self.delta_update < 0:
             raise ValueError(f"delta_update must be >= 0, got {self.delta_update}.")
+        if self.wake_separation_scale <= 0:
+            raise ValueError(
+                f"wake_separation_scale must be > 0, got {self.wake_separation_scale}."
+            )
         if self.runway_assignment_mode not in {"static", "dynamic"}:
             raise ValueError(
                 f"runway_assignment_mode must be 'static' or 'dynamic', "
