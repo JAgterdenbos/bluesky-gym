@@ -5,7 +5,7 @@ Shared data-loading / feature-engineering pipeline for the ETASurrogate
 training tools (:mod:`select_surrogate_features` and :mod:`train_surrogate`).
 
 Kept in one place so the two scripts can never silently drift apart on how
-raw rollout parquet rows become the canonical 13-column feature matrix —
+raw rollout parquet rows become the canonical 14-column feature matrix —
 whatever feature-importance/transform decision ``select_surrogate_features``
 makes is guaranteed to be reproducible by ``train_surrogate`` because both
 call the exact same functions.
@@ -17,7 +17,7 @@ independent (plotting-oriented) copy of this pipeline — left untouched.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Literal, Tuple
 
 import numpy as np
 import pandas as pd
@@ -92,6 +92,7 @@ def load_and_prepare(path: Path) -> pd.DataFrame:
     df["steps_to_go"] = (
         df.groupby("episode")["step"].transform("max") - df["step"]
     )
+    df["time_to_go"] = df.groupby("episode")["t"].transform("max") - df["t"]
     return df
 
 
@@ -178,6 +179,19 @@ def engineer_geometric_features(
     return df
 
 
+def engineer_target_time_feature(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach ``remaining_time_budget`` — the goal-conditioned policy's own
+    active temporal target minus elapsed time, i.e. ``rta * MAX_TIME - t``.
+
+    Mirrors the equivalent inference-time signal (``info["goal_vector"][2]``)
+    that ``CPSManager`` already has available; see Finding 2 of the
+    ETASurrogate accuracy plan. Requires ``rta`` and ``t`` (seconds) columns.
+    """
+    df = df.copy()
+    df["remaining_time_budget"] = (df["rta"] * MAX_TIME) - df["t"]
+    return df
+
+
 # ---------------------------------------------------------------------------
 # 4. Lag feature engineering
 # ---------------------------------------------------------------------------
@@ -222,16 +236,23 @@ def add_lag_features(
 def build_feature_matrix(
     df: pd.DataFrame,
     runway_encoder: LabelEncoder,
+    target: Literal["steps", "seconds"] = "steps",
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Assemble the full 13-column feature matrix in canonical order.
+    """Assemble the full 14-column feature matrix in canonical order.
 
     Uses ``cartesian_to_polar``/``decompose_heading`` from ``eta_surrogate``
     to guarantee training/inference consistency. Heading values from parquet
     are in bearing radians; converted to degrees before ``decompose_heading``
     (which expects degrees).
 
-    Returns ``(X, y, feature_names)`` — ``X`` shape ``(n, 13)``, ``y`` is
-    ``steps_to_go``, ``feature_names`` is ``ALL_FEATURE_NAMES``.
+    ``target`` selects ``y``: ``"steps"`` (default, current behavior) uses
+    ``steps_to_go``; ``"seconds"`` uses the continuous ``time_to_go``.
+
+    Returns ``(X, y, feature_names)`` — ``X`` shape ``(n, 14)``, the 14th
+    column being ``remaining_time_budget`` (requires
+    ``engineer_target_time_feature`` to have run on ``df``), and
+    ``feature_names`` is ``ALL_FEATURE_NAMES`` (which already includes
+    ``"remaining_time_budget"`` as its 14th entry).
     """
     x_arr = df["x"].to_numpy(dtype=float)
     y_arr = df["y"].to_numpy(dtype=float)
@@ -250,14 +271,20 @@ def build_feature_matrix(
     d_atd = df["delta_atd"].to_numpy(dtype=float)
     c_cte = df["cumabs_cte"].to_numpy(dtype=float)
     h_vol = df["heading_volatility"].to_numpy(dtype=float)
+    rem_budget = df["remaining_time_budget"].to_numpy(dtype=float)
 
     X = np.column_stack([
         r_arr, theta_arr, rwy_codes, elapsed,
         sin_psi, cos_psi, r_sq,
         atd, cte, h_err,
         d_atd, c_cte, h_vol,
+        rem_budget,
     ])
-    y = df["steps_to_go"].to_numpy(dtype=float)
+    y = (
+        df["steps_to_go"].to_numpy(dtype=float)
+        if target == "steps"
+        else df["time_to_go"].to_numpy(dtype=float)
+    )
 
     return X, y, list(ALL_FEATURE_NAMES)
 
@@ -279,7 +306,7 @@ def prepare_modelling_features(
     lag_steps: int,
     window: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Tuple[float, float, float]], LabelEncoder, List[str]]:
-    """Run steps 1-4 end to end: load, derive IAF ref, engineer features.
+    """Run steps 1-5 end to end: load, derive IAF ref, engineer features.
 
     Returns ``(raw_df, model_df, iaf_ref, runway_encoder, all_runways)``.
     ``raw_df`` (unfiltered by ``steps_to_go > 0``) is returned too since
@@ -293,5 +320,6 @@ def prepare_modelling_features(
     model_df = raw_df[raw_df["steps_to_go"] > 0].dropna(subset=["steps_to_go"]).copy()
     model_df = engineer_geometric_features(model_df, iaf_ref)
     model_df = add_lag_features(model_df, lag_steps, window)
+    model_df = engineer_target_time_feature(model_df)
 
     return raw_df, model_df, iaf_ref, runway_encoder, all_runways

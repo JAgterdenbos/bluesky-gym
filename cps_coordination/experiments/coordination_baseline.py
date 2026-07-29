@@ -814,16 +814,40 @@ class CPSCoordinationExperiment(BaseExperiment):
             elapsed_steps = info["sim_time"] / ACTION_TIME
             heading_deg = float(np.degrees(info["heading"]))
             eta = self._estimate_naive_eta(obs["observation"][row], info, current_time)
+            remaining_time_budget = self._compute_remaining_time_budget(info)
             fleet.append(
                 AircraftState(
                     acid=info["acid"],
-                    state=np.array([x, y, elapsed_steps, heading_deg], dtype=np.float32),
+                    state=np.array(
+                        [x, y, elapsed_steps, heading_deg, remaining_time_budget],
+                        dtype=np.float32,
+                    ),
                     runway_id=str(info["current_runway"]),
                     eta=eta,
                     wake_cat="C",
                 )
             )
         return fleet
+
+    @staticmethod
+    def _compute_remaining_time_budget(info: dict) -> float:
+        """Finding-2 feature: the frozen worker's own active temporal target
+        minus elapsed time since spawn (mirrors ``rta - t`` in training data).
+
+        ``info["goal_vector"][2]`` is left at its 0.0 spawn placeholder
+        (``PathPlanningGoalEnv._compute_goal_vector``: "the temporal
+        component is left at 0.0 ... CPSManager is the sole source of
+        TTAs, injected separately via set_tta") until CPSManager's first
+        ``set_tta()`` call for this aircraft, so a 0.0 value here always
+        means "no TTA committed yet" and the fallback below correctly
+        returns 0.0 rather than a meaningless ``-elapsed_time``. A nonzero
+        value always reflects an already-committed past decision, never
+        leakage of a not-yet-decided future one.
+        """
+        goal_t = float(info["goal_vector"][2])
+        if goal_t == 0.0:
+            return 0.0
+        return goal_t * _ENV_MAX_TIME - float(info["sim_time"])
 
     @staticmethod
     def _estimate_naive_eta(obs_row: np.ndarray, info: dict, current_time: float) -> float:

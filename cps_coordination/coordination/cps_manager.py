@@ -59,7 +59,14 @@ class AircraftState:
         Aircraft callsign / unique identifier.
     state : np.ndarray
         Current observation feature vector fed to the ETASurrogate.
-        Expected layout: ``[x, y, elapsed_steps, heading_deg_bearing]``.
+        Expected layout: ``[x, y, elapsed_steps, heading_deg_bearing,
+        remaining_time_budget]``. The 5th element (Finding 2's
+        goal-conditioned active temporal target minus elapsed time) is
+        computed by ``_build_fleet`` -- unlike lag features, it needs no
+        rolling buffer, so it travels here rather than as a separate
+        manager-level argument. ``CPSManager`` splits it back out before
+        calling the surrogate, mirroring how lag features are passed
+        separately (see ``_refresh_etas``/``_assign_runways_dynamic``).
     runway_id : str
         Currently assigned (or candidate) landing runway identifier.
     eta : float
@@ -148,10 +155,13 @@ class CPSManager:
         self._fleet_index: Dict[str, int] = {}
         self._prev_ttas: Dict[str, float] = {}
         self._last_plan_time: float = -math.inf
-        # Last (tta, wake_cat) committed per runway, persisted across
+        # Last (tta, wake_cat, acid) committed per runway, persisted across
         # replanning cycles even after the responsible aircraft leaves the
-        # active fleet — see _greedy_schedule.
-        self._runway_last_committed: Dict[str, Tuple[float, str]] = {}
+        # active fleet — see _greedy_schedule. acid is tracked so a still-
+        # active aircraft that remains the sole occupant of its runway
+        # across consecutive replanning cycles is never separated against
+        # its own prior commit (see _greedy_schedule's self-separation note).
+        self._runway_last_committed: Dict[str, Tuple[float, str, str]] = {}
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -345,6 +355,19 @@ class CPSManager:
         scheduled on the same runway in different replanning cycles could
         land closer together than RECAT-EU allows).
 
+        That seeded value is only a genuine "previous, already-departed
+        aircraft" when its acid differs from the current one. When the same
+        aircraft remains the sole occupant of a runway across consecutive
+        replanning cycles (the common case, since ``delta_t_plan`` is
+        typically equal to ``ACTION_TIME`` — every decision step replans),
+        it would otherwise read back its own prior commit and separate
+        against itself, ratcheting its tta upward by ``sep`` every cycle
+        indefinitely (confirmed bug: this alone produced multi-thousand-
+        second tta/landing-time divergence for a single aircraft with no
+        second aircraft ever involved). In that self-match case the tta is
+        just the aircraft's own current eta — no other aircraft to separate
+        from.
+
         Parameters
         ----------
         sequence : List[AircraftState]
@@ -358,15 +381,18 @@ class CPSManager:
                 sep = self._get_separation(prev.wake_cat, ac.wake_cat)
                 ac.tta = max(ac.eta, prev.tta + sep)
             elif rwy in self._runway_last_committed:
-                prev_tta, prev_wake_cat = self._runway_last_committed[rwy]
-                sep = self._get_separation(prev_wake_cat, ac.wake_cat)
-                ac.tta = max(ac.eta, prev_tta + sep)
+                prev_tta, prev_wake_cat, prev_acid = self._runway_last_committed[rwy]
+                if prev_acid == ac.acid:
+                    ac.tta = ac.eta
+                else:
+                    sep = self._get_separation(prev_wake_cat, ac.wake_cat)
+                    ac.tta = max(ac.eta, prev_tta + sep)
             else:
                 ac.tta = ac.eta
             runway_last[rwy] = ac
 
         for rwy, ac in runway_last.items():
-            self._runway_last_committed[rwy] = (ac.tta, ac.wake_cat)
+            self._runway_last_committed[rwy] = (ac.tta, ac.wake_cat, ac.acid)
 
     def _get_separation(self, leading_cat: str, trailing_cat: str) -> float:
         """Look up RECAT-EU minimum time separation (seconds).
@@ -402,9 +428,11 @@ class CPSManager:
         if surrogate is None or not self.available_runways or not self._fleet:
             return
 
-        states = np.stack([ac.state for ac in self._fleet])  # (n, 4)
+        states = np.stack([ac.state for ac in self._fleet])  # (n, 5)
+        target_time_budget = states[:, 4] if states.shape[1] > 4 else None
         eta_matrix = surrogate.predict_eta_fleet_all_runways(
-            states, self.available_runways, current_time, lag_features
+            states, self.available_runways, current_time, lag_features,
+            target_time_budget=target_time_budget,
         )  # (n, r)
 
         best_rwy_idx = np.argmin(eta_matrix, axis=1)  # (n,)
@@ -459,10 +487,12 @@ class CPSManager:
         """
         if not self._fleet:
             return
-        states = np.stack([ac.state for ac in self._fleet])       # (n, 4)
+        states = np.stack([ac.state for ac in self._fleet])       # (n, 5)
+        target_time_budget = states[:, 4] if states.shape[1] > 4 else None
         runway_ids = [ac.runway_id for ac in self._fleet]
         etas = surrogate.predict_eta_fleet(
-            states, runway_ids, current_time, lag_features
+            states, runway_ids, current_time, lag_features,
+            target_time_budget=target_time_budget,
         )  # (n,)
         for i, ac in enumerate(self._fleet):
             ac.eta = float(etas[i])

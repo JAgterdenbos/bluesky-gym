@@ -14,7 +14,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -27,6 +26,18 @@ from scipy.stats import norm as sp_norm, pearsonr, probplot
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold
+from sklearn.preprocessing import LabelEncoder
+
+from bluesky_gym.envs.pathplanning_goal_env import ACTION_TIME, RTA_TOLERANCE
+from cps_coordination.testing.surrogate_data import (
+    MAX_TIME,
+    add_lag_features,
+    build_feature_matrix,
+    compute_iaf_reference_from_env,
+    engineer_geometric_features,
+    engineer_target_time_feature,
+    load_and_prepare,
+)
 
 _FIGURES_DIR = Path(__file__).parent.parent / "figures"
 _DEFAULT_DATA = (
@@ -40,7 +51,11 @@ _RUNWAY_COLOURS = [
     "#E377C2", "#17BECF",
 ]
 
-MAX_TIME = 6 * 3600 #Note: This is our time normalisation number!
+RTA_TOLERANCE_SEC = RTA_TOLERANCE * MAX_TIME  # ±60s
+
+
+def _tolerance_ratio_str(mae_seconds: float) -> str:
+    return f"{mae_seconds:.1f}s ({mae_seconds / RTA_TOLERANCE_SEC:.1f}x RTA_TOLERANCE)"
 
 # ── Global style ──────────────────────────────────────────────────────────────
 
@@ -83,169 +98,29 @@ def _apply_style() -> None:
 # ── 1. Data loading & preparation ─────────────────────────────────────────────
 
 def load_and_clean_data(data_path: str | Path) -> pd.DataFrame:
-    """Load and pre-process rollout data.
+    """Load and pre-process rollout data via the shared ``surrogate_data``
+    pipeline, then attach this file's own EDA-only convenience columns.
 
     Returns the full success-filtered dataset including both modelling rows
-    (steps_to_go > 0) and terminal states (steps_to_go == 0).  Terminal rows
-    are retained so that each CV fold can derive its own IAF reference from
-    its training slice without any information lookahead.
+    (steps_to_go > 0) and terminal states (steps_to_go == 0).
+
+    ``r``/``theta``/``heading_sin``/``heading_cos`` are plotting/ablation-only
+    columns (this file's own Cartesian-vs-polar exploration, per Finding 1) —
+    not part of ``surrogate_data.py``'s canonical feature matrix, so they stay
+    local rather than being imported.
 
     Callers that need only modelling rows should filter afterwards:
         model_df = df[df["steps_to_go"] > 0].dropna(...)
     """
-    path = Path(data_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Data file not found: {path}")
+    df = load_and_prepare(Path(data_path))
+    df = engineer_target_time_feature(df)
 
-    df = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
-    df = df[df["is_success"]].copy()
-
-    df["steps_to_go"] = (
-        df.groupby("episode")["step"].transform("max") - df["step"]
-    )
-    # unnormalised remaining time: t is already divided by 6*3600 s in the env
-    df["t"] *= MAX_TIME
-    df["time_to_go"] = (
-        df.groupby("episode")["t"].transform("max") - df["t"]
-    )
     df["r"] = np.sqrt(df["x"] ** 2 + df["y"] ** 2)
     df["theta"] = np.arctan2(df["y"], df["x"])
     df["heading_sin"] = np.sin(df["heading"])
     df["heading_cos"] = np.cos(df["heading"])
 
     return df
-
-def compute_iaf_reference(train_df: pd.DataFrame) -> pd.DataFrame:
-    """Per-runway mean IAF position and approach heading — training fold only.
-
-    Extracts terminal states (steps_to_go == 0) from *train_df* to compute
-    per-runway anchor coordinates and circular-mean approach headings.
-    Accepting the full training fold (rather than a pre-filtered iaf_df)
-    ensures the reference is always derived strictly from within that fold's
-    training boundary with no information lookahead.
-
-    Uses the circular mean for heading so the average is consistent across the
-    ±π wrap boundary.  Heading convention: 0 = North, radians, clockwise.
-    """
-    iaf_rows = train_df[train_df["steps_to_go"] == 0]
-
-    ref = iaf_rows.groupby("runway").agg(
-        iaf_x=("x", "mean"),
-        iaf_y=("y", "mean"),
-    ).copy()
-
-    def _circ_mean(s: pd.Series) -> float:
-        a = s.to_numpy()
-        return float(np.arctan2(np.sin(a).mean(), np.cos(a).mean()))
-
-    ref["approach_heading"] = iaf_rows.groupby("runway")["heading"].apply(_circ_mean)
-    return ref
-
-
-def engineer_geometric_features(
-    df: pd.DataFrame,
-    iaf_ref: pd.DataFrame,
-) -> pd.DataFrame:
-    """Attach runway-relative geometric features — fully vectorized, zero loops.
-
-    Stateless mapping: all reference coordinates come from *iaf_ref*, which must
-    be computed exclusively from the current fold's training data to prevent
-    information lookahead.
-
-    New columns
-    -----------
-    r_sq              : x² + y²  (scale-free radial energy proxy)
-    along_track_dist  : projection of (aircraft − IAF) onto the approach-track
-                        axis  (sin h, cos h) for North-up, clockwise-positive h
-    cross_track_error : signed perpendicular deviation from the approach track
-                        (positive = right of track looking in flight direction)
-    heading_error     : current heading − approach heading, wrapped to [−π, π]
-    """
-    df = df.copy()
-    df["r_sq"] = df["x"] ** 2 + df["y"] ** 2
-
-    missing = set(df["runway"].unique()) - set(iaf_ref.index)
-    if missing:
-        warnings.warn(
-            f"IAF reference missing for runways {missing}; "
-            "along_track_dist / cross_track_error / heading_error will be NaN.",
-            stacklevel=2,
-        )
-
-    # Vectorised broadcast: map per-runway scalars to every row
-    iaf_x = df["runway"].map(iaf_ref["iaf_x"]).to_numpy()
-    iaf_y = df["runway"].map(iaf_ref["iaf_y"]).to_numpy()
-    ah    = df["runway"].map(iaf_ref["approach_heading"]).to_numpy()  # rad, 0=N
-
-    dx     = df["x"].to_numpy() - iaf_x
-    dy     = df["y"].to_numpy() - iaf_y
-    sin_ah = np.sin(ah)
-    cos_ah = np.cos(ah)
-
-    # North-up, clockwise convention: track unit vector = (sin h, cos h)
-    df["along_track_dist"]  = dx * sin_ah + dy * cos_ah
-    df["cross_track_error"] = dx * cos_ah - dy * sin_ah
-    df["heading_error"]     = (df["heading"].to_numpy() - ah + np.pi) % (2 * np.pi) - np.pi
-
-    return df
-
-
-def add_lag_features(
-    df: pd.DataFrame,
-    lag_steps: int = 5,
-    window: int = 10,
-) -> pd.DataFrame:
-    """Attach macro-historical / trajectory-lag features to each row.
-
-    All rolling and shift operations are grouped strictly by episode so data
-    from one flight never bleeds into another.  The dataframe is sorted
-    internally by (episode, step) for correct temporal ordering, then
-    returned in its original row order so positional alignment with externally
-    computed prediction arrays is preserved.
-
-    Parameters
-    ----------
-    lag_steps : how many steps back for the ΔATD difference  (default 5)
-    window    : rolling window length for cumabs_cte and heading_volatility
-                (default 10)
-
-    New columns
-    -----------
-    delta_atd           : ATD(t) − ATD(t − lag_steps); stalls/goes negative
-                          when the aircraft is holding or vectored away
-    cumabs_cte          : rolling sum of |cross_track_error| over *window*
-                          steps; large values indicate lateral wandering /
-                          holding-pattern loops
-    heading_volatility  : rolling mean of |Δheading| (wrapped to [−π, π])
-                          over *window* steps; captures sharp turns and loops
-    """
-    df = df.copy()
-    orig_order = df.index
-
-    # Sort so that shift/rolling operate in chronological step order
-    df = df.sort_values(["episode", "step"])
-    grouped = df.groupby("episode", sort=False)
-
-    # ΔATD: progress along the approach track axis over the last lag_steps
-    df["delta_atd"] = grouped["along_track_dist"].transform(
-        lambda s: (s - s.shift(lag_steps)).bfill()
-    )
-
-    # Accumulated |CTE|: rolling sum of absolute lateral deviation
-    df["cumabs_cte"] = grouped["cross_track_error"].transform(
-        lambda s: s.abs().rolling(window, min_periods=1).sum()
-    )
-
-    # Heading volatility: rolling mean of wrapped |Δheading| per step
-    def _hv(s: pd.Series) -> pd.Series:
-        diff = s.diff().bfill()
-        diff = (diff + np.pi) % (2 * np.pi) - np.pi   # wrap to [−π, π]
-        return diff.abs().rolling(window, min_periods=1).mean()
-
-    df["heading_volatility"] = grouped["heading"].transform(_hv)
-
-    # Restore original row order to preserve positional alignment with y_pred arrays
-    return df.loc[orig_order]
 
 
 def _runway_palette(runways: list[str]) -> dict[str, str]:
@@ -528,24 +403,26 @@ _ENGINEERED_COLS = [
     "r_sq",
     "along_track_dist", "cross_track_error", "heading_error",
     "delta_atd", "cumabs_cte", "heading_volatility",
+    "remaining_time_budget",
 ]
 
 
 def _build_features(
     df: pd.DataFrame,
+    runway_encoder: LabelEncoder,
     use_polar: bool = True,
-    all_runways: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    categories  = sorted(all_runways if all_runways is not None else df["runway"].unique())
-    cat         = pd.CategoricalDtype(categories=categories)
-    rwy_dummies = pd.get_dummies(df["runway"].astype(cat), prefix="rwy")
-    spatial     = (
+    spatial    = (
         df[["r", "theta"]].rename(columns={"theta": "θ"})
         if use_polar else df[["x", "y"]]
     )
     extra      = df[[c for c in _ENGINEERED_COLS if c in df.columns]]
+    rwy_codes  = pd.Series(
+        runway_encoder.transform(df["runway"]).astype(np.float64),
+        index=df.index, name="runway",
+    )
     feature_df = pd.concat(
-        [spatial, df[["t", "heading_sin", "heading_cos"]], extra, rwy_dummies], axis=1
+        [spatial, df[["t", "heading_sin", "heading_cos"]], extra, rwy_codes], axis=1
     )
     return (
         feature_df.to_numpy(dtype=np.float64),
@@ -577,15 +454,6 @@ def reduce_features(
     scout = ExtraTreesRegressor(**_ET_PARAMS).fit(X_train, y_train)
     mask = scout.feature_importances_ >= threshold
 
-    # Runway dummies are a single categorical variable encoded as K binary columns.
-    # They must be kept or dropped as a group — partial inclusion changes the
-    # implicit reference class across folds, producing inconsistent encodings.
-    rwy_idx = [i for i, n in enumerate(feature_names) if n.startswith("rwy_")]
-    if rwy_idx:
-        keep_runways = scout.feature_importances_[rwy_idx].sum() >= threshold
-        for i in rwy_idx:
-            mask[i] = keep_runways
-
     kept    = [feature_names[i] for i in range(len(feature_names)) if mask[i]]
     dropped = [feature_names[i] for i in range(len(feature_names)) if not mask[i]]
     print(
@@ -604,7 +472,7 @@ def _plot_feature_importance(
     idx          = np.argsort(importances)[::-1]
     sorted_names = [feature_names[i] for i in idx]
     sorted_imp   = importances[idx]
-    colours = ["#DD8452" if n.startswith("rwy_") else "#4C72B0" for n in sorted_names]
+    colours = ["#DD8452" if n == "runway" else "#4C72B0" for n in sorted_names]
 
     fig, ax = plt.subplots(figsize=(max(8, len(feature_names) * 0.55), 5.5))
     ax.bar(range(len(sorted_names)), sorted_imp, color=colours, width=0.7,
@@ -616,7 +484,7 @@ def _plot_feature_importance(
     ax.yaxis.set_major_locator(mticker.MaxNLocator(6))
     ax.legend(handles=[
         Patch(facecolor="#4C72B0", label="Continuous features"),
-        Patch(facecolor="#DD8452", label="Runway one-hot"),
+        Patch(facecolor="#DD8452", label="Runway (label-encoded)"),
     ], loc="upper right", fontsize=8)
     fig.tight_layout()
     fig.savefig(out_dir / "fig5_et_feature_importance.png", dpi=_DPI)
@@ -632,9 +500,11 @@ def cross_validate_and_evaluate_et(
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
     """5-fold group cross-validation with strict fold-local feature engineering.
 
-    For each fold the IAF reference, geometric features, lag features, and
-    feature reduction mask are all derived exclusively from that fold's training
-    episodes — no information from validation episodes leaks in at any stage.
+    The IAF reference is exact env geometry (``compute_iaf_reference_from_env``)
+    — a pure function of the runway list, not the data — so it carries no
+    leakage risk and is computed once up front. Lag features and the feature
+    reduction mask remain fold-local: no information from validation episodes
+    leaks in at any stage.
 
     Returns
     -------
@@ -645,6 +515,8 @@ def cross_validate_and_evaluate_et(
     y_pred_cart    : out-of-fold predictions (Cartesian coordinate model)
     """
     gkf = GroupKFold(n_splits=n_splits)
+    iaf_ref = compute_iaf_reference_from_env(all_runways)
+    runway_encoder = LabelEncoder().fit(all_runways)
     val_eng_list: list[pd.DataFrame] = []
     oof_y_true:   list[np.ndarray]   = []
     oof_y_pred_p: list[np.ndarray]   = []
@@ -661,12 +533,9 @@ def cross_validate_and_evaluate_et(
     ):
         print(f"\n  Fold {fold_idx + 1}/{n_splits} ...")
 
-        # a) Raw fold splits (include terminal states for IAF reference extraction)
+        # a) Raw fold splits
         raw_train = df.iloc[train_idx]
         raw_val   = df.iloc[val_idx]
-
-        # b) IAF reference from training fold only
-        iaf_ref = compute_iaf_reference(raw_train)
 
         # c) Filter to modelling rows
         train_m = (
@@ -678,7 +547,7 @@ def cross_validate_and_evaluate_et(
             .dropna(subset=["time_to_go", "r", "theta"])
         )
 
-        # d) Geometric features (uses fold-local IAF reference)
+        # d) Geometric features (exact env-derived IAF reference)
         train_eng = engineer_geometric_features(train_m, iaf_ref)
         val_eng   = engineer_geometric_features(val_m,   iaf_ref)
 
@@ -688,16 +557,16 @@ def cross_validate_and_evaluate_et(
 
         # f) Feature matrices for polar and Cartesian models
         X_tr_p, y_tr, feat_names = _build_features(
-            train_eng, use_polar=True,  all_runways=all_runways
+            train_eng, runway_encoder, use_polar=True,
         )
         X_va_p, y_va, _ = _build_features(
-            val_eng, use_polar=True,  all_runways=all_runways
+            val_eng, runway_encoder, use_polar=True,
         )
         X_tr_c, _, _ = _build_features(
-            train_eng, use_polar=False, all_runways=all_runways
+            train_eng, runway_encoder, use_polar=False,
         )
         X_va_c, _, _ = _build_features(
-            val_eng, use_polar=False, all_runways=all_runways
+            val_eng, runway_encoder, use_polar=False,
         )
 
         # g) Feature reduction (mask derived from training fold only)
@@ -746,6 +615,7 @@ def cross_validate_and_evaluate_et(
     print(f"  {'R²':<8} {np.mean(r2s):>10.4f} {np.std(r2s):>10.4f}")
     print(f"  {'MAE':<8} {np.mean(maes):>10.4f} {np.std(maes):>10.4f}")
     print(f"  {'RMSE':<8} {np.mean(rmses):>10.4f} {np.std(rmses):>10.4f}")
+    print(f"  MAE = {_tolerance_ratio_str(np.mean(maes))}")
 
     # Feature importance from last fold's polar model (diagnostic)
     if last_model_p is not None:
@@ -1028,7 +898,8 @@ def plot_learning_curve(
     train_idx, val_idx = next(gkf.split(df, groups=df["episode"]))
     raw_train = df.iloc[train_idx]
     raw_val   = df.iloc[val_idx]
-    iaf_ref   = compute_iaf_reference(raw_train)
+    iaf_ref        = compute_iaf_reference_from_env(all_runways)
+    runway_encoder = LabelEncoder().fit(all_runways)
     _dnf = dict(subset=["time_to_go", "r", "theta"])
     train_df = engineer_geometric_features(
         raw_train[raw_train["steps_to_go"] > 0].dropna(**_dnf), iaf_ref
@@ -1037,7 +908,7 @@ def plot_learning_curve(
         raw_val[raw_val["steps_to_go"] > 0].dropna(**_dnf), iaf_ref
     )
 
-    X_te, y_test, _ = _build_features(test_df, use_polar=True, all_runways=all_runways)
+    X_te, y_test, _ = _build_features(test_df, runway_encoder, use_polar=True)
 
     rng       = np.random.default_rng(42)
     episodes  = rng.permutation(sorted(train_df["episode"].unique()))
@@ -1048,12 +919,12 @@ def plot_learning_curve(
     for frac in fractions:
         n          = max(1, int(len(episodes) * frac))
         sub        = train_df[train_df["episode"].isin(set(episodes[:n]))]
-        X_tr, y_tr, _ = _build_features(sub, use_polar=True, all_runways=all_runways)
+        X_tr, y_tr, _ = _build_features(sub, runway_encoder, use_polar=True)
         y_hat      = ExtraTreesRegressor(**params).fit(X_tr, y_tr).predict(X_te)
         n_ep_list.append(n)
         r2_list.append(r2_score(y_test, y_hat))
         mae_list.append(mean_absolute_error(y_test, y_hat))
-        print(f"  {frac*100:>4.0f}%  n_ep={n:>5}  R²={r2_list[-1]:.4f}  MAE={mae_list[-1]:.2f}")
+        print(f"  {frac*100:>4.0f}%  n_ep={n:>5}  R²={r2_list[-1]:.4f}  MAE={_tolerance_ratio_str(mae_list[-1])}")
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     axes[0].plot(n_ep_list, r2_list, color="#4C72B0", lw=2, marker="o", markersize=5, zorder=3)
@@ -1063,7 +934,7 @@ def plot_learning_curve(
     axes[0].yaxis.set_major_locator(mticker.MaxNLocator(6))
     axes[1].plot(n_ep_list, mae_list, color="#DD8452", lw=2, marker="o", markersize=5, zorder=3)
     axes[1].set_xlabel("Training episodes", labelpad=8)
-    axes[1].set_ylabel("MAE  [steps]  (held-out test set)", labelpad=8)
+    axes[1].set_ylabel("MAE  [s]  (held-out test set)", labelpad=8)
     axes[1].set_title("Learning curve — MAE")
     axes[1].yaxis.set_major_locator(mticker.MaxNLocator(6))
     fig.tight_layout()
@@ -1090,7 +961,8 @@ def plot_transformation_analysis(
     train_idx, val_idx = next(gkf.split(df, groups=df["episode"]))
     raw_train = df.iloc[train_idx]
     raw_val   = df.iloc[val_idx]
-    iaf_ref   = compute_iaf_reference(raw_train)
+    iaf_ref        = compute_iaf_reference_from_env(all_runways)
+    runway_encoder = LabelEncoder().fit(all_runways)
     _dnf = dict(subset=["time_to_go", "r", "theta"])
     train_df = engineer_geometric_features(
         raw_train[raw_train["steps_to_go"] > 0].dropna(**_dnf), iaf_ref
@@ -1100,8 +972,8 @@ def plot_transformation_analysis(
     )
 
     print("\nFitting transformation analysis models ...")
-    X_tr, y_train_raw, _ = _build_features(train_df, use_polar=True, all_runways=all_runways)
-    X_te, y_test_raw,  _ = _build_features(test_df,  use_polar=True, all_runways=all_runways)
+    X_tr, y_train_raw, _ = _build_features(train_df, runway_encoder, use_polar=True)
+    X_te, y_test_raw,  _ = _build_features(test_df,  runway_encoder, use_polar=True)
 
     n_bins  = 30
     h_bins  = np.linspace(y_test_raw.min(), y_test_raw.max(), n_bins + 1)
@@ -1124,6 +996,7 @@ def plot_transformation_analysis(
         mae  = mean_absolute_error(y_test_raw, y_pred)
         rmse = float(np.sqrt(mean_squared_error(y_test_raw, y_pred)))
         print(f"{name:<12} {r2:>10.4f} {mae:>10.4f} {rmse:>10.4f}")
+        print(f"  MAE = {_tolerance_ratio_str(mae)}")
 
         mu, sigma = float(residual.mean()), float(residual.std())
         ax        = axes[row, 0]
@@ -1184,6 +1057,154 @@ def plot_transformation_analysis(
     print("  Saved fig15_transformation_analysis.png")
 
 
+# ── 6a. Target-formulation ablation (Finding 1 / action-plan step 3) ──────────
+
+def run_target_formulation_ablation(
+    df: pd.DataFrame,
+    all_runways: list[str],
+    n_splits: int = 5,
+) -> dict:
+    """Controlled ablation: does the continuous ``time_to_go`` target close
+    the label-noise gap ``steps_to_go x ACTION_TIME`` carries (Finding 1)?
+
+    Same exact production feature set (surrogate_data.py's canonical
+    13-column recipe -- the 14th ``remaining_time_budget`` column is
+    Finding 2's feature, tested separately in Phase C2), same ET
+    hyperparameters, same GroupKFold splits for both arms -- only the
+    target formulation changes. Both arms are scored in seconds against the
+    SAME true continuous ``time_to_go`` ground truth (never
+    ``steps_to_go*ACTION_TIME`` on both sides), so this isolates the effect
+    cleanly, unlike the existing uncontrolled numbers already on disk
+    (fig7/fig15: different encoding, no feature-importance reduction, no
+    ``remaining_time_budget``).
+    """
+    gkf = GroupKFold(n_splits=n_splits)
+    iaf_ref        = compute_iaf_reference_from_env(all_runways)
+    runway_encoder = LabelEncoder().fit(all_runways)
+
+    arms = [("steps_to_go x ACTION_TIME", "steps"), ("continuous time_to_go", "seconds")]
+    results: dict = {}
+
+    print(f"\nTarget-formulation ablation — {n_splits}-fold GroupKFold, "
+          f"exact production feature set (13 cols)")
+    print(f"  {'Arm':<28} {'R2':>8} {'MAE':>10} {'RMSE':>10}")
+    print("  " + "-" * 60)
+
+    for label, target in arms:
+        fold_y_sec:    list[np.ndarray] = []
+        fold_pred_sec: list[np.ndarray] = []
+
+        for train_idx, val_idx in gkf.split(df, groups=df["episode"]):
+            raw_train = df.iloc[train_idx]
+            raw_val   = df.iloc[val_idx]
+
+            train_m = (raw_train[raw_train["steps_to_go"] > 0]
+                       .dropna(subset=["time_to_go", "r", "theta"]))
+            val_m   = (raw_val[raw_val["steps_to_go"] > 0]
+                       .dropna(subset=["time_to_go", "r", "theta"]))
+
+            train_m = engineer_geometric_features(train_m, iaf_ref)
+            val_m   = engineer_geometric_features(val_m,   iaf_ref)
+            train_m = add_lag_features(train_m)
+            val_m   = add_lag_features(val_m)
+            train_m = engineer_target_time_feature(train_m)
+            val_m   = engineer_target_time_feature(val_m)
+
+            X_tr_full, y_tr, names_full = build_feature_matrix(
+                train_m, runway_encoder, target=target,
+            )
+            X_va_full, y_va, _ = build_feature_matrix(
+                val_m, runway_encoder, target=target,
+            )
+            # Drop the 14th (remaining_time_budget) column -- Finding 2's
+            # feature is Phase C2's separate experiment, out of scope here.
+            X_tr, names = X_tr_full[:, :-1], names_full[:-1]
+            X_va        = X_va_full[:, :-1]
+
+            X_tr_r, mask, _ = reduce_features(X_tr, y_tr, names)
+            X_va_r           = X_va[:, mask]
+
+            model  = ExtraTreesRegressor(**_ET_PARAMS).fit(X_tr_r, y_tr)
+            y_pred = model.predict(X_va_r)
+
+            if target == "steps":
+                y_true_sec = val_m["time_to_go"].to_numpy(dtype=float)
+                y_pred_sec = y_pred * ACTION_TIME
+            else:
+                y_true_sec = y_va
+                y_pred_sec = y_pred
+
+            fold_y_sec.append(y_true_sec)
+            fold_pred_sec.append(y_pred_sec)
+
+        y_oof    = np.concatenate(fold_y_sec)
+        pred_oof = np.concatenate(fold_pred_sec)
+        metrics  = _et_metrics(y_oof, pred_oof)
+        results[target] = {
+            "label": label, "y_test": y_oof, "y_pred": pred_oof, "metrics": metrics,
+        }
+        print(f"  {label:<28} {metrics['R²']:>8.4f} {metrics['MAE']:>10.1f} {metrics['RMSE']:>10.1f}")
+
+    steps_mae   = results["steps"]["metrics"]["MAE"]
+    seconds_mae = results["seconds"]["metrics"]["MAE"]
+    improvement = 100.0 * (steps_mae - seconds_mae) / steps_mae
+    print(f"\n  steps_to_go x ACTION_TIME : MAE = {_tolerance_ratio_str(steps_mae)}")
+    print(f"  continuous time_to_go     : MAE = {_tolerance_ratio_str(seconds_mae)}")
+    print(f"  Continuous target {'improves' if improvement > 0 else 'worsens'} "
+          f"MAE by {improvement:+.1f}%")
+
+    return results
+
+
+def plot_target_formulation_ablation(results: dict, out_dir: Path) -> None:
+    """Fig 21 — predicted-vs-actual and residual comparison for both arms."""
+    fig, axes = plt.subplots(2, 2, figsize=(13, 10))
+    colours = {"steps": "#4C72B0", "seconds": "#C44E52"}
+
+    for row, target in enumerate(["steps", "seconds"]):
+        r      = results[target]
+        y_test, y_pred = r["y_test"], r["y_pred"]
+        colour = colours[target]
+
+        ax   = axes[row, 0]
+        lo   = float(min(y_test.min(), y_pred.min()))
+        hi   = float(max(y_test.max(), y_pred.max()))
+        hb   = ax.hexbin(y_test, y_pred, gridsize=60, cmap="Blues",
+                         mincnt=1, bins="log", linewidths=0.2)
+        ax.plot([lo, hi], [lo, hi], color="#333333", lw=1.5, ls="--", zorder=5)
+        ax.text(0.05, 0.93, f"R² = {r['metrics']['R²']:.4f}\nMAE = {r['metrics']['MAE']:.1f}s",
+                transform=ax.transAxes, fontsize=9, va="top",
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                          edgecolor="#CCCCCC", alpha=0.92))
+        ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
+        ax.set_xlabel("Actual time_to_go  [s]", labelpad=8)
+        ax.set_ylabel("Predicted  [s]", labelpad=8)
+        ax.set_title(f"{r['label']}  —  predicted vs actual")
+        cb = fig.colorbar(hb, ax=ax, pad=0.02, shrink=0.85)
+        cb.set_label("log₁₀(count)", labelpad=6, fontsize=7)
+        cb.outline.set_visible(False); cb.ax.tick_params(labelsize=7)
+
+        ax       = axes[row, 1]
+        residual = y_pred - y_test
+        ax.hist(residual, bins=100, density=True, color=colour, alpha=0.75,
+                linewidth=0, zorder=3)
+        ax.axvline(0, color="#333333", lw=1, ls="--", zorder=5)
+        ax.set_xlabel("Residual  (pred − actual)  [s]", labelpad=8)
+        ax.set_ylabel("Density", labelpad=8)
+        ax.set_title(f"{r['label']}  —  residuals  "
+                     f"(μ={residual.mean():.1f}, σ={residual.std():.1f})")
+
+    fig.suptitle(
+        "Target-formulation ablation  —  steps_to_go×ACTION_TIME vs continuous time_to_go\n"
+        "(same feature set, same ET hyperparameters, same GroupKFold splits)",
+        fontsize=12, fontweight="bold", y=1.01,
+    )
+    fig.tight_layout()
+    fig.savefig(out_dir / "fig21_target_ablation.png", dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved fig21_target_ablation.png")
+
+
 # ── 6b. Champion model — full feature set + data-driven transform ─────────────
 
 # Module-level transform library avoids closure issues with loop-defined lambdas
@@ -1208,6 +1229,8 @@ _FEAT_COLOUR_MAP: dict[str, str] = {
     "delta_atd":          "#8172B3",
     "cumabs_cte":         "#8172B3",
     "heading_volatility": "#8172B3",
+    # Finding 2 — goal-conditioned active temporal target
+    "remaining_time_budget": "#CCB974",
 }
 
 
@@ -1228,6 +1251,8 @@ def select_best_transformation(
     fitted on the full dataset (for feature importance extraction).
     """
     gkf = GroupKFold(n_splits=n_splits)
+    iaf_ref        = compute_iaf_reference_from_env(all_runways)
+    runway_encoder = LabelEncoder().fit(all_runways)
 
     print(f"\n  {'Transform':<12} {'R²':>10} {'MAE':>10} {'RMSE':>10}")
     print("  " + "-" * 46)
@@ -1242,8 +1267,6 @@ def select_best_transformation(
             raw_train = df.iloc[train_idx]
             raw_val   = df.iloc[val_idx]
 
-            iaf_ref = compute_iaf_reference(raw_train)
-
             train_m = (raw_train[raw_train["steps_to_go"] > 0]
                        .dropna(subset=["time_to_go", "r", "theta"]))
             val_m   = (raw_val[raw_val["steps_to_go"] > 0]
@@ -1255,10 +1278,10 @@ def select_best_transformation(
             val_m   = add_lag_features(val_m)
 
             X_tr, y_tr_raw, feat_names = _build_features(
-                train_m, use_polar=True, all_runways=all_runways
+                train_m, runway_encoder, use_polar=True,
             )
             X_te, y_te_raw, _ = _build_features(
-                val_m, use_polar=True, all_runways=all_runways
+                val_m, runway_encoder, use_polar=True,
             )
 
             X_tr_r, mask, _ = reduce_features(X_tr, y_tr_raw, feat_names)
@@ -1281,6 +1304,7 @@ def select_best_transformation(
         })
         print(f"  {name:<12} {metrics['R²']:>10.4f} {metrics['MAE']:>10.4f} "
               f"{metrics['RMSE']:>10.4f}")
+        print(f"    MAE = {_tolerance_ratio_str(metrics['MAE'])}")
 
     identity_mae = results[0]["metrics"]["MAE"]
     best_overall  = min(results, key=lambda r: r["metrics"]["MAE"])
@@ -1288,7 +1312,8 @@ def select_best_transformation(
 
     print(f"\n  Threshold: {sig_threshold_pct:.1f}% MAE reduction")
     print(f"  Best:      {best_overall['name']}  "
-          f"(improvement = {improvement:+.2f}% over identity)")
+          f"(improvement = {improvement:+.2f}% over identity)  "
+          f"MAE = {_tolerance_ratio_str(best_overall['metrics']['MAE'])}")
 
     if improvement >= sig_threshold_pct:
         print(f"  Decision:  significant — champion uses [{best_overall['name']}]")
@@ -1301,12 +1326,11 @@ def select_best_transformation(
     winner["significant"]     = improvement >= sig_threshold_pct
 
     # Final model on full data under winning transform; reduce_features applied globally
-    iaf_ref_full = compute_iaf_reference(df)
     full_m = df[df["steps_to_go"] > 0].dropna(subset=["time_to_go", "r", "theta"])
-    full_m = engineer_geometric_features(full_m, iaf_ref_full)
+    full_m = engineer_geometric_features(full_m, iaf_ref)
     full_m = add_lag_features(full_m)
     X_full, y_full, feat_names_full = _build_features(
-        full_m, use_polar=True, all_runways=all_runways
+        full_m, runway_encoder, use_polar=True,
     )
     X_full_r, _, names_r = reduce_features(X_full, y_full, feat_names_full)
     winner["model"]         = ExtraTreesRegressor(**_ET_PARAMS).fit(
@@ -1350,7 +1374,8 @@ def plot_champion_feature_importance(
         Patch(facecolor="#DD8452", label="Heading-encoded  (sin h, cos h)"),
         Patch(facecolor="#C44E52", label="IAF-relative geometry  (ATD, CTE, ΔH)"),
         Patch(facecolor="#8172B3", label="Historical / lag  (ΔATD, Σ|CTE|, h-vol)"),
-        Patch(facecolor="#8C8C8C", label="Runway one-hot"),
+        Patch(facecolor="#CCB974", label="Goal-conditioned target  (remaining_time_budget)"),
+        Patch(facecolor="#8C8C8C", label="Runway (label-encoded)"),
     ], loc="upper right", fontsize=8)
     fig.tight_layout()
     fig.savefig(out_dir / "fig17_champion_feature_importance.png", dpi=_DPI)
@@ -1580,6 +1605,10 @@ def main() -> None:
     plot_learning_curve(df, all_runways, _FIGURES_DIR)
     plot_transformation_analysis(df, all_runways, _FIGURES_DIR)
 
+    # ── Target-formulation ablation (Finding 1 / action-plan step 3) ─────────
+    ablation_results = run_target_formulation_ablation(df, all_runways)
+    plot_target_formulation_ablation(ablation_results, _FIGURES_DIR)
+
     # ── Champion pipeline — full feature set × best transform (data-driven) ──
     print("\nChampion selection (full auto-reduced feature set) ...")
     print("  Testing target transformations (5-fold OOF) ...")
@@ -1593,6 +1622,7 @@ def main() -> None:
     print(f"    R²={champion['metrics']['R²']:.4f}  "
           f"MAE={champion['metrics']['MAE']:.4f}  "
           f"RMSE={champion['metrics']['RMSE']:.4f}")
+    print(f"    MAE = {_tolerance_ratio_str(champion['metrics']['MAE'])}")
 
     print("\nGenerating champion diagnostic figures ...")
     plot_champion_feature_importance(

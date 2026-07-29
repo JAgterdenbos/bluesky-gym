@@ -1,7 +1,7 @@
 """
 cps_coordination/testing/select_surrogate_features.py
 --------------------------------------------------------
-One-time (or occasional) analysis: decide which of the 13 canonical
+One-time (or occasional) analysis: decide which of the 14 canonical
 ETASurrogate features to keep and which target transform to use, and save
 that decision to a small YAML side-car artifact.
 
@@ -40,7 +40,7 @@ import yaml
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.model_selection import GroupKFold
 
-from cps_coordination.coordination.eta_surrogate import TRANSFORMS, _LAG_COL_START
+from cps_coordination.coordination.eta_surrogate import TRANSFORMS, _LAG_COL_START, _N_LAG
 from cps_coordination.testing.surrogate_data import (
     build_feature_matrix,
     et_metrics,
@@ -71,7 +71,7 @@ def reduce_features(
     importances = scout.feature_importances_
     mask = importances >= threshold
 
-    lag_idx = list(range(_LAG_COL_START, len(feature_names)))
+    lag_idx = list(range(_LAG_COL_START, _LAG_COL_START + _N_LAG))
     if lag_idx:
         keep_lag = importances[lag_idx].sum() >= threshold
         for i in lag_idx:
@@ -143,6 +143,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("data", type=Path, help="Path to rollout parquet (or CSV) file.")
     p.add_argument("--output", "-o", type=Path, default=_DEFAULT_OUTPUT,
                    help="Destination path for the selection YAML.")
+    p.add_argument("--target", choices=["steps", "seconds"], default="steps",
+                   help="Regression target: 'steps' (steps_to_go, current production) "
+                        "or 'seconds' (continuous time_to_go, Finding 1's candidate).")
     p.add_argument("--n-splits", type=int, default=5,
                    help="GroupKFold folds for transform-selection CV.")
     p.add_argument("--importance-threshold", type=float, default=0.01,
@@ -179,8 +182,8 @@ def main() -> None:
     )
     print(f"  {len(model_df):,} modelling rows  |  {model_df['episode'].nunique():,} episodes  |  {len(all_runways)} runways")
 
-    X_full, y_full, feat_names = build_feature_matrix(model_df, runway_encoder)
-    print(f"  Feature matrix: {X_full.shape}")
+    X_full, y_full, feat_names = build_feature_matrix(model_df, runway_encoder, target=args.target)
+    print(f"  Feature matrix: {X_full.shape}  (target={args.target!r})")
 
     print("\nRunning feature reduction (scout fit) ...")
     col_indices, kept_names = reduce_features(
@@ -201,6 +204,7 @@ def main() -> None:
         "source_data": str(args.data),
         "n_rows": int(len(model_df)),
         "n_episodes": int(model_df["episode"].nunique()),
+        "target": args.target,
         "feature_names_kept": kept_names,
         "col_indices": col_indices,
         "transform_name": transform_name,

@@ -23,7 +23,7 @@ Transform functions
 Module-level named functions (not lambdas) for forward/inverse transforms
 so they survive joblib serialisation.
 
-Canonical feature set (13 columns, in order)
+Canonical feature set (14 columns, in order)
 --------------------------------------------
  0  r                   √(x²+y²), from the raw Schiphol-centred (x, y) —
                         NOT IAF-relative (see ``cartesian_to_polar``)
@@ -42,9 +42,12 @@ Canonical feature set (13 columns, in order)
 10  delta_atd           ATD[t] − ATD[t − lag_steps]
 11  cumabs_cte          rolling(|CTE|, window).sum()
 12  heading_volatility  rolling(|Δheading|, window).mean()
+13  remaining_time_budget  goal-conditioned active temporal target minus
+                        elapsed time (mirrors ``rta - t`` in training data)
 
 At inference the state vector is always ``[x, y, elapsed_steps, heading_deg_bearing]``
-(4-dimensional); lag features are passed as a separate optional argument.
+(4-dimensional); lag features and ``target_time_budget`` are passed as
+separate optional arguments.
 """
 
 from __future__ import annotations
@@ -151,17 +154,19 @@ TRANSFORMS: Dict[str, Tuple[Callable, Callable]] = {
     "sqrt":     (_fwd_sqrt,     _inv_sqrt),
 }
 
-# Ordered feature names for the full 13-column set.
+# Ordered feature names for the full 14-column set.
 ALL_FEATURE_NAMES: List[str] = [
     "r", "theta", "rwy_code", "elapsed_steps",
     "sin_psi", "cos_psi", "r_sq",
     "along_track_dist", "cross_track_error", "heading_error",
     "delta_atd", "cumabs_cte", "heading_volatility",
+    "remaining_time_budget",
 ]
 
-_N_FEATURES_FULL = len(ALL_FEATURE_NAMES)  # 13
+_N_FEATURES_FULL = len(ALL_FEATURE_NAMES)  # 14
 _N_LAG = 3                                  # lag columns (indices 10–12)
 _LAG_COL_START = 10
+_TARGET_TIME_BUDGET_COL = 13
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +237,7 @@ class ETASurrogate:
         self._window: int = 10
         self._transform_name: str = "identity"
         self._inv_transform: Callable = _inv_identity
+        self._target: str = "steps"
 
     # ------------------------------------------------------------------ #
     # Factory — primary construction path after training
@@ -253,6 +259,7 @@ class ETASurrogate:
         transform_name: str,
         inv_transform: Callable,
         n_jobs: int = -1,
+        target: str = "steps",
     ) -> "ETASurrogate":
         """Construct a fully-configured surrogate from training artefacts.
 
@@ -274,7 +281,10 @@ class ETASurrogate:
         lag_steps, window : int
             Lag parameters used during training (passed to TrajectoryBuffer).
         sim_dt : float
-            Simulation timestep in seconds.
+            Simulation timestep in seconds. Multiplies the (inverse-transformed)
+            model output to get absolute seconds -- ``ACTION_TIME`` when
+            ``target="steps"``, ``1.0`` when ``target="seconds"`` (the model
+            then predicts seconds directly, so no further scaling is needed).
         transform_name : str
             Name of the winning target transform (``"identity"``,
             ``"log1p"``, or ``"sqrt"``).
@@ -282,6 +292,14 @@ class ETASurrogate:
             Module-level inverse transform function.
         n_jobs : int
             Parallelism for the underlying regressor predict calls.
+        target : str
+            Which raw target the model was fit on: ``"steps"``
+            (``steps_to_go``, current production) or ``"seconds"``
+            (continuous ``time_to_go``, Finding 1's candidate). Purely
+            descriptive metadata -- prediction math is unaffected since
+            that's fully captured by ``sim_dt``/``inv_transform`` above; this
+            just lets callers like ``validate_surrogate.py`` reproduce the
+            exact training recipe without guessing from ``sim_dt``.
 
         Returns
         -------
@@ -300,6 +318,7 @@ class ETASurrogate:
         s._window = window
         s._transform_name = transform_name
         s._inv_transform = inv_transform
+        s._target = target
         return s
 
     # ------------------------------------------------------------------ #
@@ -372,10 +391,11 @@ class ETASurrogate:
         rwy_ids: List[str],
         elapsed_arr: np.ndarray,
         lag_features: Optional[np.ndarray] = None,
+        target_time_budget: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Assemble the ``(n, n_selected)`` feature matrix from raw inputs.
 
-        Always assembles the full 13-column vector first, then selects
+        Always assembles the full 14-column vector first, then selects
         ``_feature_col_indices`` to match what the model was trained on.
 
         Parameters
@@ -388,6 +408,10 @@ class ETASurrogate:
             Episode step counts.
         lag_features : np.ndarray, shape (n, 3), optional
             ``[delta_atd, cumabs_cte, heading_volatility]`` per aircraft.
+        target_time_budget : np.ndarray, shape (n,), optional
+            Finding-2 feature: goal-conditioned active temporal target minus
+            elapsed time. ``None`` defaults to zeros (graceful degradation,
+            same pattern as ``lag_features``).
 
         Returns
         -------
@@ -422,13 +446,20 @@ class ETASurrogate:
         else:
             lag = np.asarray(lag_features, dtype=float)
 
-        # --- Full 13-column matrix in canonical order ---
+        # --- Target time budget (Finding 2) ---
+        if target_time_budget is None:
+            rem_budget = np.zeros(n, dtype=float)
+        else:
+            rem_budget = np.asarray(target_time_budget, dtype=float)
+
+        # --- Full 14-column matrix in canonical order ---
         X_full = np.column_stack([
             r_arr, theta_arr, rwy_codes, elapsed_arr,
             sin_psi, cos_psi, r_sq,
             atd, cte, h_err,
             lag[:, 0], lag[:, 1], lag[:, 2],
-        ])  # (n, 13)
+            rem_budget,
+        ])  # (n, 14)
 
         return X_full[:, self._feature_col_indices]
 
@@ -475,6 +506,7 @@ class ETASurrogate:
         state: np.ndarray,
         runway_id: str,
         lag_features: Optional[np.ndarray] = None,
+        target_time_budget: Optional[float] = None,
     ) -> float:
         """Predict T̂_i: remaining simulation steps until IAF crossing.
 
@@ -484,6 +516,8 @@ class ETASurrogate:
             ``[x, y, elapsed_steps, heading_deg_bearing]``.
         runway_id : str
         lag_features : np.ndarray, shape (3,), optional
+        target_time_budget : float, optional
+            Finding-2 feature; ``None`` defaults to 0.0.
 
         Returns
         -------
@@ -495,9 +529,10 @@ class ETASurrogate:
         state = np.asarray(state, dtype=float).ravel()
         x, y, elapsed, heading = state[0], state[1], state[2], state[3]
         lag = lag_features.reshape(1, -1) if lag_features is not None else None
+        tb = np.array([target_time_budget]) if target_time_budget is not None else None
         X = self._build_feature_matrix(
             np.array([x]), np.array([y]), np.array([heading]),
-            [runway_id], np.array([elapsed]), lag,
+            [runway_id], np.array([elapsed]), lag, tb,
         )
         raw = self._model.predict(X)
         steps = float(self._inv_transform(raw)[0])
@@ -509,6 +544,7 @@ class ETASurrogate:
         runway_id: str,
         current_sim_time: float,
         lag_features: Optional[np.ndarray] = None,
+        target_time_budget: Optional[float] = None,
     ) -> float:
         """Return absolute ETA at the IAF.
 
@@ -520,13 +556,17 @@ class ETASurrogate:
         current_sim_time : float
             Current simulation clock in seconds.
         lag_features : np.ndarray, shape (3,), optional
+        target_time_budget : float, optional
+            Finding-2 feature; ``None`` defaults to 0.0.
 
         Returns
         -------
         float
             ``current_sim_time + T̂_i × sim_dt``
         """
-        steps = self.predict_steps_to_iaf(state, runway_id, lag_features)
+        steps = self.predict_steps_to_iaf(
+            state, runway_id, lag_features, target_time_budget
+        )
         return current_sim_time + steps * self.sim_dt
 
     def predict_eta_fleet(
@@ -535,6 +575,7 @@ class ETASurrogate:
         runway_ids: List[str],
         current_sim_time: float,
         lag_features: Optional[np.ndarray] = None,
+        target_time_budget: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Vectorised ETA for N aircraft, one runway each.
 
@@ -549,6 +590,8 @@ class ETASurrogate:
         runway_ids : list[str], length n
         current_sim_time : float
         lag_features : np.ndarray, shape (n, 3), optional
+        target_time_budget : np.ndarray, shape (n,), optional
+            Finding-2 feature; ``None`` defaults to zeros.
 
         Returns
         -------
@@ -564,7 +607,7 @@ class ETASurrogate:
             )
         X = self._build_feature_matrix(
             states[:, 0], states[:, 1], states[:, 3],
-            runway_ids, states[:, 2], lag_features,
+            runway_ids, states[:, 2], lag_features, target_time_budget,
         )
         raw = self._model.predict(X)
         steps = np.maximum(self._inv_transform(raw), 0.0)
@@ -576,6 +619,7 @@ class ETASurrogate:
         runway_ids: List[str],
         current_sim_time: float,
         lag_features: Optional[np.ndarray] = None,
+        target_time_budget: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Vectorised ETA for every (aircraft, runway) pair.
 
@@ -589,6 +633,8 @@ class ETASurrogate:
             Candidate runway identifiers.
         current_sim_time : float
         lag_features : np.ndarray, shape (n, 3), optional
+        target_time_budget : np.ndarray, shape (n,), optional
+            Finding-2 feature; ``None`` defaults to zeros.
 
         Returns
         -------
@@ -611,9 +657,14 @@ class ETASurrogate:
         else:
             lag_tiled = None
 
+        if target_time_budget is not None:
+            tb_tiled: Optional[np.ndarray] = np.repeat(target_time_budget, r, axis=0)
+        else:
+            tb_tiled = None
+
         X = self._build_feature_matrix(
             states_tiled[:, 0], states_tiled[:, 1], states_tiled[:, 3],
-            runway_ids_tiled, states_tiled[:, 2], lag_tiled,
+            runway_ids_tiled, states_tiled[:, 2], lag_tiled, tb_tiled,
         )
         raw = self._model.predict(X)
         steps = np.maximum(self._inv_transform(raw), 0.0).reshape(n, r)
@@ -625,9 +676,12 @@ class ETASurrogate:
         runway_ids: List[str],
         current_sim_time: float,
         lag_features: Optional[np.ndarray] = None,
+        target_time_budget: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Alias for :meth:`predict_eta_fleet` (backwards compatibility)."""
-        return self.predict_eta_fleet(states, runway_ids, current_sim_time, lag_features)
+        return self.predict_eta_fleet(
+            states, runway_ids, current_sim_time, lag_features, target_time_budget
+        )
 
     def predict_all_runways(
         self,
@@ -635,6 +689,7 @@ class ETASurrogate:
         runway_ids: List[str],
         current_sim_time: float,
         lag_features: Optional[np.ndarray] = None,
+        target_time_budget: Optional[float] = None,
     ) -> Dict[str, float]:
         """Predict ETA for one aircraft across all candidate runways.
 
@@ -644,6 +699,8 @@ class ETASurrogate:
         runway_ids : list[str]
         current_sim_time : float
         lag_features : np.ndarray, shape (3,), optional
+        target_time_budget : float, optional
+            Finding-2 feature; ``None`` defaults to 0.0.
 
         Returns
         -------
@@ -651,7 +708,9 @@ class ETASurrogate:
             ``{runway_id: absolute_eta}``
         """
         return {
-            rwy: self.predict_eta(state, rwy, current_sim_time, lag_features)
+            rwy: self.predict_eta(
+                state, rwy, current_sim_time, lag_features, target_time_budget
+            )
             for rwy in runway_ids
         }
 
@@ -724,6 +783,15 @@ class ETASurrogate:
     # ------------------------------------------------------------------ #
     # Dunder helpers
     # ------------------------------------------------------------------ #
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore from a pickled state, defaulting attributes added after
+        some ``.pkl`` files were already serialised (currently ``_target``,
+        added when the continuous-``time_to_go`` target candidate was
+        introduced -- every model saved before that was trained on
+        ``steps_to_go``)."""
+        self.__dict__.update(state)
+        self.__dict__.setdefault("_target", "steps")
 
     def __repr__(self) -> str:
         status = "fitted" if self._fitted else "unfitted"

@@ -19,7 +19,7 @@ Pipeline
 3.  Derive exact IAF anchors from PathPlanningGoalEnv constants (no estimation).
 4.  Engineer static geometric + lag features (using the selection's lag
     params unless overridden).
-5.  Build the full 13-column feature matrix; slice to the selected columns.
+5.  Build the full 14-column feature matrix; slice to the selected columns.
 6.  Optionally (``--report-cv``): GroupKFold CV on the final pipeline, purely
     for an informational OOF metrics printout — skipped by default.
 7.  Fit the final model on the full reduced dataset with the winning transform.
@@ -133,12 +133,19 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--window", type=int, default=None,
                    help="Rolling window for cumabs_cte/heading_volatility. Defaults "
                         "to the value recorded in the selection artifact.")
+    p.add_argument("--target", choices=["steps", "seconds"], default=None,
+                   help="Regression target. Defaults to the value recorded in the "
+                        "selection artifact ('steps' if absent, for selections made "
+                        "before this flag existed). 'seconds' (continuous time_to_go) "
+                        "forces --sim-dt to 1.0 regardless of the flag below, since "
+                        "the model then predicts seconds directly.")
     p.add_argument("--sim-dt", type=float, default=float(ACTION_TIME),
                    help="Seconds per unit of the model's predicted step count. "
                         "This is ACTION_TIME (the env's decision-step interval), "
                         "NOT bluesky's 5s physics tick — the surrogate is trained "
                         "against rollout data whose 'step' column increments once "
-                        "per env.step() call (see surrogate_data.py).")
+                        "per env.step() call (see surrogate_data.py). Ignored "
+                        "(forced to 1.0) when --target=seconds.")
     p.add_argument("--random-state", type=int, default=42)
     p.add_argument("--report-cv", action="store_true",
                    help="Also run a GroupKFold CV on the final pipeline for an "
@@ -165,6 +172,14 @@ def main() -> None:
     transform_name = selection["transform_name"]
     fwd_fn, inv_fn = TRANSFORMS[transform_name]
 
+    target = args.target if args.target is not None else selection.get("target", "steps")
+    if target == "seconds":
+        sim_dt = 1.0
+        print(f"  Target: 'seconds' (continuous time_to_go) -> forcing sim_dt=1.0 "
+              f"(model predicts seconds directly; --sim-dt={args.sim_dt} ignored)")
+    else:
+        sim_dt = args.sim_dt
+
     et_params = dict(
         n_estimators=args.n_estimators,
         max_depth=args.max_depth,
@@ -180,10 +195,10 @@ def main() -> None:
     )
     print(f"  {len(model_df):,} modelling rows  |  {model_df['episode'].nunique():,} episodes  |  {len(all_runways)} runways")
 
-    X_full, y_full, _feat_names = build_feature_matrix(model_df, runway_encoder)
+    X_full, y_full, _feat_names = build_feature_matrix(model_df, runway_encoder, target=target)
     X_reduced = X_full[:, col_indices]
     print(f"  Reduced feature matrix: {X_reduced.shape}  (features: {feature_names_kept})")
-    print(f"  Target transform: {transform_name!r}")
+    print(f"  Target: {target!r}  |  Target transform: {transform_name!r}")
 
     if args.report_cv:
         report_cv(
@@ -209,9 +224,10 @@ def main() -> None:
         needs_lag=needs_lag,
         lag_steps=lag_steps,
         window=window,
-        sim_dt=args.sim_dt,
+        sim_dt=sim_dt,
         transform_name=transform_name,
         inv_transform=inv_fn,
+        target=target,
     )
 
     print(f"\nSurrogate summary:")
