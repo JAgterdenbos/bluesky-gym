@@ -23,8 +23,9 @@ Overview
                                        actual separation ≥ RECAT-EU minimum
      Tracking degradation  Δε          Mean |RTA_error_CPS| − |RTA_error_solo|
                                        comparing CPS to frozen worker alone
-     Recovery success rate R_rec       Fraction of RTA violations recovered
-                                       within δ_update tolerance
+     Recovery success rate R_rec       Fraction of mid-trajectory-updated
+                                       flights (M_update) landing within the
+                                       RTA tolerance δ_t (Eq. recovery_rate)
      Delay ripple index    ρ_ripple    Lag-1 autocorrelation of the RTA error
                                        sequence (measures delay propagation)
 
@@ -38,12 +39,10 @@ Comparison baseline
 
 from __future__ import annotations
 
-import csv
 import math
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Type, cast
 
 import gymnasium as gym
@@ -79,6 +78,7 @@ from cps_coordination.experiments.config import (
     CPSEnvKwargsConfig,
     CPSModelConfig,
 )
+from cps_coordination.experiments.metrics import RTA_TOLERANCE_SEC, CPSMetricsReporter
 
 # The frozen worker's actual registered gym id. Deliberately NOT read from
 # ``cfg.env.env_name`` — that field is now the experiment-path namespace
@@ -166,118 +166,10 @@ class CPSCoordinationRegistry(BaseRegistry):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Metric helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _lag1_autocorrelation(series: List[float]) -> float:
-    """Compute lag-1 autocorrelation of *series* (ρ_ripple).
-
-    Returns ``float('nan')`` if the series has fewer than 2 elements or
-    zero variance, matching standard behaviour for undefined autocorrelation.
-
-    Implements: ρ_1 = Cov(x_t, x_{t-1}) / Var(x_t)  (Pearson).
-
-    Parameters
-    ----------
-    series : List[float]
-        Ordered sequence of values (e.g. per-aircraft RTA errors within
-        an episode, sorted by landing time).
-
-    Returns
-    -------
-    float
-        Lag-1 autocorrelation in ``[-1, 1]``, or NaN.
-    """
-    if len(series) < 2:
-        return float("nan")
-    arr = np.asarray(series, dtype=float)
-    if np.std(arr) == 0.0:
-        return float("nan")
-    # Pearson correlation between consecutive pairs
-    return float(np.corrcoef(arr[:-1], arr[1:])[0, 1])
-
-
-def _compute_separation_compliance(
-    landing_times: Dict[str, List[float]],
-    wake_cats: Dict[str, str],
-    recat_matrix: Dict[str, Dict[str, float]],
-    tolerance_s: float = 5.0,
-) -> float:
-    """Compute C_sep: fraction of consecutive pairs meeting RECAT-EU separation.
-
-    For each runway, consecutive landings (sorted by time) are checked
-    against the RECAT-EU matrix.  A pair is *compliant* if the observed gap
-    is ≥ (required_separation − tolerance_s).
-
-    Parameters
-    ----------
-    landing_times : Dict[str, List[float]]
-        ``{runway_id: [landing_time, ...]}`` — unsorted is fine.
-    wake_cats : Dict[str, str]
-        ``{acid: wake_turbulence_category}`` mapping.
-    recat_matrix : Dict[str, Dict[str, float]]
-        RECAT-EU separation matrix (seconds).
-    tolerance_s : float
-        Compliance slack in seconds (default 5 s).
-
-    Returns
-    -------
-    float
-        C_sep ∈ [0, 1].
-    """
-    n_pairs = 0
-    n_compliant = 0
-
-    for rwy, times_and_acids in landing_times.items():
-        if len(times_and_acids) < 2:
-            continue
-        sorted_pairs: List[Tuple[float, str]] = sorted(
-            times_and_acids, key=lambda x: x[0]  # type: ignore[index]
-        )
-        for i in range(1, len(sorted_pairs)):
-            t_prev, acid_prev = sorted_pairs[i - 1]  # type: ignore[misc]
-            t_curr, acid_curr = sorted_pairs[i]       # type: ignore[misc]
-            gap = t_curr - t_prev
-            lead_cat = wake_cats.get(acid_prev, "C")
-            trail_cat = wake_cats.get(acid_curr, "C")
-            required = recat_matrix.get(lead_cat, {}).get(trail_cat, 90.0)
-            n_pairs += 1
-            if gap >= (required - tolerance_s):
-                n_compliant += 1
-
-    return (n_compliant / n_pairs) if n_pairs > 0 else float("nan")
-
-
-def _compute_throughput(
-    landing_times: Dict[str, List[Tuple[float, str]]],
-    window_h: float = 1.0,
-) -> Tuple[float, Dict[str, float]]:
-    """Compute total throughput Γ and per-runway throughput Γ_r.
-
-    Parameters
-    ----------
-    landing_times : Dict[str, List[Tuple[float, str]]]
-        ``{runway_id: [(landing_time_s, acid), ...]}``
-    window_h : float
-        Observation window in hours.
-
-    Returns
-    -------
-    gamma : float
-        Total landings per hour.
-    gamma_r : Dict[str, float]
-        Per-runway landings per hour.
-    """
-    total = sum(len(v) for v in landing_times.values())
-    gamma = total / window_h
-
-    gamma_r: Dict[str, float] = {
-        rwy: len(lts) / window_h for rwy, lts in landing_times.items()
-    }
-    return gamma, gamma_r
-
-
+# Metric computation, printing, and disk logging live in
+# cps_coordination/experiments/metrics.py (CPSMetricsReporter) — see that
+# module's docstring for the pre-Step-10-audit Phase D.4 rationale for the
+# split.
 # ──────────────────────────────────────────────────────────────────────────────
 # Episode log entry
 # ──────────────────────────────────────────────────────────────────────────────
@@ -288,18 +180,42 @@ class _EpisodeRecord:
     """Accumulator for per-aircraft data within a single episode."""
 
     acid: str
+    episode_id: int                   # ep_idx this record was produced in -- needed
+                                       # to scope cross-episode-pooled groupings (e.g.
+                                       # separation-compliance landing pairs) to a
+                                       # single episode's own simulation clock.
     runway_id: str
     wake_cat: str
     assigned_tta: float               # TTA set by CPSManager at episode end
     actual_landing_time: float        # Sim time of successful landing
     rta_error_cps: float              # |actual_time - assigned_tta|
     rta_error_solo: float             # |actual_time - unconstrained ETA| (baseline)
-    recovered: bool                   # Whether an RTA violation was corrected
+    tta_updated_mid_trajectory: bool  # Received a TTA update after its initial
+                                       # assignment (Eq. recovery_rate's M_update
+                                       # membership test). R_rec itself is
+                                       # derived from this + rta_error_cps at
+                                       # metrics-aggregation time (recomputable
+                                       # at any tolerance, like C_sep) rather
+                                       # than baked in here.
     success: bool
+    stall_detected: bool = False      # CPSManager.is_stalled(acid) at episode
+                                       # end -- flagged when distance-to-IAF
+                                       # failed to shrink over a rolling window
+                                       # (see cps_manager.py's STALL_WINDOW_S).
     arrival_index: int = -1           # n-th aircraft to spawn this episode (join key
                                        # for the two-pass baseline — robust to acid
                                        # reuse under a rolling-arrival-stream config,
                                        # unlike joining by acid directly).
+    flight_id: str = ""               # f"{acid}#{episode_id}.{arrival_index}" -- a
+                                       # human-grep-able, globally unique identity for
+                                       # this flight. `acid` alone is NOT unique: it is
+                                       # purely slot-derived (bluesky_gym's
+                                       # MultiAgentPathPlanningGoalEnv._spawn_into_slot,
+                                       # f"AC{slot:03d}") and gets reused both within an
+                                       # episode (rolling-arrival-stream slot refills)
+                                       # and trivially across every episode (slot
+                                       # numbering restarts at each reset). Logging-only
+                                       # -- never touches the real BlueSky callsign.
     death_cause: Optional[str] = None
     traj_x: List[float] = field(default_factory=list)  # populated only when
     traj_y: List[float] = field(default_factory=list)  # _run_episode(track_trajectory=True)
@@ -373,9 +289,25 @@ class CPSCoordinationExperiment(BaseExperiment):
         genuine rolling arrival stream (Step 10's M=10,000 scale-up config).
         ``spawn_window_s`` defaults to ``0.0`` (every arrival eligible from
         time zero, i.e. today's instant-spawn/instant-refill behavior).
+
+        ``runways`` is deliberately read from ``cfg.env.env_kwargs`` directly,
+        NOT from ``cfg.eval_env_kwargs`` (pre-Step-10 audit, discovered live):
+        ``ExperimentConfig.eval_env_kwargs``'s ``_inject_groups`` helper
+        unconditionally overwrites the group kwarg (``"runways"``, per
+        ``CPSEnvKwargsConfig.get_group_kwarg_name()``) with
+        ``session.eval_groups`` -- which defaults to ``None`` -- silently
+        discarding any explicit ``CPSEnvKwargsConfig(runways=[...])`` before
+        it ever reaches the env. Every "restrict to N runways" evaluation in
+        this package (``validate_cps_pipeline.py``'s single-runway checks,
+        ``diagnose_success_rate.py``'s condition 4, CLI ``--runways``) went
+        through this path and was silently running on all 12 runways
+        instead. Bypassing ``eval_env_kwargs`` here fixes it locally without
+        touching the shared framework property (out of this package's
+        scope) -- ``session.eval_groups`` remains the (currently unused,
+        for this env) alternate channel that property was designed for.
         """
+        runways = self.cfg.env.env_kwargs.runways
         env_kwargs = self.cfg.eval_env_kwargs
-        runways = env_kwargs.get("runways")
         return MultiAgentPathPlanningGoalEnv(
             runways=runways,
             action_mode=env_kwargs.get("action_mode", "hdg"),
@@ -499,6 +431,9 @@ class CPSCoordinationExperiment(BaseExperiment):
                 # cps_coordination/models/surrogate_feature_selection.yaml), which is
                 # what was silently degrading ETA accuracy well outside RTA_TOLERANCE.
                 trajectory_buffer=TrajectoryBuffer(),
+                enable_stall_detection=mcfg.enable_stall_detection,
+                fairness_weight=mcfg.fairness_weight,
+                enable_cross_cycle_runway_seeding=mcfg.enable_cross_cycle_runway_seeding,
             )
 
         # Two independent CPSManager instances — one per pass — so that the
@@ -569,9 +504,10 @@ class CPSCoordinationExperiment(BaseExperiment):
         finally:
             env.close()
 
-        metrics = self._compute_aggregate_metrics(all_records, recat_matrix)
-        self._print_metrics(metrics)
-        self._save_logs(all_records, metrics)
+        reporter = self._make_metrics_reporter()
+        metrics = reporter.compute_aggregate_metrics(all_records, recat_matrix)
+        reporter.print_metrics(metrics)
+        reporter.save_logs(all_records, metrics)
 
         return dict(results)
 
@@ -655,18 +591,45 @@ class CPSCoordinationExperiment(BaseExperiment):
 
         obs, info_list = env.reset(seed=seed)
         sim_time = 0.0
-        records: Dict[str, _EpisodeRecord] = {}
+        records: List[_EpisodeRecord] = []
         last_tta: Dict[str, float] = {}
         arrival_order: Dict[str, int] = {}
+        # Test A (pre-Step-10 audit §1.2/§1.4): per-episode cache of each
+        # acid's first-committed remaining_time_budget value, populated and
+        # consulted by _compute_remaining_time_budget only when
+        # CPSModelConfig.freeze_remaining_time_budget is set.
+        frozen_remaining_time_budget: Dict[str, float] = {}
         trajectories: Dict[str, Tuple[List[float], List[float]]] = defaultdict(lambda: ([], []))
+        # Eq. recovery_rate's M_update membership test (cps-mode only): an
+        # acid enters `assigned_once` on its first-ever TTA assignment, and
+        # `mid_traj_updated` on any *subsequent* one (a genuine mid-trajectory
+        # update, not the initial assignment).
+        assigned_once: set = set()
+        mid_traj_updated: set = set()
+        # `acid` is derived purely from slot index
+        # (MultiAgentPathPlanningGoalEnv._spawn_into_slot: f"AC{slot:03d}"),
+        # so under a rolling-arrival-stream config (total_arrivals_per_episode
+        # > max_concurrent_aircraft) the same acid string is reused within a
+        # single episode once a slot frees up and a new arrival spawns into
+        # it. Every acid-keyed accumulator below must therefore be reset on
+        # each new occupancy, or a later arrival silently inherits/overwrites
+        # an earlier, unrelated arrival's state (this previously caused
+        # `records` -- then a Dict[str, _EpisodeRecord] -- to silently drop
+        # every arrival but the last one per slot).
+        prev_active_acids: set = set()
 
         while not env.is_episode_done():
-            for info in info_list:
-                acid = info["acid"]
-                if acid not in arrival_order:
-                    arrival_order[acid] = len(arrival_order)
+            current_acids = {info["acid"] for info in info_list}
+            for acid in current_acids - prev_active_acids:
+                arrival_order[acid] = len(arrival_order)
+                trajectories.pop(acid, None)
+                assigned_once.discard(acid)
+                mid_traj_updated.discard(acid)
+                last_tta.pop(acid, None)
+                frozen_remaining_time_budget.pop(acid, None)
+            prev_active_acids = current_acids
 
-            fleet = self._build_fleet(obs, info_list, sim_time)
+            fleet = self._build_fleet(obs, info_list, sim_time, frozen_remaining_time_budget)
             acid_to_slot = {info["acid"]: info["slot"] for info in info_list}
 
             if track_trajectory:
@@ -693,6 +656,9 @@ class CPSCoordinationExperiment(BaseExperiment):
                 for acid in changed:
                     tta = cps_manager.get_tta(acid)
                     if tta is not None:
+                        if acid in assigned_once:
+                            mid_traj_updated.add(acid)
+                        assigned_once.add(acid)
                         last_tta[acid] = tta
                         env.set_tta(acid_to_slot[acid], tta)
             else:  # "solo" — inject the raw, unconstrained ETA every step.
@@ -728,29 +694,33 @@ class CPSCoordinationExperiment(BaseExperiment):
                         abs(landing_time - assigned_tta)
                         if not math.isnan(assigned_tta) else float("nan")
                     )
-                    recovered = False
+                    tta_updated_mid_trajectory = acid in mid_traj_updated
+                    stall_detected = cps_manager.is_stalled(acid)
                     traj_x, traj_y = trajectories[acid] if track_trajectory else ([], [])
 
-                    records[acid] = _EpisodeRecord(
+                    records.append(_EpisodeRecord(
                         acid=acid,
+                        episode_id=ep_idx,
                         runway_id=str(info.get("current_runway", "")),
                         wake_cat="C",
                         assigned_tta=assigned_tta,
                         actual_landing_time=landing_time,
                         rta_error_cps=rta_error_cps,
                         rta_error_solo=float("nan"),
-                        recovered=recovered,
+                        tta_updated_mid_trajectory=tta_updated_mid_trajectory,
+                        stall_detected=stall_detected,
                         success=success,
                         arrival_index=arrival_order[acid],
+                        flight_id=f"{acid}#{ep_idx}.{arrival_order[acid]}",
                         death_cause=info.get("death_cause"),
                         traj_x=list(traj_x),
                         traj_y=list(traj_y),
-                    )
+                    ))
 
             sim_time += ACTION_TIME
             obs, info_list = env.get_active_batch()
 
-        return list(records.values())
+        return records
 
     @staticmethod
     def _join_two_pass(
@@ -789,7 +759,11 @@ class CPSCoordinationExperiment(BaseExperiment):
         return joined
 
     def _build_fleet(
-        self, obs: dict, info_list: List[dict], current_time: float
+        self,
+        obs: dict,
+        info_list: List[dict],
+        current_time: float,
+        frozen_remaining_time_budget: Optional[Dict[str, float]] = None,
     ) -> List[AircraftState]:
         """Construct ``AircraftState`` records from the env's current batch.
 
@@ -807,14 +781,27 @@ class CPSCoordinationExperiment(BaseExperiment):
         training and inference time, so no coordinate reconciliation is
         needed (see the "Coordinate-frame finding" in the Phase III plan and
         ``eta_surrogate.py``'s module docstring).
+
+        Parameters
+        ----------
+        frozen_remaining_time_budget : Dict[str, float], optional
+            Per-episode cache threaded in by :meth:`_run_episode` for Test A
+            (pre-Step-10 audit §1.2/§1.4, ``CPSModelConfig.freeze_remaining_time_budget``).
+            Callers that don't need the freeze/clamp ablations (e.g. direct
+            single-call test harnesses) can omit this -- a fresh, empty dict
+            is used internally, which is a no-op unless the config flag is set.
         """
+        if frozen_remaining_time_budget is None:
+            frozen_remaining_time_budget = {}
         fleet = []
         for row, info in enumerate(info_list):
             x, y = float(obs["observation"][row][0]), float(obs["observation"][row][1])
             elapsed_steps = info["sim_time"] / ACTION_TIME
             heading_deg = float(np.degrees(info["heading"]))
             eta = self._estimate_naive_eta(obs["observation"][row], info, current_time)
-            remaining_time_budget = self._compute_remaining_time_budget(info)
+            remaining_time_budget = self._compute_remaining_time_budget(
+                info, frozen_remaining_time_budget,
+            )
             fleet.append(
                 AircraftState(
                     acid=info["acid"],
@@ -829,8 +816,9 @@ class CPSCoordinationExperiment(BaseExperiment):
             )
         return fleet
 
-    @staticmethod
-    def _compute_remaining_time_budget(info: dict) -> float:
+    def _compute_remaining_time_budget(
+        self, info: dict, frozen_remaining_time_budget: Dict[str, float],
+    ) -> float:
         """Finding-2 feature: the frozen worker's own active temporal target
         minus elapsed time since spawn (mirrors ``rta - t`` in training data).
 
@@ -843,11 +831,38 @@ class CPSCoordinationExperiment(BaseExperiment):
         returns 0.0 rather than a meaningless ``-elapsed_time``. A nonzero
         value always reflects an already-committed past decision, never
         leakage of a not-yet-decided future one.
+
+        Test A / Test B (pre-Step-10 audit §1.2/§1.4) -- both gated off by
+        default (today's behaviour unchanged unless explicitly opted into):
+
+        - ``CPSModelConfig.freeze_remaining_time_budget``: once this acid's
+          first nonzero (TTA-committed) value is seen, cache and return it
+          for every subsequent call this episode instead of recomputing
+          ``tta - t`` -- isolates the surrogate-side channel of the §1.1
+          feedback loop by removing the mechanism through which the
+          surrogate's own prior-cycle output re-enters as a bigger input.
+        - ``CPSModelConfig.remaining_time_budget_cap_s``: cap the (still
+          freshly recomputed every cycle) value at this ceiling -- bounds
+          the loop without removing the feature entirely. Ignored when
+          freeze is also active (freeze already fixes the value).
         """
         goal_t = float(info["goal_vector"][2])
         if goal_t == 0.0:
             return 0.0
-        return goal_t * _ENV_MAX_TIME - float(info["sim_time"])
+        value = goal_t * _ENV_MAX_TIME - float(info["sim_time"])
+
+        mcfg = cast(CPSModelConfig, self.cfg.model)
+        acid = info["acid"]
+        if mcfg.freeze_remaining_time_budget:
+            if acid in frozen_remaining_time_budget:
+                return frozen_remaining_time_budget[acid]
+            frozen_remaining_time_budget[acid] = value
+            return value
+
+        if mcfg.remaining_time_budget_cap_s is not None:
+            return min(value, mcfg.remaining_time_budget_cap_s)
+
+        return value
 
     @staticmethod
     def _estimate_naive_eta(obs_row: np.ndarray, info: dict, current_time: float) -> float:
@@ -868,178 +883,22 @@ class CPSCoordinationExperiment(BaseExperiment):
         return current_time + remaining_s
 
     # ------------------------------------------------------------------ #
-    # Aggregate metric computation
+    # Metrics reporter factory
     # ------------------------------------------------------------------ #
 
-    def _compute_aggregate_metrics(
-        self,
-        records: List[_EpisodeRecord],
-        recat_matrix: Dict[str, Dict[str, float]],
-    ) -> Dict[str, Any]:
-        """Compute all CPS metrics from the full set of episode records.
+    def _make_metrics_reporter(self) -> CPSMetricsReporter:
+        """Build the :class:`CPSMetricsReporter` for this experiment's config.
 
-        Metrics computed
-        ----------------
-        gamma           : Total throughput (landings/hour).
-        gamma_r         : Per-runway throughput (landings/hour).
-        c_sep           : Separation compliance fraction.
-        delta_epsilon   : Tracking degradation (mean |Δε|).
-        r_rec           : Recovery success rate.
-        rho_ripple      : Delay ripple index (lag-1 autocorrelation of RTA errors).
-        n_episodes      : Total episodes evaluated.
-        n_aircraft      : Total aircraft evaluated.
-        success_rate    : Fraction of successful landings.
-
-        Parameters
-        ----------
-        records : List[_EpisodeRecord]
-            All per-aircraft records from all evaluation episodes.
-        recat_matrix : Dict[str, Dict[str, float]]
-            RECAT-EU separation matrix for C_sep calculation.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Mapping of metric name → value.
+        Reads ``cps_eval.separation_tolerance_s``/``cps_eval.rta_tolerance_s``
+        from ``cps_base.yaml`` (via :meth:`_cfg_or_default`) once here, rather
+        than the reporter re-reading the YAML file on every metrics call.
         """
-        if not records:
-            return {"error": "no records collected"}
-
-        n_aircraft = len(records)
-        success_rate = sum(r.success for r in records) / n_aircraft
-
-        # --- Throughput ---
-        # Approximate: count landings over total sim time span
-        landing_times_by_rwy: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
-        for rec in records:
-            if rec.success:
-                landing_times_by_rwy[rec.runway_id].append(
-                    (rec.actual_landing_time, rec.acid)
-                )
-
-        total_time_s = max(
-            (rec.actual_landing_time for rec in records if rec.success),
-            default=3600.0,
+        cps_eval_cfg = self._cfg_or_default("cps_eval", {})
+        return CPSMetricsReporter(
+            save_path=self.cfg.save_path,
+            separation_tolerance_s=float(cps_eval_cfg.get("separation_tolerance_s", 5.0)),
+            rta_tolerance_s=float(cps_eval_cfg.get("rta_tolerance_s", RTA_TOLERANCE_SEC)),
         )
-        window_h = max(total_time_s / 3600.0, 1e-6)
-        gamma, gamma_r = _compute_throughput(landing_times_by_rwy, window_h)
-
-        # --- Separation compliance ---
-        wake_cats = {rec.acid: rec.wake_cat for rec in records}
-        tol = self._cfg_or_default("cps_eval", {}).get("separation_tolerance_s", 5.0)
-        c_sep = _compute_separation_compliance(
-            landing_times_by_rwy,  # type: ignore[arg-type]
-            wake_cats,
-            recat_matrix,
-            tolerance_s=float(tol),
-        )
-
-        # --- Tracking degradation Δε ---
-        delta_eps_values = [
-            abs(rec.rta_error_cps) - abs(rec.rta_error_solo)
-            for rec in records
-            if not np.isnan(rec.rta_error_solo)
-        ]
-        delta_epsilon = float(np.mean(delta_eps_values)) if delta_eps_values else float("nan")
-
-        # --- Recovery success rate R_rec ---
-        rta_violations = [rec for rec in records if abs(rec.rta_error_cps) > float(tol)]
-        r_rec = (
-            sum(rec.recovered for rec in rta_violations) / len(rta_violations)
-            if rta_violations
-            else float("nan")
-        )
-
-        # --- Delay ripple index ρ_ripple ---
-        # Sort records by landing time to form the arrival sequence
-        sorted_records = sorted(
-            (rec for rec in records if rec.success),
-            key=lambda r: r.actual_landing_time,
-        )
-        rta_error_sequence = [rec.rta_error_cps for rec in sorted_records]
-        rho_ripple = _lag1_autocorrelation(rta_error_sequence)
-
-        return {
-            "n_episodes": len(set(r.acid.split("_")[0] for r in records)),
-            "n_aircraft": n_aircraft,
-            "success_rate": round(success_rate, 4),
-            "gamma": round(gamma, 4),
-            "gamma_r": {rwy: round(v, 4) for rwy, v in gamma_r.items()},
-            "c_sep": round(float(c_sep), 4) if not np.isnan(c_sep) else "nan",
-            "delta_epsilon": round(delta_epsilon, 4) if not np.isnan(delta_epsilon) else "nan",
-            "r_rec": round(r_rec, 4) if not np.isnan(r_rec) else "nan",
-            "rho_ripple": round(rho_ripple, 4) if not np.isnan(rho_ripple) else "nan",
-        }
-
-    # ------------------------------------------------------------------ #
-    # Logging
-    # ------------------------------------------------------------------ #
-
-    def _print_metrics(self, metrics: Dict[str, Any]) -> None:
-        """Print the aggregate metric table to stdout."""
-        print("\n--- CPS Coordination Metrics ---")
-        print(f"  Episodes evaluated   : {metrics.get('n_episodes')}")
-        print(f"  Aircraft evaluated   : {metrics.get('n_aircraft')}")
-        print(f"  Success rate         : {metrics.get('success_rate', 'n/a'):.2%}")
-        print(f"  Throughput Γ         : {metrics.get('gamma', 'n/a')} ac/h")
-        print(f"  Per-runway Γ_r       : {metrics.get('gamma_r', {})}")
-        print(f"  Sep. compliance C_sep: {metrics.get('c_sep', 'n/a')}")
-        print(f"  Tracking degrad. Δε  : {metrics.get('delta_epsilon', 'n/a')} s")
-        print(f"  Recovery rate R_rec  : {metrics.get('r_rec', 'n/a')}")
-        print(f"  Ripple index ρ_ripple: {metrics.get('rho_ripple', 'n/a')}")
-        print()
-
-    def _save_logs(
-        self,
-        records: List[_EpisodeRecord],
-        metrics: Dict[str, Any],
-    ) -> None:
-        """Write per-aircraft CSV log and aggregate YAML metrics to disk.
-
-        Outputs
-        -------
-        ``<save_path>/cps_eval_log.csv``    — one row per aircraft record.
-        ``<save_path>/cps_metrics.yaml``    — aggregate metric dict.
-        """
-        save_path = self.cfg.save_path
-        os.makedirs(save_path, exist_ok=True)
-
-        # Per-aircraft CSV
-        csv_path = os.path.join(save_path, "cps_eval_log.csv")
-        csv_fields = [
-            "acid", "runway_id", "wake_cat", "assigned_tta",
-            "actual_landing_time", "rta_error_cps", "rta_error_solo",
-            "recovered", "success",
-        ]
-        with open(csv_path, "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=csv_fields)
-            writer.writeheader()
-            for rec in records:
-                writer.writerow(
-                    {
-                        "acid": rec.acid,
-                        "runway_id": rec.runway_id,
-                        "wake_cat": rec.wake_cat,
-                        "assigned_tta": rec.assigned_tta,
-                        "actual_landing_time": rec.actual_landing_time,
-                        "rta_error_cps": rec.rta_error_cps,
-                        "rta_error_solo": rec.rta_error_solo,
-                        "recovered": rec.recovered,
-                        "success": rec.success,
-                    }
-                )
-        print(f"Episode log saved → {csv_path}")
-
-        # Aggregate metrics YAML
-        yaml_path = os.path.join(save_path, "cps_metrics.yaml")
-        with open(yaml_path, "w") as fh:
-            yaml.dump(
-                {"timestamp": datetime.now().isoformat(), **metrics},
-                fh,
-                default_flow_style=False,
-                sort_keys=False,
-            )
-        print(f"Aggregate metrics saved → {yaml_path}")
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -1061,15 +920,29 @@ class CPSCoordinationExperiment(BaseExperiment):
             path = default_path if os.path.exists(default_path) else None
         if not path:
             return None
-        # sim_dt here is "seconds per unit of the model's predicted step
-        # count", NOT bluesky's SIM_DT (5s physics tick). The surrogate is
-        # trained against path_planning/rta/collect.py's "step" column,
-        # which increments once per env.step() call (i.e. once per
-        # ACTION_TIME=120s decision step, not once per 5s physics tick) —
-        # see cps_coordination/testing/surrogate_data.py's steps_to_go
-        # derivation. Passing SIM_DT or 1.0 here would undervalue every
-        # predicted ETA by ~24x-120x.
-        return ETASurrogate.from_sampler_path(path, sim_dt=ACTION_TIME)
+        # Trust the serialized sim_dt rather than overriding it: sim_dt is
+        # "seconds per unit of the model's predicted output", and its
+        # correct value now depends on the model's own _target — ACTION_TIME
+        # (120s) for a target="steps" model (path_planning/rta/collect.py's
+        # "step" column, one per env.step() decision step) but 1.0 for a
+        # target="seconds" model (Finding 1's continuous time_to_go
+        # candidate, which predicts seconds directly). ETASurrogate.load()
+        # (unlike from_sampler_path, which unconditionally overrides sim_dt)
+        # preserves whatever train_surrogate.py baked in for that target at
+        # save time -- overriding here to a single fixed ACTION_TIME would
+        # silently 120x-inflate every prediction from a target="seconds"
+        # model (this is exactly what promoting
+        # eta_surrogate_combined_candidate.pkl to production surfaced).
+        surrogate = ETASurrogate.load(path)
+        expected_sim_dt = ACTION_TIME if surrogate._target == "steps" else 1.0
+        if surrogate.sim_dt != expected_sim_dt:
+            raise ValueError(
+                f"ETASurrogate at {path!r} has target={surrogate._target!r} but "
+                f"sim_dt={surrogate.sim_dt} (expected {expected_sim_dt}) -- "
+                "this model was likely saved with a stale/incorrect sim_dt; "
+                "refusing to silently mis-scale every ETA prediction."
+            )
+        return surrogate
 
     def _load_recat_matrix(self) -> Dict[str, Dict[str, float]]:
         """Load the RECAT-EU matrix from cps_base.yaml, or use a safe default.

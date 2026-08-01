@@ -64,6 +64,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--episodes", type=int, default=100, help="Number of episodes (M).")
     p.add_argument("--n-aircraft", type=int, default=5, help="Aircraft per episode (N_a).")
     p.add_argument("--k-cps", type=int, default=3)
+    p.add_argument("--fairness-weight", type=float, default=0.0,
+                   help="k-CPS slack-protection weight (0.0 = FCFS, ablation).")
+    p.add_argument("--freeze-remaining-time-budget", action="store_true", default=False,
+                   help="Test A (TTA feedback-loop falsification): freeze "
+                        "remaining_time_budget at its first-committed value per acid.")
+    p.add_argument("--remaining-time-budget-cap-s", type=float, default=None,
+                   help="Test B: cap remaining_time_budget fed to the surrogate (seconds).")
+    p.add_argument("--disable-cross-cycle-runway-seeding", action="store_true", default=False,
+                   help="Test C: never seed a runway's greedy-schedule state from "
+                        "prior replanning cycles (isolates the surrogate-feature loop).")
     p.add_argument("--mode", type=str, default="static", choices=["static", "dynamic"],
                    help="runway_assignment_mode")
     p.add_argument("--delta-t-plan", type=int, default=120)
@@ -103,6 +113,7 @@ def _log_episode(
             **AircraftTelemetryRow(
                 episode_id=ep_idx,
                 acid=rec.acid,
+                flight_id=rec.flight_id,
                 runway_id=rec.runway_id,
                 wake_cat=rec.wake_cat,
                 k_cps=k_cps,
@@ -111,7 +122,8 @@ def _log_episode(
                 actual_landing_time=rec.actual_landing_time,
                 rta_error_cps=rec.rta_error_cps,
                 rta_error_solo=rec.rta_error_solo,
-                recovered=rec.recovered,
+                tta_updated_mid_trajectory=rec.tta_updated_mid_trajectory,
+                stall_detected=rec.stall_detected,
                 success=rec.success,
                 death_cause=rec.death_cause,
                 traj_x=list(rec.traj_x),
@@ -156,6 +168,10 @@ def main() -> None:
             delta_t_plan=args.delta_t_plan,
             delta_update=args.delta_update,
             eta_surrogate_path=args.eta_surrogate_path,
+            fairness_weight=args.fairness_weight,
+            freeze_remaining_time_budget=args.freeze_remaining_time_budget,
+            remaining_time_budget_cap_s=args.remaining_time_budget_cap_s,
+            enable_cross_cycle_runway_seeding=not args.disable_cross_cycle_runway_seeding,
         ),
         session=SessionConfig(
             pretrained_run_id=args.run_id,
@@ -184,6 +200,8 @@ def main() -> None:
             # See coordination_baseline.py::evaluate()'s _new_cps_manager for why
             # this is required (unwired -> zeroed lag features -> degraded ETA).
             trajectory_buffer=TrajectoryBuffer(),
+            fairness_weight=args.fairness_weight,
+            enable_cross_cycle_runway_seeding=not args.disable_cross_cycle_runway_seeding,
         )
 
     cps_manager = _new_manager()

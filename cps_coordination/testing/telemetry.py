@@ -32,6 +32,7 @@ from path_planning.rta.collect import BaseDataCollector, get_collector
 AIRCRAFT_COLUMNS: List[str] = [
     "episode_id",
     "acid",
+    "flight_id",
     "runway_id",
     "wake_cat",
     "k_cps",
@@ -40,7 +41,8 @@ AIRCRAFT_COLUMNS: List[str] = [
     "actual_landing_time",
     "rta_error_cps",
     "rta_error_solo",
-    "recovered",
+    "tta_updated_mid_trajectory",
+    "stall_detected",
     "success",
     "death_cause",
     "traj_x",
@@ -66,6 +68,7 @@ class AircraftTelemetryRow:
 
     episode_id: int
     acid: str
+    flight_id: str
     runway_id: str
     wake_cat: str
     k_cps: int
@@ -74,7 +77,8 @@ class AircraftTelemetryRow:
     actual_landing_time: float
     rta_error_cps: float
     rta_error_solo: float
-    recovered: bool
+    tta_updated_mid_trajectory: bool
+    stall_detected: bool
     success: bool
     death_cause: Optional[str] = None
     traj_x: List[float] = field(default_factory=list)

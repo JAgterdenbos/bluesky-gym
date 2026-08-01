@@ -250,13 +250,14 @@ def _run_episode_verbose(
                 )
                 records[acid] = _EpisodeRecord(
                     acid=acid,
+                    episode_id=0,  # _run_episode_verbose is only ever invoked for ep==0
                     runway_id=str(info.get("current_runway", "")),
                     wake_cat="C",
                     assigned_tta=assigned_tta,
                     actual_landing_time=landing_time,
                     rta_error_cps=rta_error_cps,
                     rta_error_solo=float("nan"),
-                    recovered=False,
+                    tta_updated_mid_trajectory=False,
                     success=bool(info.get("is_success", False)),
                     arrival_index=arrival_order[acid],
                     death_cause=info.get("death_cause"),

@@ -50,6 +50,11 @@ class CPSModelConfig(ModelConfig):
       --model-delta-t-plan       int   Replanning interval (simulation seconds).
       --model-delta-update       float Minimum TTA change to push a worker update (s).
       --model-runway-assignment-mode  str  "static" | "dynamic"
+      --model-no-enable-stall-detection    Disable stall freeze (ablation).
+      --model-fairness-weight    float  k-CPS slack-protection weight (ablation).
+      --model-freeze-remaining-time-budget       Test A: freeze the feature (ablation).
+      --model-remaining-time-budget-cap-s  float  Test B: cap the feature (ablation).
+      --model-no-enable-cross-cycle-runway-seeding  Test C: disable ratchet (ablation).
     """
 
     # CPS coordination hyper-parameters
@@ -91,6 +96,58 @@ class CPSModelConfig(ModelConfig):
     stringency is a single CLI flag away. Ignored when
     ``reduced_wake_separation=False``."""
 
+    enable_stall_detection: bool = True
+    """If True (default), CPSManager flags aircraft whose distance to their
+    IAF hasn't shrunk over a rolling window ("stalled") and freezes their
+    ETA/runway instead of continuing to re-target them every cycle (see
+    ``cps_manager.py``'s ``STALL_WINDOW_S``/``is_stalled``). Set False to
+    reproduce the pre-mitigation behaviour exactly (e.g. for an
+    ablation/before-after comparison) -- with detection off, CPSManager
+    still tracks distance history and ``stall_detected`` is still logged in
+    telemetry, it just never freezes anything."""
+
+    fairness_weight: float = 0.0
+    """Weight on the slack-protection term in ``CPSManager``'s k-CPS window
+    selection rule (``_apply_k_cps_constraint``). ``0.0`` (default)
+    reproduces exact FCFS ordering -- proven total-delay-optimal under
+    today's wake-homogeneity assumption (pre-Step-10 audit §2.2), so this
+    is a strict, opt-in generalisation of the pre-fix no-op k-CPS behaviour,
+    not a change to any already-validated baseline. ``> 0.0`` biases k-CPS
+    window selection to prioritise aircraft with less remaining slack (and
+    any already-stalled aircraft) for earlier, lower-imposed-delay
+    scheduling positions -- a genuine, k-sensitive ablation axis even under
+    wake homogeneity (see ``cps_manager.py``'s ``_apply_k_cps_constraint``
+    docstring for the full cost rule)."""
+
+    freeze_remaining_time_budget: bool = False
+    """Test A (pre-Step-10 audit §1.2/§1.4, TTA feedback-loop falsification):
+    if True, once an aircraft's ``remaining_time_budget`` feature (mirrors
+    ``rta - t``) is first nonzero (a TTA has been committed), hold it fixed
+    at that first-cycle value for the rest of the episode instead of
+    recomputing it every replanning cycle. Isolates the surrogate-side
+    channel of the TTA feedback loop by removing the mechanism through
+    which the surrogate's own prior-cycle output re-enters as a bigger
+    input next cycle. ``False`` (default) reproduces today's behaviour
+    exactly. Mutually exclusive in effect with
+    ``remaining_time_budget_cap_s`` (freeze takes precedence if both set)."""
+
+    remaining_time_budget_cap_s: Optional[float] = None
+    """Test B (pre-Step-10 audit §1.2/§1.4): if set, caps the (still
+    freshly recomputed every cycle) ``remaining_time_budget`` feature at
+    this ceiling in seconds -- bounds the feedback loop without removing
+    the feature entirely, a different intervention point than
+    ``freeze_remaining_time_budget``. ``None`` (default) applies no cap."""
+
+    enable_cross_cycle_runway_seeding: bool = True
+    """Test C (pre-Step-10 audit §1.2): if False, ``CPSManager`` never seeds
+    a runway's "previous scheduled aircraft" from state persisted across
+    replanning cycles (``_runway_last_committed``) -- each cycle only
+    separates against aircraft in the *current* sequence. Isolates the
+    surrogate-feature feedback loop (Test A/B) from this second,
+    structurally distinct cross-cycle ratcheting channel; typically paired
+    with a single-aircraft runway so there is nothing else to separate
+    against. ``True`` (default) reproduces today's behaviour exactly."""
+
     def __post_init__(self) -> None:
         # Set CPSManager as the sentinel algorithm for path / display purposes.
         # We do NOT call super().__post_init__() because that would try to
@@ -108,6 +165,15 @@ class CPSModelConfig(ModelConfig):
         if self.wake_separation_scale <= 0:
             raise ValueError(
                 f"wake_separation_scale must be > 0, got {self.wake_separation_scale}."
+            )
+        if self.fairness_weight < 0:
+            raise ValueError(
+                f"fairness_weight must be >= 0, got {self.fairness_weight}."
+            )
+        if self.remaining_time_budget_cap_s is not None and self.remaining_time_budget_cap_s <= 0:
+            raise ValueError(
+                f"remaining_time_budget_cap_s must be > 0 when set, "
+                f"got {self.remaining_time_budget_cap_s}."
             )
         if self.runway_assignment_mode not in {"static", "dynamic"}:
             raise ValueError(

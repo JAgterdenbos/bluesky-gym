@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from bluesky_gym.experiment.config import ExperimentConfig, SessionConfig
+from bluesky_gym.envs.pathplanning_goal_env import ALL_RUNWAYS
 
 from cps_coordination.coordination.cps_manager import CPSManager
 from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
@@ -191,6 +192,18 @@ def run_sweep(args: argparse.Namespace) -> None:
     )
     model = experiment.make_model(env)
 
+    # CPSManager.__init__ does `available_runways or []` -- passing the raw
+    # `args.runways` (None by default, since --runways is opt-in) silently
+    # produces an *empty* candidate list, which makes _assign_runways_dynamic
+    # no-op unconditionally (`not self.available_runways` short-circuits it)
+    # for every dynamic-mode combo that doesn't explicitly pass --runways.
+    # coordination_baseline.py's own _new_cps_manager already falls back to
+    # ALL_RUNWAYS; this script's standalone _new_manager needs the same
+    # fallback, resolved once here rather than inside _new_manager so every
+    # combo (and both cps_manager/solo_manager) gets the identical resolved
+    # list.
+    available_runways = list(args.runways or ALL_RUNWAYS)
+
     combos = list(itertools.product(args.k_cps_sweep, args.mode_sweep))
     print(
         f"\nCPS batch evaluation -> {args.save_path_root}"
@@ -207,9 +220,9 @@ def run_sweep(args: argparse.Namespace) -> None:
 
             save_path = os.path.join(args.save_path_root, f"k{k_cps}_{mode}")
             cps_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
-                                        args.delta_update, args.runways)
+                                        args.delta_update, available_runways)
             solo_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
-                                         args.delta_update, args.runways)
+                                         args.delta_update, available_runways)
             aircraft_collector, separation_collector = build_collectors(
                 save_path, chunk_size=args.chunk_size, fresh_start=not args.no_fresh_start,
             )

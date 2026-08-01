@@ -47,13 +47,23 @@ from typing import List, Optional, Tuple
 
 import bluesky as bs
 import numpy as np
+import pandas as pd
 
 from bluesky_gym.envs.pathplanning_goal_env import MAX_TIME
 from bluesky_gym.experiment.config import ExperimentConfig, SessionConfig
-from cps_coordination.coordination.cps_manager import CPSManager
+from cps_coordination.coordination.cps_manager import AircraftState, CPSManager
 from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
 from cps_coordination.experiments.config import CPSEnvConfig, CPSEnvKwargsConfig, CPSModelConfig
-from cps_coordination.experiments.coordination_baseline import CPSCoordinationExperiment
+from cps_coordination.experiments.coordination_baseline import (
+    CPSCoordinationExperiment,
+    _EpisodeRecord,
+)
+from cps_coordination.experiments.metrics import CPSMetricsReporter
+from cps_coordination.testing.cps_metrics_offline import (
+    load_recat_matrix,
+    recompute_metrics,
+    recompute_separation_compliance,
+)
 
 SEED = 7
 
@@ -644,15 +654,212 @@ def check_step9_surrogate_exercised() -> bool:
     return ok
 
 
+def check_step4b_k_cps_reorders() -> bool:
+    """Investigation Vector 2 (pre-Step-10 audit, §2.4): synthetic,
+    non-BlueSky regression guard for ``_apply_k_cps_constraint``'s redesign.
+
+    §2.1 proved the pre-fix heap-based selection rule is *always* a no-op
+    identity permutation on FCFS-sorted input -- the existing
+    ``check_step4_k_cps_separation`` gate can't distinguish "permutation
+    worked" from "permutation is a no-op" (it only checks a property the
+    greedy scheduler guarantees regardless of input order). This closes
+    that gap with three synthetic-fleet assertions:
+
+      1. ``k_cps == 0`` still degenerates to exact FCFS, regardless of
+         ``fairness_weight`` (the k-window itself is inactive).
+      2. ``fairness_weight == 0.0`` (any ``k_cps``) is byte-identical to
+         FCFS -- the proven-optimal no-op default (§2.1/§2.2).
+      3. ``fairness_weight > 0.0`` with one pre-flagged-stalled aircraft:
+         the stalled aircraft's scheduled position shifts *earlier* than
+         pure FCFS (protected from further imposed delay), and the shift
+         stays within the ``k_cps`` fairness bound.
+    """
+    recat_matrix = {"C": {"C": 90.0}}
+
+    def _fleet(etas: List[float]) -> List[AircraftState]:
+        return [
+            AircraftState(
+                acid=f"AC{i:03d}", state=np.zeros(5, dtype=np.float32),
+                runway_id="27", eta=eta,
+            )
+            for i, eta in enumerate(etas)
+        ]
+
+    ok = True
+    print("\n--- Step 4b: k-CPS reordering sensitivity (fairness_weight ablation) ---")
+
+    # (1) k_cps == 0 still degenerates to exact FCFS, regardless of fairness_weight.
+    mgr_k0 = CPSManager(k_cps=0, recat_matrix=recat_matrix, fairness_weight=0.5)
+    fcfs = sorted(_fleet([500.0, 105.0, 110.0, 100.0, 510.0]), key=lambda a: (a.eta, a.acid))
+    out_k0 = mgr_k0._apply_k_cps_constraint(fcfs, current_time=0.0)
+    if [a.acid for a in out_k0] != [a.acid for a in fcfs]:
+        print("FAIL: k_cps=0 did not degenerate to exact FCFS")
+        ok = False
+    else:
+        print("PASS: k_cps=0 degenerates to exact FCFS regardless of fairness_weight")
+
+    # (2) fairness_weight == 0.0 (k_cps=3) is byte-identical to FCFS.
+    mgr_w0 = CPSManager(k_cps=3, recat_matrix=recat_matrix, fairness_weight=0.0)
+    fcfs = sorted(_fleet([500.0, 105.0, 110.0, 100.0, 510.0]), key=lambda a: (a.eta, a.acid))
+    out_w0 = mgr_w0._apply_k_cps_constraint(fcfs, current_time=0.0)
+    if [a.acid for a in out_w0] != [a.acid for a in fcfs]:
+        print("FAIL: fairness_weight=0.0 did not reproduce byte-identical FCFS")
+        ok = False
+    else:
+        print("PASS: fairness_weight=0.0 reproduces byte-identical FCFS (k_cps=3)")
+
+    # (3) fairness_weight > 0.0 protects a pre-flagged-stalled aircraft:
+    # equal ETAs isolate the fairness term from ETA-driven imposed-delay
+    # differences (all candidates impose identical delay at a given
+    # position, so only the slack-penalty term can break the tie).
+    k = 2
+    mgr_f = CPSManager(k_cps=k, recat_matrix=recat_matrix, fairness_weight=1.0)
+    fleet = _fleet([100.0] * 5)
+    fcfs = sorted(fleet, key=lambda a: (a.eta, a.acid))
+    stalled_acid = fcfs[-1].acid  # last in FCFS order -- worst case under plain FCFS
+    mgr_f._stalled_acids.add(stalled_acid)
+    out_f = mgr_f._apply_k_cps_constraint(fcfs, current_time=0.0)
+
+    fcfs_pos = {a.acid: i for i, a in enumerate(fcfs)}
+    new_pos = {a.acid: i for i, a in enumerate(out_f)}
+    shift = fcfs_pos[stalled_acid] - new_pos[stalled_acid]
+    print(f"stalled acid {stalled_acid}: FCFS position {fcfs_pos[stalled_acid]} -> "
+          f"fairness-weighted position {new_pos[stalled_acid]} (shift={shift}, k_cps={k})")
+
+    if new_pos[stalled_acid] >= fcfs_pos[stalled_acid]:
+        print("FAIL: pre-flagged-stalled aircraft did not move earlier under "
+              "fairness_weight > 0 (expected priority protection from imposed delay)")
+        ok = False
+    elif shift > k:
+        print(f"FAIL: stalled aircraft's position shifted by {shift}, "
+              f"exceeding the k_cps={k} fairness bound")
+        ok = False
+    else:
+        print(f"PASS: stalled aircraft prioritised {shift} position(s) earlier, "
+              f"within the k_cps={k} bound")
+
+    return ok
+
+
+def check_step10_episode_scoped_c_sep() -> bool:
+    """Investigation Vector 3 (pre-Step-10 audit, §3.3): adversarial 2-episode
+    regression guard confirming C_sep is computed within-episode, never
+    pooled across independent episode simulation clocks.
+
+    Constructs 2 synthetic episodes on a single shared runway with matched
+    wake category (``AC000``/``AC001`` reused across both episodes, exactly
+    the acid-reuse pattern ``episode_id`` exists to disambiguate). Each
+    episode's own landing pair is comfortably separation-compliant (gap =
+    required_sep + 10s), but episode 0's second landing and episode 1's
+    first landing land a fraction of a second apart on a *pooled,
+    non-episode-scoped* timeline -- exactly the spurious cross-episode
+    adjacency the pre-fix bug (``landing_times_by_rwy`` keyed by
+    ``runway_id`` alone across ``all_records.extend(ep_records)``,
+    ``coordination_baseline.py`` pre-fix) would have manufactured as a fake
+    separation violation.
+
+    Confirms all three C_sep code paths agree exactly and none of them
+    counts the spurious pair:
+      (a) ``CPSMetricsReporter.compute_aggregate_metrics`` (in-process, ``metrics.py``)
+      (b) ``recompute_separation_compliance`` (Parquet per-pair stream --
+          already correctly episode-scoped via ``run_cps_eval.py::_log_episode``,
+          included here as the ground-truth anchor)
+      (c) ``recompute_metrics``'s ``c_sep_from_landings_crosscheck`` (offline,
+          now episode-scoped -- this is the leg the bug lived in)
+    """
+    recat_matrix = load_recat_matrix()
+    required_sep = recat_matrix.get("C", {}).get("C", 90.0)
+
+    # Episode 0: AC000 @ t=1000.0, AC001 @ t=1000.0+gap (compliant within ep0).
+    # Episode 1: AC000 @ t=1000.5, AC001 @ t=1000.5+gap (compliant within ep1).
+    # Pooled-by-runway-alone (pre-fix bug), sorting all 4 across episodes
+    # interleaves them -- adjacent gaps of ~0.5s between different episodes'
+    # aircraft, far below `required_sep`, would register as violations.
+    ep0_t0, ep1_t0 = 1000.0, 1000.5
+    gap = required_sep + 10.0
+
+    def _rec(acid: str, episode_id: int, t: float) -> _EpisodeRecord:
+        return _EpisodeRecord(
+            acid=acid, episode_id=episode_id, runway_id="27", wake_cat="C",
+            assigned_tta=t, actual_landing_time=t,
+            rta_error_cps=0.0, rta_error_solo=0.0,
+            tta_updated_mid_trajectory=False, success=True,
+        )
+
+    records = [
+        _rec("AC000", 0, ep0_t0),
+        _rec("AC001", 0, ep0_t0 + gap),
+        _rec("AC000", 1, ep1_t0),
+        _rec("AC001", 1, ep1_t0 + gap),
+    ]
+
+    ok = True
+    print("\n--- Step 10 pre-req: episode-scoped C_sep (adversarial 2-episode regression) ---")
+
+    experiment = _make_experiment(k_cps=0, runway_assignment_mode="static", runways=None)
+    reporter = experiment._make_metrics_reporter()
+    metrics_in_process = reporter.compute_aggregate_metrics(records, recat_matrix)
+    c_sep_in_process = metrics_in_process["c_sep"]
+
+    # (b) Parquet-level per-pair stream, built the way `_log_episode` already
+    # correctly builds it (per-episode grouping) -- ground-truth anchor.
+    separation_df = pd.DataFrame([
+        {"episode_id": 0, "runway_id": "27", "acid_lead": "AC000", "acid_trail": "AC001",
+         "gap_actual_s": gap, "required_sep_s": required_sep},
+        {"episode_id": 1, "runway_id": "27", "acid_lead": "AC000", "acid_trail": "AC001",
+         "gap_actual_s": gap, "required_sep_s": required_sep},
+    ])
+    c_sep_from_pairs = recompute_separation_compliance(separation_df)
+
+    aircraft_df = pd.DataFrame([
+        {
+            "episode_id": rec.episode_id, "acid": rec.acid, "runway_id": rec.runway_id,
+            "wake_cat": rec.wake_cat, "actual_landing_time": rec.actual_landing_time,
+            "rta_error_cps": rec.rta_error_cps, "rta_error_solo": rec.rta_error_solo,
+            "tta_updated_mid_trajectory": rec.tta_updated_mid_trajectory,
+            "stall_detected": rec.stall_detected, "success": rec.success,
+        }
+        for rec in records
+    ])
+    metrics_offline = recompute_metrics(aircraft_df, separation_df, recat_matrix)
+    c_sep_offline_crosscheck = metrics_offline["c_sep_from_landings_crosscheck"]
+
+    print(f"c_sep (in-process, CPSMetricsReporter)                   = {c_sep_in_process}")
+    print(f"c_sep_from_pairs (Parquet-level, already-correct)        = {c_sep_from_pairs}")
+    print(f"c_sep_from_landings_crosscheck (offline, episode-scoped) = {c_sep_offline_crosscheck}")
+
+    if c_sep_in_process != 1.0:
+        print(f"FAIL: in-process c_sep={c_sep_in_process} != 1.0 -- a spurious "
+              "cross-episode violation leaked in")
+        ok = False
+    if c_sep_from_pairs != 1.0:
+        print(f"FAIL: c_sep_from_pairs={c_sep_from_pairs} != 1.0")
+        ok = False
+    if c_sep_offline_crosscheck != 1.0:
+        print(f"FAIL: c_sep_from_landings_crosscheck={c_sep_offline_crosscheck} != 1.0 -- "
+              "still pooling landing times across independent episode clocks")
+        ok = False
+    if not (c_sep_in_process == c_sep_from_pairs == c_sep_offline_crosscheck):
+        print("FAIL: the three C_sep code paths disagree")
+        ok = False
+
+    if ok:
+        print("PASS: all three C_sep code paths agree exactly (1.0) and correctly "
+              "exclude the adversarial cross-episode landing pair")
+    return ok
+
+
 if __name__ == "__main__":
     passed_step3 = check_step3_fcfs_static()
     passed_step4 = check_step4_k_cps_separation()
+    passed_step4b = check_step4b_k_cps_reorders()
     passed_step5 = check_step5_dynamic_tta()
     passed_step6 = check_step6_dynamic_runway()
     passed_step7 = check_step7_two_pass_solo_baseline()
     passed_step9 = check_step9_surrogate_exercised()
+    passed_step10_c_sep = check_step10_episode_scoped_c_sep()
     raise SystemExit(
-        0 if (passed_step3 and passed_step4 and passed_step5 and passed_step6
-              and passed_step7 and passed_step9)
+        0 if (passed_step3 and passed_step4 and passed_step4b and passed_step5
+              and passed_step6 and passed_step7 and passed_step9 and passed_step10_c_sep)
         else 1
     )

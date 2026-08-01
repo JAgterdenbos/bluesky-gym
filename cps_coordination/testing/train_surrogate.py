@@ -19,7 +19,7 @@ Pipeline
 3.  Derive exact IAF anchors from PathPlanningGoalEnv constants (no estimation).
 4.  Engineer static geometric + lag features (using the selection's lag
     params unless overridden).
-5.  Build the full 14-column feature matrix; slice to the selected columns.
+5.  Build the full 15-column feature matrix; slice to the selected columns.
 6.  Optionally (``--report-cv``): GroupKFold CV on the final pipeline, purely
     for an informational OOF metrics printout — skipped by default.
 7.  Fit the final model on the full reduced dataset with the winning transform.

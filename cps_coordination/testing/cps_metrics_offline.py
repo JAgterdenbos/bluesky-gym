@@ -6,11 +6,15 @@ R_rec, rho_ripple) plus spatial tortuosity/entropy/KL divergence from logged
 Parquet telemetry (roadmap step 8), decoupled from collection time so metric
 definitions can be revised without re-running M episodes.
 
-Deliberately does *not* import ``cps_coordination.experiments.coordination_baseline``
-(which transitively imports bluesky/stable_baselines3/gymnasium) beyond the
-three pure aggregate-metric helper functions it reuses — this script only
-ever reads Parquet + a YAML config, so it should stay cheap to import and
-run standalone on a machine that only has pandas/pyarrow/scipy, no BlueSky.
+Reuses the three pure aggregate-metric helper functions from
+``cps_coordination.experiments.metrics`` (not ``coordination_baseline`` --
+the BlueSky-heavy experiment class -- see that module's own docstring for
+the Phase D.4 split rationale). Note ``cps_coordination/__init__.py``
+eagerly imports ``CPSCoordinationExperiment`` (and therefore bluesky) for
+any ``cps_coordination.*`` import regardless of submodule, so this script
+is not actually import-light in practice despite reaching into the leaner
+module -- a pre-existing package-structure gap, not something introduced
+by the Phase D.4 split.
 
 Usage
 -----
@@ -28,7 +32,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from cps_coordination.experiments.coordination_baseline import (
+from cps_coordination.experiments.metrics import (
     _compute_separation_compliance,
     _compute_throughput,
     _lag1_autocorrelation,
@@ -94,9 +98,14 @@ def recompute_metrics(
     aircraft_df: pd.DataFrame,
     separation_df: pd.DataFrame,
     recat_matrix: Dict[str, Dict[str, float]],
-    tolerance_s: float = 5.0,
+    sep_tolerance_s: float = 5.0,
+    rta_tolerance_s: float = 60.0,  # δ_t (Eq. recovery_rate) — matches
+                                    # coordination_baseline.RTA_TOLERANCE_SEC;
+                                    # hardcoded rather than imported to keep
+                                    # this script's lightweight import chain
+                                    # (see module docstring).
 ) -> Dict[str, Any]:
-    """Mirror of ``CPSCoordinationExperiment._compute_aggregate_metrics``,
+    """Mirror of ``CPSMetricsReporter.compute_aggregate_metrics``,
     reading from logged Parquet DataFrames instead of in-memory
     ``_EpisodeRecord`` objects."""
     if aircraft_df.empty:
@@ -106,9 +115,22 @@ def recompute_metrics(
     success_rate = float(aircraft_df["success"].mean())
 
     successful = aircraft_df[aircraft_df["success"]]
+    # Pooled by runway_id alone: correct for throughput (a landing count over
+    # the total observed time span), but NOT valid for separation-compliance
+    # pairwise gaps -- see landing_times_by_rwy_episode below.
     landing_times_by_rwy: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
+    # Separation compliance must never compare landing times across
+    # different episodes' independent simulation clocks -- each episode
+    # restarts its clock near zero at env.reset(), so "consecutive landing
+    # pair" is only meaningful within a single (runway, episode).
+    landing_times_by_rwy_episode: Dict[Tuple[str, int], List[Tuple[float, str]]] = (
+        defaultdict(list)
+    )
     for _, row in successful.iterrows():
         landing_times_by_rwy[row["runway_id"]].append(
+            (float(row["actual_landing_time"]), row["acid"])
+        )
+        landing_times_by_rwy_episode[(row["runway_id"], row["episode_id"])].append(
             (float(row["actual_landing_time"]), row["acid"])
         )
 
@@ -117,12 +139,12 @@ def recompute_metrics(
     gamma, gamma_r = _compute_throughput(landing_times_by_rwy, window_h)
 
     wake_cats = dict(zip(aircraft_df["acid"], aircraft_df["wake_cat"]))
-    c_sep_from_pairs = recompute_separation_compliance(separation_df, tolerance_s)
+    c_sep_from_pairs = recompute_separation_compliance(separation_df, sep_tolerance_s)
     # Cross-check against the from-scratch derivation used at collection
-    # time (same landing-time-sorted-pairs logic) — should agree exactly
-    # since both come from the same underlying landings.
+    # time (same landing-time-sorted-pairs logic, episode-scoped) — should
+    # agree exactly since both come from the same underlying landings.
     c_sep_from_landings = _compute_separation_compliance(
-        landing_times_by_rwy, wake_cats, recat_matrix, tolerance_s=tolerance_s,  # type: ignore[arg-type]
+        landing_times_by_rwy_episode, wake_cats, recat_matrix, tolerance_s=sep_tolerance_s,
     )
 
     delta_eps_values = (
@@ -130,11 +152,36 @@ def recompute_metrics(
     ).dropna()
     delta_epsilon = float(delta_eps_values.mean()) if len(delta_eps_values) else float("nan")
 
-    rta_violations = aircraft_df[aircraft_df["rta_error_cps"].abs() > tolerance_s]
-    r_rec = float(rta_violations["recovered"].mean()) if len(rta_violations) else float("nan")
+    # --- R_rec (Eq. recovery_rate): M_update = mid-trajectory-updated
+    # aircraft; recovered = landed within rta_tolerance_s of that TTA.
+    updated = aircraft_df[aircraft_df["tta_updated_mid_trajectory"]]
+    r_rec = (
+        float((updated["rta_error_cps"].abs() <= rta_tolerance_s).mean())
+        if len(updated) else float("nan")
+    )
 
     sorted_success = successful.sort_values("actual_landing_time")
     rho_ripple = _lag1_autocorrelation(list(sorted_success["rta_error_cps"]))
+
+    # --- Stall metrics (pre-Step-10 audit §1.3) -- mirrors
+    # CPSMetricsReporter.compute_aggregate_metrics's split.
+    # `stall_rate` (bare plateau-detection rate) is kept only as a
+    # diagnostic/before-after comparison value, NOT the headline risk
+    # metric -- see `stall_unrecovered`/`stall_recovery_rate` below.
+    if "stall_detected" in aircraft_df:
+        stall_detected_col = aircraft_df["stall_detected"]
+        success_col = aircraft_df["success"]
+        n_stall_detected = int(stall_detected_col.sum())
+        n_stall_recovered = int((stall_detected_col & success_col).sum())
+        n_stall_unrecovered = int((stall_detected_col & ~success_col).sum())
+        stall_rate = n_stall_detected / n_aircraft
+        stall_recovered = n_stall_recovered / n_aircraft
+        stall_unrecovered = n_stall_unrecovered / n_aircraft
+        stall_recovery_rate = (
+            n_stall_recovered / n_stall_detected if n_stall_detected > 0 else float("nan")
+        )
+    else:
+        stall_rate = stall_recovered = stall_unrecovered = stall_recovery_rate = float("nan")
 
     return {
         "n_episodes": int(aircraft_df["episode_id"].nunique()),
@@ -149,6 +196,10 @@ def recompute_metrics(
         "delta_epsilon": round(delta_epsilon, 4) if not np.isnan(delta_epsilon) else "nan",
         "r_rec": round(r_rec, 4) if not np.isnan(r_rec) else "nan",
         "rho_ripple": round(rho_ripple, 4) if not np.isnan(rho_ripple) else "nan",
+        "stall_unrecovered": round(stall_unrecovered, 4) if not np.isnan(stall_unrecovered) else "nan",
+        "stall_recovery_rate": round(stall_recovery_rate, 4) if not np.isnan(stall_recovery_rate) else "nan",
+        "stall_recovered": round(stall_recovered, 4) if not np.isnan(stall_recovered) else "nan",
+        "stall_rate": round(stall_rate, 4) if not np.isnan(stall_rate) else "nan",  # diagnostic only
     }
 
 
@@ -196,7 +247,9 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--save-path", type=str, required=True,
                    help="Directory containing cps_eval_aircraft.parquet / cps_eval_separation.parquet.")
-    p.add_argument("--tolerance-s", type=float, default=5.0, help="C_sep/R_rec tolerance (seconds).")
+    p.add_argument("--sep-tolerance-s", type=float, default=5.0, help="C_sep tolerance (seconds).")
+    p.add_argument("--rta-tolerance-s", type=float, default=60.0,
+                   help="R_rec tolerance (seconds) — Eq. recovery_rate's delta_t.")
     p.add_argument("--bins", type=int, default=200, help="2D histogram bins for the spatial heatmap.")
     p.add_argument("--recat-config", type=str, default=_DEFAULT_RECAT_CONFIG,
                    help="Path to cps_base.yaml (for the recat_eu matrix).")
@@ -209,7 +262,10 @@ def main() -> None:
     aircraft_df, separation_df = load_telemetry(args.save_path)
     recat_matrix = load_recat_matrix(args.recat_config)
 
-    metrics = recompute_metrics(aircraft_df, separation_df, recat_matrix, tolerance_s=args.tolerance_s)
+    metrics = recompute_metrics(
+        aircraft_df, separation_df, recat_matrix,
+        sep_tolerance_s=args.sep_tolerance_s, rta_tolerance_s=args.rta_tolerance_s,
+    )
     spatial = recompute_spatial_metrics(aircraft_df, bins=args.bins)
     combined = {**metrics, **spatial}
 

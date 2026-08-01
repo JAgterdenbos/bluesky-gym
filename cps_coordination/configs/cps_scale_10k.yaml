@@ -96,6 +96,7 @@ cps_eval:
                                    # entering the sector over a 30-minute window
                                    # rather than all at once.
   separation_tolerance_s: 5.0     # Slack (s) within which C_sep compliance is credited
+  rta_tolerance_s: 60.0           # delta_t (Eq. recovery_rate): R_rec's RTA tolerance
   ripple_lag: 1                   # Lag for rho_ripple autocorrelation (always 1 per methodology)
   throughput_window_h: 1.0        # Time window (hours) for Gamma / Gamma_r calculation
 

@@ -54,6 +54,16 @@ _DEFAULT_OUTPUT = Path("cps_coordination/models/surrogate_feature_selection.yaml
 # Feature reduction
 # ---------------------------------------------------------------------------
 
+# Feature groups whose members are only meaningful together and must be
+# kept/dropped as a unit, by summed importance -- keeping only one half of a
+# periodic sin/cos encoding silently reintroduces the discontinuity
+# decompose_heading exists to avoid (e.g. sin alone can't distinguish
+# heading 10 deg from 170 deg).
+_GROUPED_FEATURES: List[List[str]] = [
+    ["sin_psi", "cos_psi"],
+]
+
+
 def reduce_features(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -63,9 +73,10 @@ def reduce_features(
 ) -> Tuple[List[int], List[str]]:
     """Drop features below an importance threshold using a scout ET fit.
 
-    Lag features (``delta_atd``/``cumabs_cte``/``heading_volatility``) share
-    a semantic group and are kept or dropped together, by their summed
-    importance.
+    Lag features (``delta_atd``/``cumabs_cte``/``heading_volatility``) and
+    the ``sin_psi``/``cos_psi`` periodic heading pair (see
+    ``_GROUPED_FEATURES``) each share a semantic group and are kept or
+    dropped together, by their summed importance.
     """
     scout = ExtraTreesRegressor(**et_params).fit(X_train, y_train)
     importances = scout.feature_importances_
@@ -76,6 +87,13 @@ def reduce_features(
         keep_lag = importances[lag_idx].sum() >= threshold
         for i in lag_idx:
             mask[i] = keep_lag
+
+    for group in _GROUPED_FEATURES:
+        idx = [feature_names.index(name) for name in group if name in feature_names]
+        if len(idx) > 1:
+            keep_group = importances[idx].sum() >= threshold
+            for i in idx:
+                mask[i] = keep_group
 
     col_indices = [i for i, keep in enumerate(mask) if keep]
     kept_names = [feature_names[i] for i in col_indices]

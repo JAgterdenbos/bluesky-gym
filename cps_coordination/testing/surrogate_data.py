@@ -34,6 +34,7 @@ from bluesky_gym.envs.pathplanning_goal_env import (
     NM2KM,
     RUNWAYS_SCHIPHOL_FAF,
     SCHIPHOL,
+    SPEED,
 )
 from cps_coordination.coordination.eta_surrogate import (
     ALL_FEATURE_NAMES,
@@ -148,7 +149,7 @@ def engineer_geometric_features(
     """Attach IAF-relative geometric features, fully vectorised.
 
     New columns: ``r_sq``, ``along_track_dist``, ``cross_track_error``,
-    ``heading_error``.
+    ``heading_error``, ``naive_eta_remaining``.
     """
     df = df.copy()
     df["r_sq"] = df["x"] ** 2 + df["y"] ** 2
@@ -175,6 +176,10 @@ def engineer_geometric_features(
     df["heading_error"] = (df["heading"].to_numpy(dtype=float) - ah + np.pi) % (
         2.0 * np.pi
     ) - np.pi
+    # Physical lower bound on remaining flight time (seconds) -- same
+    # straight-line-at-cruise-speed formula as eta_surrogate.py's inference-time
+    # computation and coordination_baseline._estimate_naive_eta.
+    df["naive_eta_remaining"] = np.hypot(dx, dy) * MAX_DISTANCE * 1000.0 / SPEED
 
     return df
 
@@ -238,7 +243,7 @@ def build_feature_matrix(
     runway_encoder: LabelEncoder,
     target: Literal["steps", "seconds"] = "steps",
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Assemble the full 14-column feature matrix in canonical order.
+    """Assemble the full 15-column feature matrix in canonical order.
 
     Uses ``cartesian_to_polar``/``decompose_heading`` from ``eta_surrogate``
     to guarantee training/inference consistency. Heading values from parquet
@@ -248,11 +253,11 @@ def build_feature_matrix(
     ``target`` selects ``y``: ``"steps"`` (default, current behavior) uses
     ``steps_to_go``; ``"seconds"`` uses the continuous ``time_to_go``.
 
-    Returns ``(X, y, feature_names)`` — ``X`` shape ``(n, 14)``, the 14th
-    column being ``remaining_time_budget`` (requires
-    ``engineer_target_time_feature`` to have run on ``df``), and
-    ``feature_names`` is ``ALL_FEATURE_NAMES`` (which already includes
-    ``"remaining_time_budget"`` as its 14th entry).
+    Returns ``(X, y, feature_names)`` — ``X`` shape ``(n, 15)``, columns 14
+    and 15 being ``remaining_time_budget`` (requires
+    ``engineer_target_time_feature`` to have run on ``df``) and
+    ``naive_eta_remaining`` (requires ``engineer_geometric_features``), and
+    ``feature_names`` is ``ALL_FEATURE_NAMES``.
     """
     x_arr = df["x"].to_numpy(dtype=float)
     y_arr = df["y"].to_numpy(dtype=float)
@@ -272,13 +277,14 @@ def build_feature_matrix(
     c_cte = df["cumabs_cte"].to_numpy(dtype=float)
     h_vol = df["heading_volatility"].to_numpy(dtype=float)
     rem_budget = df["remaining_time_budget"].to_numpy(dtype=float)
+    naive_remaining = df["naive_eta_remaining"].to_numpy(dtype=float)
 
     X = np.column_stack([
         r_arr, theta_arr, rwy_codes, elapsed,
         sin_psi, cos_psi, r_sq,
         atd, cte, h_err,
         d_atd, c_cte, h_vol,
-        rem_budget,
+        rem_budget, naive_remaining,
     ])
     y = (
         df["steps_to_go"].to_numpy(dtype=float)

@@ -23,7 +23,7 @@ Transform functions
 Module-level named functions (not lambdas) for forward/inverse transforms
 so they survive joblib serialisation.
 
-Canonical feature set (14 columns, in order)
+Canonical feature set (15 columns, in order)
 --------------------------------------------
  0  r                   √(x²+y²), from the raw Schiphol-centred (x, y) —
                         NOT IAF-relative (see ``cartesian_to_polar``)
@@ -44,6 +44,21 @@ Canonical feature set (14 columns, in order)
 12  heading_volatility  rolling(|Δheading|, window).mean()
 13  remaining_time_budget  goal-conditioned active temporal target minus
                         elapsed time (mirrors ``rta - t`` in training data)
+14  naive_eta_remaining physical lower bound on remaining flight time:
+                        ‖(dx,dy)‖·MAX_DISTANCE·1000/SPEED (seconds) — the
+                        same straight-line-at-cruise-speed estimate
+                        CPSManager falls back to when no surrogate is
+                        wired in (see coordination_baseline._estimate_naive_eta).
+                        Added because the surrogate was found to sometimes
+                        predict *below* this physical floor (confirmed via
+                        direct comparison against true geographic distance);
+                        giving the model the floor as an input lets it learn
+                        to respect it rather than relying on post-hoc
+                        clamping (which a controlled experiment showed does
+                        NOT fix the resulting CPS-scheduling failures, since
+                        the floor alone doesn't correct the model's own
+                        learned relationship between position and remaining
+                        time — see the Phase III plan's stall-detection entry).
 
 At inference the state vector is always ``[x, y, elapsed_steps, heading_deg_bearing]``
 (4-dimensional); lag features and ``target_time_budget`` are passed as
@@ -59,6 +74,8 @@ import joblib
 import numpy as np
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.preprocessing import LabelEncoder
+
+from bluesky_gym.envs.pathplanning_goal_env import MAX_DISTANCE, SPEED
 
 
 # ---------------------------------------------------------------------------
@@ -154,16 +171,17 @@ TRANSFORMS: Dict[str, Tuple[Callable, Callable]] = {
     "sqrt":     (_fwd_sqrt,     _inv_sqrt),
 }
 
-# Ordered feature names for the full 14-column set.
+# Ordered feature names for the full 15-column set.
 ALL_FEATURE_NAMES: List[str] = [
     "r", "theta", "rwy_code", "elapsed_steps",
     "sin_psi", "cos_psi", "r_sq",
     "along_track_dist", "cross_track_error", "heading_error",
     "delta_atd", "cumabs_cte", "heading_volatility",
     "remaining_time_budget",
+    "naive_eta_remaining",
 ]
 
-_N_FEATURES_FULL = len(ALL_FEATURE_NAMES)  # 14
+_N_FEATURES_FULL = len(ALL_FEATURE_NAMES)  # 15
 _N_LAG = 3                                  # lag columns (indices 10–12)
 _LAG_COL_START = 10
 _TARGET_TIME_BUDGET_COL = 13
@@ -395,7 +413,7 @@ class ETASurrogate:
     ) -> np.ndarray:
         """Assemble the ``(n, n_selected)`` feature matrix from raw inputs.
 
-        Always assembles the full 14-column vector first, then selects
+        Always assembles the full 15-column vector first, then selects
         ``_feature_col_indices`` to match what the model was trained on.
 
         Parameters
@@ -452,14 +470,17 @@ class ETASurrogate:
         else:
             rem_budget = np.asarray(target_time_budget, dtype=float)
 
-        # --- Full 14-column matrix in canonical order ---
+        # --- Naive straight-line ETA floor (seconds) ---
+        naive_remaining_s = np.hypot(dx, dy) * MAX_DISTANCE * 1000.0 / SPEED
+
+        # --- Full 15-column matrix in canonical order ---
         X_full = np.column_stack([
             r_arr, theta_arr, rwy_codes, elapsed_arr,
             sin_psi, cos_psi, r_sq,
             atd, cte, h_err,
             lag[:, 0], lag[:, 1], lag[:, 2],
-            rem_budget,
-        ])  # (n, 14)
+            rem_budget, naive_remaining_s,
+        ])  # (n, 15)
 
         return X_full[:, self._feature_col_indices]
 
