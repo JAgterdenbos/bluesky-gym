@@ -464,14 +464,26 @@ def check_step6_dynamic_runway() -> bool:
     return ok
 
 
-def check_step7_two_pass_solo_baseline() -> bool:
-    """Roadmap step 7: genuine two-pass solo baseline, N=5 aircraft x M=10
-    episodes.  For each episode, run the CPS-coordinated pass and a matched-
-    seed solo pass (unconstrained ETA injected instead of the k-CPS-scheduled
-    TTA) through the *same* env, join by ``arrival_index``, and confirm
-    ``rta_error_solo`` is no longer a silent copy of ``rta_error_cps`` (the
-    bug this step fixes: before the fix, ``rta_error_solo`` always fell back
-    to ``rta_error_cps`` itself, so Delta epsilon was structurally ~0).
+def check_step7_three_pass_baseline() -> bool:
+    """Roadmap step 7 + the static-TTA addition: genuine three-pass baseline,
+    N=5 aircraft x M=10 episodes. For each episode, run the CPS-coordinated
+    pass, a matched-seed static pass (same greedy-scheduled TTA, assigned
+    once and frozen — the literal Eq. tracking_degradation comparator), and
+    a matched-seed solo pass (unconstrained ETA injected instead) through
+    the *same* env, join by ``arrival_index``, and confirm:
+
+    (a) ``rta_error_solo`` is no longer a silent copy of ``rta_error_cps``
+        (the original step-7 bug: before the fix, ``rta_error_solo`` always
+        fell back to ``rta_error_cps`` itself, so Delta epsilon was
+        structurally ~0).
+    (b) ``rta_error_static`` is populated and genuinely differs from both
+        ``rta_error_cps`` and ``rta_error_solo`` in at least some records —
+        it is neither an unpopulated NaN column nor a duplicate of an
+        existing pass.
+    (c) The "frozen after first assignment" invariant: in the static pass,
+        ``env.set_tta`` is called at most once per acid across the whole
+        episode, even though the CPS pass (same scenario, same seed)
+        receives multiple calls per acid under ongoing replanning.
     """
     n_aircraft = 5
     n_episodes = 10
@@ -494,60 +506,140 @@ def check_step7_two_pass_solo_baseline() -> bool:
         )
 
     cps_manager = _new_manager()
+    static_manager = _new_manager()
     solo_manager = _new_manager()
+
+    # Wrap env.set_tta to count calls per (tta_mode, episode, acid) without
+    # touching _run_episode itself -- the most direct way to verify the
+    # static pass's "frozen after first assignment" invariant at the actual
+    # injection boundary, rather than inferring it indirectly from output
+    # records. Keyed by episode too, not just acid: per-slot acids (e.g.
+    # "AC000") repeat every episode, so counting by bare acid across all
+    # M=10 episodes would accumulate ~1 call/episode into a spurious ">1"
+    # even when each individual episode is correctly frozen.
+    set_tta_calls: dict = {"cps": {}, "static": {}, "solo": {}}
+    _real_set_tta = env.set_tta
+    _current_mode = {"mode": "cps", "ep_idx": 0}
+
+    def _counting_set_tta(slot, tta):
+        acid = env.acid_slots[slot] or f"slot{slot}"
+        key = (_current_mode["ep_idx"], acid)
+        counts = set_tta_calls[_current_mode["mode"]]
+        counts[key] = counts.get(key, 0) + 1
+        return _real_set_tta(slot, tta)
+
+    env.set_tta = _counting_set_tta
 
     all_records = []
     for ep_idx in range(n_episodes):
-        ep_seed = SEED + ep_idx  # matched between the two passes, varied across episodes
+        ep_seed = SEED + ep_idx  # matched across all three passes, varied across episodes
+        _current_mode["ep_idx"] = ep_idx
 
+        _current_mode["mode"] = "cps"
         cps_records = experiment._run_episode(
             env=env, model=model, cps_manager=cps_manager, surrogate=None,
             deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="cps",
         )
         cps_manager.reset()
 
+        _current_mode["mode"] = "static"
+        static_records = experiment._run_episode(
+            env=env, model=model, cps_manager=static_manager, surrogate=None,
+            deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="static",
+        )
+        static_manager.reset()
+
+        _current_mode["mode"] = "solo"
         solo_records = experiment._run_episode(
             env=env, model=model, cps_manager=solo_manager, surrogate=None,
             deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="solo",
         )
         solo_manager.reset()
 
-        all_records.extend(experiment._join_two_pass(cps_records, solo_records))
+        all_records.extend(
+            experiment._join_three_pass(cps_records, static_records, solo_records)
+        )
+    env.set_tta = _real_set_tta
     env.close()
 
     ok = True
-    print("\n--- Step 7: genuine two-pass solo baseline (N=5 x M=10) ---")
+    print("\n--- Step 7: genuine three-pass baseline (N=5 x M=10) ---")
     if not all_records:
         print("FAIL: no joined records produced across all episodes")
         return False
 
-    valid = [r for r in all_records if not math.isnan(r.rta_error_solo)]
-    if len(valid) != len(all_records):
-        print(f"FAIL: {len(all_records) - len(valid)}/{len(all_records)} records have "
+    valid_solo = [r for r in all_records if not math.isnan(r.rta_error_solo)]
+    valid_static = [r for r in all_records if not math.isnan(r.rta_error_static)]
+    if len(valid_solo) != len(all_records):
+        print(f"FAIL: {len(all_records) - len(valid_solo)}/{len(all_records)} records have "
               "no matched solo-pass record (arrival_index join failed)")
         ok = False
+    if len(valid_static) != len(all_records):
+        print(f"FAIL: {len(all_records) - len(valid_static)}/{len(all_records)} records have "
+              "no matched static-pass record (arrival_index join failed)")
+        ok = False
 
-    n_differ = sum(
-        1 for r in valid if abs(r.rta_error_cps - r.rta_error_solo) > 1e-6
+    n_differ_solo = sum(
+        1 for r in valid_solo if abs(r.rta_error_cps - r.rta_error_solo) > 1e-6
     )
-    delta_eps = [abs(r.rta_error_cps) - abs(r.rta_error_solo) for r in valid]
-    mean_delta_eps = sum(delta_eps) / len(delta_eps) if delta_eps else float("nan")
+    n_differ_static = sum(
+        1 for r in valid_static if abs(r.rta_error_cps - r.rta_error_static) > 1e-6
+    )
+    n_static_vs_solo_differ = sum(
+        1 for r in all_records
+        if not math.isnan(r.rta_error_static) and not math.isnan(r.rta_error_solo)
+        and abs(r.rta_error_static - r.rta_error_solo) > 1e-6
+    )
+    delta_eps_static = [abs(r.rta_error_cps) - abs(r.rta_error_static) for r in valid_static]
+    delta_eps_solo = [abs(r.rta_error_cps) - abs(r.rta_error_solo) for r in valid_solo]
+    mean_delta_static = sum(delta_eps_static) / len(delta_eps_static) if delta_eps_static else float("nan")
+    mean_delta_solo = sum(delta_eps_solo) / len(delta_eps_solo) if delta_eps_solo else float("nan")
 
-    print(f"{'acid':<10}{'rta_error_cps':>16}{'rta_error_solo':>16}{'differs':>10}")
+    print(f"{'acid':<10}{'rta_error_cps':>16}{'rta_error_static':>18}{'rta_error_solo':>16}")
     for r in all_records:
-        differs = "yes" if (not math.isnan(r.rta_error_solo)
-                             and abs(r.rta_error_cps - r.rta_error_solo) > 1e-6) else "no"
-        print(f"{r.acid:<10}{r.rta_error_cps:>16.2f}{r.rta_error_solo:>16.2f}{differs:>10}")
+        print(f"{r.acid:<10}{r.rta_error_cps:>16.2f}{r.rta_error_static:>18.2f}{r.rta_error_solo:>16.2f}")
 
-    print(f"\n{n_differ}/{len(valid)} records have rta_error_solo != rta_error_cps "
-          f"(mean Delta epsilon = {mean_delta_eps:.2f}s)")
+    print(f"\n{n_differ_solo}/{len(valid_solo)} records have rta_error_solo != rta_error_cps "
+          f"(mean Delta_eps_vs_uncoordinated = {mean_delta_solo:.2f}s)")
+    print(f"{n_differ_static}/{len(valid_static)} records have rta_error_static != rta_error_cps "
+          f"(mean Delta_eps_vs_static = {mean_delta_static:.2f}s)")
+    print(f"{n_static_vs_solo_differ}/{len(all_records)} records have rta_error_static != rta_error_solo "
+          "(confirms the two baselines are genuinely distinct passes)")
 
-    if n_differ == 0:
+    if n_differ_solo == 0:
         print("FAIL: rta_error_solo never differs from rta_error_cps — "
               "still looks like the silent-fallback bug")
         ok = False
-    else:
-        print("PASS: rta_error_solo is genuinely computed independently of rta_error_cps")
+    if n_differ_static == 0:
+        print("FAIL: rta_error_static never differs from rta_error_cps — "
+              "static pass isn't genuinely independent of the CPS pass")
+        ok = False
+    if n_static_vs_solo_differ == 0:
+        print("FAIL: rta_error_static never differs from rta_error_solo — "
+              "the two baseline passes look like duplicates of each other")
+        ok = False
+
+    # (c) Frozen-after-first-assignment invariant, checked at the actual
+    # env.set_tta injection boundary (not inferred from output records).
+    static_counts = set_tta_calls["static"]
+    cps_counts = set_tta_calls["cps"]
+    max_static_calls = max(static_counts.values(), default=0)
+    n_acids_with_multiple_cps_calls = sum(1 for c in cps_counts.values() if c > 1)
+    print(f"\nmax set_tta calls per acid: static={max_static_calls}, "
+          f"cps acids with >1 call={n_acids_with_multiple_cps_calls}/{len(cps_counts)}")
+    if max_static_calls > 1:
+        print("FAIL: static pass called env.set_tta more than once for some acid — "
+              "not actually frozen after the first assignment")
+        ok = False
+    if n_acids_with_multiple_cps_calls == 0:
+        print("FAIL: cps pass never re-injected a TTA update for any acid in this scenario — "
+              "the frozen-vs-replanned contrast isn't actually being exercised")
+        ok = False
+
+    if ok:
+        print("PASS: rta_error_static/rta_error_solo are genuinely independent of "
+              "rta_error_cps and of each other, and the static pass is provably "
+              "frozen after each acid's first TTA assignment")
 
     return ok
 
@@ -855,7 +947,7 @@ if __name__ == "__main__":
     passed_step4b = check_step4b_k_cps_reorders()
     passed_step5 = check_step5_dynamic_tta()
     passed_step6 = check_step6_dynamic_runway()
-    passed_step7 = check_step7_two_pass_solo_baseline()
+    passed_step7 = check_step7_three_pass_baseline()
     passed_step9 = check_step9_surrogate_exercised()
     passed_step10_c_sep = check_step10_episode_scoped_c_sep()
     raise SystemExit(

@@ -37,9 +37,11 @@ AIRCRAFT_COLUMNS: List[str] = [
     "wake_cat",
     "k_cps",
     "runway_assignment_mode",
+    "fairness_weight",
     "assigned_tta",
     "actual_landing_time",
     "rta_error_cps",
+    "rta_error_static",
     "rta_error_solo",
     "tta_updated_mid_trajectory",
     "stall_detected",
@@ -73,9 +75,11 @@ class AircraftTelemetryRow:
     wake_cat: str
     k_cps: int
     runway_assignment_mode: str
+    fairness_weight: float
     assigned_tta: float
     actual_landing_time: float
     rta_error_cps: float
+    rta_error_static: float
     rta_error_solo: float
     tta_updated_mid_trajectory: bool
     stall_detected: bool

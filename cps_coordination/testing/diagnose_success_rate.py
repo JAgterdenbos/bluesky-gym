@@ -180,8 +180,10 @@ def _run_episode_verbose(
 ) -> List[_EpisodeRecord]:
     """Diagnostic-only copy of CPSCoordinationExperiment._run_episode's core
     loop with per-decision-step trace printing. Does not modify production
-    code; mirrors coordination_baseline.py:654-744 exactly, minus two-pass/
-    trajectory bookkeeping this script doesn't need.
+    code; mirrors coordination_baseline.py:654-744 exactly, minus multi-pass/
+    trajectory bookkeeping this script doesn't need. Only ever called with
+    tta_mode="cps"/"solo" (never "static") -- doesn't need the static-pass
+    "frozen after first assignment" branch the real _run_episode has.
     """
     obs, info_list = env.reset(seed=seed)
     sim_time = 0.0

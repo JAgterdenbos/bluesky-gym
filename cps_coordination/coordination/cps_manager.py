@@ -63,7 +63,20 @@ class AircraftState:
     Attributes
     ----------
     acid : str
-        Aircraft callsign / unique identifier.
+        Aircraft callsign / unique identifier. NOTE: under a rolling-
+        arrival-stream env config, this string is reused across different
+        physical aircraft that occupy the same slot at different times in
+        an episode -- see ``spawn_time`` below.
+    spawn_time : float
+        Absolute (episode-clock) instant this physical aircraft spawned
+        into its slot. Unlike ``acid`` (slot-derived, reused per-slot),
+        this is unique per physical occupancy, so :meth:`CPSManager.
+        update_fleet` diffs on ``(acid, spawn_time)`` rather than ``acid``
+        alone to detect a same-step slot refill (a fresh aircraft spawning
+        into a slot the same env.step() call that its predecessor
+        departed it) -- a plain acid set-diff would silently miss that
+        case and leak the departed aircraft's bookkeeping into the new
+        occupant.
     state : np.ndarray
         Current observation feature vector fed to the ETASurrogate.
         Expected layout: ``[x, y, elapsed_steps, heading_deg_bearing,
@@ -96,6 +109,7 @@ class AircraftState:
     tta: float = math.inf
     fcfs_rank: int = 0
     wake_cat: str = "C"
+    spawn_time: float = 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -320,10 +334,23 @@ class CPSManager:
         List[str]
             Callsigns whose TTA changed by more than ``delta_update`` seconds.
         """
-        old_acids = {ac.acid for ac in self._fleet}
+        # Diff on (acid, spawn_time), not acid alone: under a rolling-
+        # arrival-stream config, MultiAgentPathPlanningGoalEnv refills a
+        # freed slot within the same env.step() call that terminated its
+        # previous occupant, so the acid string is never actually absent
+        # between two consecutive update_fleet() calls -- a plain acid
+        # set-diff would silently miss the swap and leak the departed
+        # aircraft's stall-tracking state into the new occupant (see
+        # AircraftState.spawn_time's docstring). spawn_time strictly
+        # increases across a same-step swap, so it disambiguates them.
+        old_spawn_time = {ac.acid: ac.spawn_time for ac in self._fleet}
         self._fleet = aircraft
         self._fleet_index = {ac.acid: i for i, ac in enumerate(aircraft)}
-        new_acids = {ac.acid for ac in aircraft}
+        new_spawn_time = {ac.acid: ac.spawn_time for ac in aircraft}
+        stale_acids = {
+            acid for acid, spawn_time in old_spawn_time.items()
+            if new_spawn_time.get(acid) != spawn_time
+        }
 
         # Re-pin already-stalled aircraft to their frozen eta/runway. This
         # has to happen here, not just via the "don't overwrite" skips in
@@ -344,7 +371,7 @@ class CPSManager:
 
         # Update trajectory buffer
         if self._trajectory_buffer is not None:
-            for acid in old_acids - new_acids:
+            for acid in stale_acids:
                 self._trajectory_buffer.evict(acid)
             for ac in self._fleet:
                 # state[3] is heading_deg_bearing → convert to radians for buffer
@@ -355,7 +382,7 @@ class CPSManager:
                     float(np.deg2rad(ac.state[3])),
                 )
 
-        for acid in old_acids - new_acids:
+        for acid in stale_acids:
             self._best_distance_km.pop(acid, None)
             self._best_distance_time.pop(acid, None)
             self._stalled_acids.discard(acid)

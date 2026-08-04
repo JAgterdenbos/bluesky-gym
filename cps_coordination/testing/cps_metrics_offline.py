@@ -1,10 +1,11 @@
 """
 cps_coordination/testing/cps_metrics_offline.py
 --------------------------------------------------
-Recompute CPS coordination metrics (Gamma, Gamma_r, C_sep, Delta epsilon,
-R_rec, rho_ripple) plus spatial tortuosity/entropy/KL divergence from logged
-Parquet telemetry (roadmap step 8), decoupled from collection time so metric
-definitions can be revised without re-running M episodes.
+Recompute CPS coordination metrics (Gamma, Gamma_r, C_sep, Delta epsilon vs.
+static/uncoordinated, R_rec, rho_ripple) plus spatial tortuosity/entropy/KL
+divergence from logged Parquet telemetry (roadmap step 8), decoupled from
+collection time so metric definitions can be revised without re-running M
+episodes.
 
 Reuses the three pure aggregate-metric helper functions from
 ``cps_coordination.experiments.metrics`` (not ``coordination_baseline`` --
@@ -147,10 +148,28 @@ def recompute_metrics(
         landing_times_by_rwy_episode, wake_cats, recat_matrix, tolerance_s=sep_tolerance_s,
     )
 
-    delta_eps_values = (
+    # Two distinct Δε comparisons -- see metrics.py::compute_aggregate_metrics
+    # for the full rationale. `vs_static` is the literal Eq. tracking_degradation
+    # (RQ2.2); `vs_uncoordinated` is a secondary, honestly-labelled reference
+    # against an uncoordinated run under the same frozen Worker, NOT Groot et
+    # al.'s published data. `rta_error_static` is only present in telemetry
+    # collected after the static-TTA addition -- older Parquet files (e.g.
+    # a sweep collected pre-addition) simply have no `vs_static` metric.
+    if "rta_error_static" in aircraft_df:
+        delta_eps_static_values = (
+            aircraft_df["rta_error_cps"].abs() - aircraft_df["rta_error_static"].abs()
+        ).dropna()
+        delta_epsilon_vs_static = (
+            float(delta_eps_static_values.mean()) if len(delta_eps_static_values) else float("nan")
+        )
+    else:
+        delta_epsilon_vs_static = float("nan")
+    delta_eps_uncoord_values = (
         aircraft_df["rta_error_cps"].abs() - aircraft_df["rta_error_solo"].abs()
     ).dropna()
-    delta_epsilon = float(delta_eps_values.mean()) if len(delta_eps_values) else float("nan")
+    delta_epsilon_vs_uncoordinated = (
+        float(delta_eps_uncoord_values.mean()) if len(delta_eps_uncoord_values) else float("nan")
+    )
 
     # --- R_rec (Eq. recovery_rate): M_update = mid-trajectory-updated
     # aircraft; recovered = landed within rta_tolerance_s of that TTA.
@@ -193,7 +212,13 @@ def recompute_metrics(
         "c_sep_from_landings_crosscheck": (
             round(float(c_sep_from_landings), 4) if not np.isnan(c_sep_from_landings) else "nan"
         ),
-        "delta_epsilon": round(delta_epsilon, 4) if not np.isnan(delta_epsilon) else "nan",
+        "delta_epsilon_vs_static": (
+            round(delta_epsilon_vs_static, 4) if not np.isnan(delta_epsilon_vs_static) else "nan"
+        ),
+        "delta_epsilon_vs_uncoordinated": (
+            round(delta_epsilon_vs_uncoordinated, 4)
+            if not np.isnan(delta_epsilon_vs_uncoordinated) else "nan"
+        ),
         "r_rec": round(r_rec, 4) if not np.isnan(r_rec) else "nan",
         "rho_ripple": round(rho_ripple, 4) if not np.isnan(rho_ripple) else "nan",
         "stall_unrecovered": round(stall_unrecovered, 4) if not np.isnan(stall_unrecovered) else "nan",

@@ -15,13 +15,15 @@
 #
 # Note on scope: unlike cps_base.yaml's `model.k_cps`/`model.
 # runway_assignment_mode`, this config intentionally leaves those two
-# fields at their CPSModelConfig defaults — run_batch_eval.py sweeps both
-# per the --k-cps-sweep/--mode-sweep CLI flags (default 0/1/3 x
-# static/dynamic, 6 combinations) rather than fixing a single value here.
+# fields (plus `model.fairness_weight`) at their CPSModelConfig defaults —
+# run_batch_eval.py sweeps all three per the --k-cps-sweep/--mode-sweep/
+# --fairness-weight-sweep CLI flags (default 0/1/3 x static/dynamic x
+# [0.0], 6 combinations) rather than fixing a single value here.
 
 model:
-  # CPS coordination hyper-parameters. k_cps / runway_assignment_mode are
-  # NOT set here - run_batch_eval.py overrides them per sweep combination.
+  # CPS coordination hyper-parameters. k_cps / runway_assignment_mode /
+  # fairness_weight are NOT set here - run_batch_eval.py overrides them
+  # per sweep combination.
   delta_t_plan: 120               # Aligned with ACTION_TIME=120s (avoids the
                                    # CPSModelConfig.validate() cadence-mismatch warning)
   delta_update: 1.0               # Minimum TTA change delta_update to push a worker update (s)
@@ -111,9 +113,13 @@ cps_eval:
 logging:
   chunk_size: 250                 # Episodes buffered per Parquet flush (per combo,
                                    # per stream - see telemetry.py::build_collectors)
-  two_pass_solo: true             # Documents that both the CPS pass and the
-                                   # unconstrained solo pass always run per episode
+  three_pass_static_solo: true    # Documents that the CPS pass, the static-TTA pass
+                                   # (same greedy-scheduled TTA, assigned once and
+                                   # frozen - Eq. tracking_degradation/RQ2.2), and the
+                                   # unconstrained solo pass all run per episode
                                    # (coordination_baseline.py::_run_episode's
-                                   # tta_mode="cps"/"solo") - there is no
-                                   # single-pass mode today, so this is descriptive
-                                   # rather than a live toggle.
+                                   # tta_mode="cps"/"static"/"solo") - there is no
+                                   # single- or two-pass mode today, so this is
+                                   # descriptive rather than a live toggle. This is a
+                                   # 3x, not 2x, per-episode compute cost versus a
+                                   # single-pass baseline.

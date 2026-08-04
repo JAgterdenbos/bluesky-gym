@@ -2,9 +2,10 @@
 cps_coordination/testing/run_cps_eval.py
 -------------------------------------------
 CLI: builds the multi-agent env + CPSManager + frozen SAC worker, runs the
-matched-seed two-pass evaluation (CPS pass + solo/unconstrained pass, roadmap
-step 7) per episode, and streams per-aircraft + per-pair-separation rows to
-the telemetry Parquet collectors (roadmap step 8, see ``telemetry.py``).
+matched-seed three-pass evaluation (CPS pass + static-TTA pass + solo/
+unconstrained pass, roadmap step 7 plus the static-TTA addition) per
+episode, and streams per-aircraft + per-pair-separation rows to the
+telemetry Parquet collectors (roadmap step 8, see ``telemetry.py``).
 
 Usage
 -----
@@ -34,6 +35,7 @@ import argparse
 import os
 from typing import Dict, List, Optional
 
+from bluesky_gym.envs.pathplanning_goal_env import ALL_RUNWAYS
 from bluesky_gym.experiment.config import ExperimentConfig, SessionConfig
 
 from cps_coordination.coordination.cps_manager import CPSManager
@@ -53,8 +55,8 @@ from cps_coordination.testing.telemetry import (
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Run the CPS coordination two-pass (CPS + solo) evaluation and "
-            "log telemetry to Parquet for offline metric recomputation."
+            "Run the CPS coordination three-pass (CPS + static + solo) evaluation "
+            "and log telemetry to Parquet for offline metric recomputation."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -106,6 +108,7 @@ def _log_episode(
     k_cps: int,
     mode: str,
     recat_matrix: Dict[str, Dict[str, float]],
+    fairness_weight: float,
 ) -> None:
     """Append one episode's joined two-pass records to both telemetry streams."""
     for rec in records:
@@ -118,9 +121,11 @@ def _log_episode(
                 wake_cat=rec.wake_cat,
                 k_cps=k_cps,
                 runway_assignment_mode=mode,
+                fairness_weight=fairness_weight,
                 assigned_tta=rec.assigned_tta,
                 actual_landing_time=rec.actual_landing_time,
                 rta_error_cps=rec.rta_error_cps,
+                rta_error_static=rec.rta_error_static,
                 rta_error_solo=rec.rta_error_solo,
                 tta_updated_mid_trajectory=rec.tta_updated_mid_trajectory,
                 stall_detected=rec.stall_detected,
@@ -189,6 +194,15 @@ def main() -> None:
     env = experiment._make_multi_agent_env(args.n_aircraft)
     model = experiment.make_model(env)
 
+    # `CPSManager.__init__` does `available_runways or []` -- passing a bare
+    # `None`/empty `args.runways` straight through silently produces an
+    # *empty* candidate list, which makes `_assign_runways_dynamic` no-op
+    # unconditionally (`not self.available_runways` short-circuits it). Same
+    # bug class already found + fixed once in `run_batch_eval.py`'s standalone
+    # `_new_manager` -- resolved once here, the same way, so this script's
+    # dynamic mode doesn't silently degrade to static behaviour by default.
+    available_runways = list(args.runways or ALL_RUNWAYS)
+
     def _new_manager() -> CPSManager:
         return CPSManager(
             k_cps=args.k_cps,
@@ -196,7 +210,7 @@ def main() -> None:
             runway_assignment_mode=args.mode,
             delta_t_plan=args.delta_t_plan,
             delta_update=args.delta_update,
-            available_runways=list(cfg.env.env_kwargs.runways) if args.runways else None,
+            available_runways=available_runways,
             # See coordination_baseline.py::evaluate()'s _new_cps_manager for why
             # this is required (unwired -> zeroed lag features -> degraded ETA).
             trajectory_buffer=TrajectoryBuffer(),
@@ -205,6 +219,7 @@ def main() -> None:
         )
 
     cps_manager = _new_manager()
+    static_manager = _new_manager()
     solo_manager = _new_manager()
 
     aircraft_collector, separation_collector = build_collectors(
@@ -212,7 +227,7 @@ def main() -> None:
     )
 
     print(
-        f"\nCPS two-pass evaluation -> {args.save_path}"
+        f"\nCPS three-pass evaluation -> {args.save_path}"
         f"\n  episodes={args.episodes}, aircraft/episode={args.n_aircraft}"
         f"\n  k_cps={args.k_cps}, mode={args.mode}\n"
     )
@@ -228,6 +243,13 @@ def main() -> None:
             )
             cps_manager.reset()
 
+            static_records = experiment._run_episode(
+                env=env, model=model, cps_manager=static_manager, surrogate=surrogate,
+                deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="static",
+                track_trajectory=False,
+            )
+            static_manager.reset()
+
             solo_records = experiment._run_episode(
                 env=env, model=model, cps_manager=solo_manager, surrogate=surrogate,
                 deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="solo",
@@ -235,10 +257,11 @@ def main() -> None:
             )
             solo_manager.reset()
 
-            ep_records = experiment._join_two_pass(cps_records, solo_records)
+            ep_records = experiment._join_three_pass(cps_records, static_records, solo_records)
             _log_episode(
                 aircraft_collector, separation_collector, ep_idx, ep_records,
                 k_cps=args.k_cps, mode=args.mode, recat_matrix=recat_matrix,
+                fairness_weight=args.fairness_weight,
             )
 
             if (ep_idx + 1) % args.log_every == 0 or ep_idx == args.episodes - 1:

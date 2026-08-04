@@ -11,6 +11,7 @@ dist/
 /path_planning/rta/plots
 /path_planning/rta/testing/plots
 path_planning/rta/data/
+cps_coordination/data/
 *.png
 
 graphify-out/

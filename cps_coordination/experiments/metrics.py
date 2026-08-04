@@ -213,7 +213,15 @@ class CPSMetricsReporter:
         gamma           : Total throughput (landings/hour).
         gamma_r         : Per-runway throughput (landings/hour).
         c_sep           : Separation compliance fraction.
-        delta_epsilon   : Tracking degradation (mean |Δε|).
+        delta_epsilon_vs_static : Tracking degradation (Eq. tracking_degradation,
+                          RQ2.2's literal metric): mean |RTA_error_CPS| −
+                          |RTA_error_static|, dynamic replanning vs. the same
+                          greedy-scheduled TTA assigned once and frozen.
+        delta_epsilon_vs_uncoordinated : Secondary metric: mean |RTA_error_CPS| −
+                          |RTA_error_solo|, CPS-coordinated vs. an uncoordinated
+                          reference run under the identical frozen Worker. NOT
+                          Groot et al.'s published data -- a locally-generated
+                          reference, kept for internal comparison only.
         r_rec           : Recovery success rate.
         rho_ripple      : Delay ripple index (lag-1 autocorrelation of RTA errors).
         stall_unrecovered : Fraction of aircraft flagged stalled AND that never
@@ -296,12 +304,27 @@ class CPSMetricsReporter:
         )
 
         # --- Tracking degradation Δε ---
-        delta_eps_values = [
+        # Two distinct comparisons (see docstring above): the literal
+        # Eq. tracking_degradation (cps vs. static-TTA, RQ2.2's actual
+        # question about the cost of replanning) and a secondary,
+        # honestly-labelled uncoordinated-reference comparison (cps vs.
+        # solo) that is NOT Groot et al.'s published data.
+        delta_eps_static_values = [
+            abs(rec.rta_error_cps) - abs(rec.rta_error_static)
+            for rec in records
+            if not np.isnan(rec.rta_error_static)
+        ]
+        delta_epsilon_vs_static = (
+            float(np.mean(delta_eps_static_values)) if delta_eps_static_values else float("nan")
+        )
+        delta_eps_uncoord_values = [
             abs(rec.rta_error_cps) - abs(rec.rta_error_solo)
             for rec in records
             if not np.isnan(rec.rta_error_solo)
         ]
-        delta_epsilon = float(np.mean(delta_eps_values)) if delta_eps_values else float("nan")
+        delta_epsilon_vs_uncoordinated = (
+            float(np.mean(delta_eps_uncoord_values)) if delta_eps_uncoord_values else float("nan")
+        )
 
         # --- Recovery success rate R_rec (Eq. recovery_rate) ---
         # M_update = aircraft that received a genuine mid-trajectory TTA
@@ -355,7 +378,13 @@ class CPSMetricsReporter:
             "gamma": round(gamma, 4),
             "gamma_r": {rwy: round(v, 4) for rwy, v in gamma_r.items()},
             "c_sep": round(float(c_sep), 4) if not np.isnan(c_sep) else "nan",
-            "delta_epsilon": round(delta_epsilon, 4) if not np.isnan(delta_epsilon) else "nan",
+            "delta_epsilon_vs_static": (
+                round(delta_epsilon_vs_static, 4) if not np.isnan(delta_epsilon_vs_static) else "nan"
+            ),
+            "delta_epsilon_vs_uncoordinated": (
+                round(delta_epsilon_vs_uncoordinated, 4)
+                if not np.isnan(delta_epsilon_vs_uncoordinated) else "nan"
+            ),
             "r_rec": round(r_rec, 4) if not np.isnan(r_rec) else "nan",
             "rho_ripple": round(rho_ripple, 4) if not np.isnan(rho_ripple) else "nan",
             "stall_unrecovered": round(stall_unrecovered, 4),
@@ -375,7 +404,10 @@ class CPSMetricsReporter:
         print(f"  Throughput Γ         : {metrics.get('gamma', 'n/a')} ac/h")
         print(f"  Per-runway Γ_r       : {metrics.get('gamma_r', {})}")
         print(f"  Sep. compliance C_sep: {metrics.get('c_sep', 'n/a')}")
-        print(f"  Tracking degrad. Δε  : {metrics.get('delta_epsilon', 'n/a')} s")
+        print(f"  Δε vs. static TTA    : {metrics.get('delta_epsilon_vs_static', 'n/a')} s "
+              "(Eq. tracking_degradation, RQ2.2)")
+        print(f"  Δε vs. uncoordinated : {metrics.get('delta_epsilon_vs_uncoordinated', 'n/a')} s "
+              "(secondary, NOT Groot et al.'s data)")
         print(f"  Recovery rate R_rec  : {metrics.get('r_rec', 'n/a')}")
         print(f"  Ripple index ρ_ripple: {metrics.get('rho_ripple', 'n/a')}")
         print(f"  Stall unrecovered    : {metrics.get('stall_unrecovered', 'n/a')} "
@@ -406,7 +438,7 @@ class CPSMetricsReporter:
         csv_path = os.path.join(self.save_path, "cps_eval_log.csv")
         csv_fields = [
             "episode_id", "acid", "flight_id", "runway_id", "wake_cat", "assigned_tta",
-            "actual_landing_time", "rta_error_cps", "rta_error_solo",
+            "actual_landing_time", "rta_error_cps", "rta_error_static", "rta_error_solo",
             "tta_updated_mid_trajectory", "success",
         ]
         with open(csv_path, "w", newline="") as fh:
@@ -423,6 +455,7 @@ class CPSMetricsReporter:
                         "assigned_tta": rec.assigned_tta,
                         "actual_landing_time": rec.actual_landing_time,
                         "rta_error_cps": rec.rta_error_cps,
+                        "rta_error_static": rec.rta_error_static,
                         "rta_error_solo": rec.rta_error_solo,
                         "tta_updated_mid_trajectory": rec.tta_updated_mid_trajectory,
                         "success": rec.success,

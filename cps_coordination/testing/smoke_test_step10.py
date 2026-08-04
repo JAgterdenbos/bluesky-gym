@@ -55,6 +55,7 @@ from cps_coordination.testing.cps_metrics_offline import (
 M_EPISODES = 10
 K_CPS_SWEEP = [0, 3]
 MODE_SWEEP = ["static", "dynamic"]
+FAIRNESS_WEIGHT_SWEEP = [0.0]
 MAX_CONCURRENT_AIRCRAFT = 5
 TOTAL_ARRIVALS_PER_EPISODE = 10
 SPAWN_WINDOW_S = 1800.0
@@ -81,6 +82,8 @@ def _build_smoke_args(run_id: str, save_path_root: str) -> argparse.Namespace:
         episodes=M_EPISODES,
         k_cps_sweep=K_CPS_SWEEP,
         mode_sweep=MODE_SWEEP,
+        fairness_weight_sweep=FAIRNESS_WEIGHT_SWEEP,
+        disable_cross_cycle_runway_seeding=False,
         max_concurrent_aircraft=MAX_CONCURRENT_AIRCRAFT,
         total_arrivals_per_episode=TOTAL_ARRIVALS_PER_EPISODE,
         spawn_window_s=SPAWN_WINDOW_S,
@@ -116,31 +119,32 @@ def main() -> None:
         recat_matrix = load_recat_matrix()
         for k_cps in K_CPS_SWEEP:
             for mode in MODE_SWEEP:
-                combo_dir = os.path.join(save_path_root, f"k{k_cps}_{mode}")
-                try:
-                    aircraft_df, separation_df = load_telemetry(combo_dir)
-                    metrics = recompute_metrics(aircraft_df, separation_df, recat_matrix)
+                for fw in FAIRNESS_WEIGHT_SWEEP:
+                    combo_dir = os.path.join(save_path_root, f"k{k_cps}_{mode}_fw{fw:g}")
+                    try:
+                        aircraft_df, separation_df = load_telemetry(combo_dir)
+                        metrics = recompute_metrics(aircraft_df, separation_df, recat_matrix)
 
-                    successful = aircraft_df[aircraft_df["success"]]
-                    combo_max_landing = (
-                        float(successful["actual_landing_time"].max())
-                        if not successful.empty else float("-inf")
-                    )
-                    overall_max_landing_time = max(overall_max_landing_time, combo_max_landing)
+                        successful = aircraft_df[aircraft_df["success"]]
+                        combo_max_landing = (
+                            float(successful["actual_landing_time"].max())
+                            if not successful.empty else float("-inf")
+                        )
+                        overall_max_landing_time = max(overall_max_landing_time, combo_max_landing)
 
-                    n_rows = len(aircraft_df)
-                    combo_results.append(
-                        (k_cps, mode, "PASS", n_rows, metrics.get("success_rate"), combo_max_landing)
-                    )
-                    print(
-                        f"  k_cps={k_cps}, mode={mode}: {n_rows} aircraft rows, "
-                        f"success_rate={metrics.get('success_rate')}, "
-                        f"max_landing_time={combo_max_landing:.1f}s"
-                    )
-                except Exception as exc:  # noqa: BLE001 -- smoke test: report, don't hide, any combo's failure
-                    ok = False
-                    combo_results.append((k_cps, mode, f"FAIL: {exc}", None, None, None))
-                    print(f"  k_cps={k_cps}, mode={mode}: FAIL - {exc}")
+                        n_rows = len(aircraft_df)
+                        combo_results.append(
+                            (k_cps, mode, fw, "PASS", n_rows, metrics.get("success_rate"), combo_max_landing)
+                        )
+                        print(
+                            f"  k_cps={k_cps}, mode={mode}, fairness_weight={fw:g}: {n_rows} aircraft rows, "
+                            f"success_rate={metrics.get('success_rate')}, "
+                            f"max_landing_time={combo_max_landing:.1f}s"
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- smoke test: report, don't hide, any combo's failure
+                        ok = False
+                        combo_results.append((k_cps, mode, fw, f"FAIL: {exc}", None, None, None))
+                        print(f"  k_cps={k_cps}, mode={mode}, fairness_weight={fw:g}: FAIL - {exc}")
 
         print("\n=== Clock-fix sanity check ===")
         if overall_max_landing_time > SPAWN_WINDOW_S:
@@ -162,8 +166,8 @@ def main() -> None:
         shutil.rmtree(save_path_root, ignore_errors=True)
 
     print("\n=== Smoke test summary ===")
-    for k_cps, mode, status, n_rows, success_rate, max_landing in combo_results:
-        print(f"  k_cps={k_cps:<2} mode={mode:<8} {status}")
+    for k_cps, mode, fw, status, n_rows, success_rate, max_landing in combo_results:
+        print(f"  k_cps={k_cps:<2} mode={mode:<8} fairness_weight={fw:<4g} {status}")
 
     if ok:
         print("\nOVERALL: PASS")

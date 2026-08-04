@@ -21,20 +21,32 @@ Overview
      Per-runway throughput Γ_r         Aircraft landed per hour per runway
      Sep. compliance       C_sep       Fraction of consecutive pairs with
                                        actual separation ≥ RECAT-EU minimum
-     Tracking degradation  Δε          Mean |RTA_error_CPS| − |RTA_error_solo|
-                                       comparing CPS to frozen worker alone
+     Tracking degradation  Δε_static   Mean |RTA_error_CPS| − |RTA_error_static|
+                                       (Eq. tracking_degradation) — dynamic
+                                       replanning vs. the same greedy-scheduled
+                                       TTA assigned once and frozen
+     Tracking degradation  Δε_uncoord  Mean |RTA_error_CPS| − |RTA_error_solo| —
+                                       CPS-coordinated vs. an uncoordinated
+                                       reference run under the identical
+                                       frozen Worker (secondary metric, NOT
+                                       Groot et al.'s published data)
      Recovery success rate R_rec       Fraction of mid-trajectory-updated
                                        flights (M_update) landing within the
                                        RTA tolerance δ_t (Eq. recovery_rate)
      Delay ripple index    ρ_ripple    Lag-1 autocorrelation of the RTA error
                                        sequence (measures delay propagation)
 
-Comparison baseline
--------------------
-  Results are compared against the Groot et al. baseline (unconstrained
-  spatial-temporal policy) using the same frozen model without CPS
-  coordination.  The baseline episode logs are saved to
-  ``experiments/…/baseline_log.csv`` alongside the CPS logs.
+Comparison baselines
+---------------------
+  Three matched-seed passes are run per episode (:meth:`_run_episode`'s
+  ``tta_mode``): ``"cps"`` (real k-CPS coordination, ongoing replanning),
+  ``"static"`` (identical greedy-scheduled TTA, assigned once and frozen —
+  the literal complement required by Eq. tracking_degradation/RQ2.2's
+  question about the cost of replanning itself), and ``"solo"`` (the ETA
+  surrogate's raw, unconstrained prediction, no CPS scheduling at all — a
+  locally-generated uncoordinated reference under the same frozen Worker,
+  *not* a reproduction of Groot et al.'s published dual-runway baseline,
+  which this codebase does not have the data to reproduce).
 """
 
 from __future__ import annotations
@@ -189,7 +201,9 @@ class _EpisodeRecord:
     assigned_tta: float               # TTA set by CPSManager at episode end
     actual_landing_time: float        # Sim time of successful landing
     rta_error_cps: float              # |actual_time - assigned_tta|
-    rta_error_solo: float             # |actual_time - unconstrained ETA| (baseline)
+    rta_error_solo: float             # |actual_time - unconstrained ETA|: locally-
+                                       # generated uncoordinated reference under the
+                                       # same frozen Worker, NOT Groot et al.'s data.
     tta_updated_mid_trajectory: bool  # Received a TTA update after its initial
                                        # assignment (Eq. recovery_rate's M_update
                                        # membership test). R_rec itself is
@@ -202,6 +216,12 @@ class _EpisodeRecord:
                                        # end -- flagged when distance-to-IAF
                                        # failed to shrink over a rolling window
                                        # (see cps_manager.py's STALL_WINDOW_S).
+    rta_error_static: float = float("nan")  # |actual_time - static-pass TTA|
+                                       # (Eq. tracking_degradation's ε_static):
+                                       # the same greedy-scheduled TTA as the
+                                       # CPS pass, assigned once and frozen --
+                                       # NOT the same thing as rta_error_solo
+                                       # (which has no CPS scheduling at all).
     arrival_index: int = -1           # n-th aircraft to spawn this episode (join key
                                        # for the two-pass baseline — robust to acid
                                        # reuse under a rolling-arrival-stream config,
@@ -436,12 +456,13 @@ class CPSCoordinationExperiment(BaseExperiment):
                 enable_cross_cycle_runway_seeding=mcfg.enable_cross_cycle_runway_seeding,
             )
 
-        # Two independent CPSManager instances — one per pass — so that the
+        # Three independent CPSManager instances — one per pass — so that the
         # CPS run's replanning state (_runway_last_committed/_prev_ttas) never
-        # leaks into the solo run's, or vice versa (see roadmap step 7: the
-        # solo baseline must be a genuinely independent rollout, not derived
-        # from the CPS trajectory after the fact).
+        # leaks into the static/solo runs', or vice versa (see roadmap step 7:
+        # every baseline pass must be a genuinely independent rollout, not
+        # derived from the CPS trajectory after the fact).
         cps_manager = _new_cps_manager()
+        static_manager = _new_cps_manager()
         solo_manager = _new_cps_manager()
 
         n_episodes = cfg.session.eval_episodes
@@ -484,6 +505,18 @@ class CPSCoordinationExperiment(BaseExperiment):
                 )
                 cps_manager.reset()
 
+                static_records = self._run_episode(
+                    env=env,
+                    model=model,
+                    cps_manager=static_manager,
+                    surrogate=surrogate,
+                    deterministic=deterministic,
+                    ep_idx=ep_idx,
+                    seed=ep_seed,
+                    tta_mode="static",
+                )
+                static_manager.reset()
+
                 solo_records = self._run_episode(
                     env=env,
                     model=model,
@@ -496,7 +529,7 @@ class CPSCoordinationExperiment(BaseExperiment):
                 )
                 solo_manager.reset()
 
-                ep_records = self._join_two_pass(cps_records, solo_records)
+                ep_records = self._join_three_pass(cps_records, static_records, solo_records)
                 all_records.extend(ep_records)
 
                 for rec in ep_records:
@@ -537,24 +570,35 @@ class CPSCoordinationExperiment(BaseExperiment):
         until every aircraft scheduled for this episode has landed or been
         truncated (``env.is_episode_done()``).
 
-        Two-pass solo baseline (roadmap step 7)
-        ----------------------------------------
+        Three-pass baseline (roadmap step 7 + the static-TTA addition)
+        -----------------------------------------------------------------
         ``tta_mode`` selects what gets injected via ``env.set_tta`` each
         step, but otherwise runs the identical loop (same fleet-building,
         same ``cps_manager.update_fleet`` call, same dynamic-runway sync):
 
-        - ``"cps"``  — inject ``cps_manager.get_tta(acid)`` (the k-CPS
+        - ``"cps"``    — inject ``cps_manager.get_tta(acid)`` (the k-CPS
           greedy-scheduled TTA), gated by ``changed`` (only when the
-          scheduled TTA actually shifted) — today's behaviour.
-        - ``"solo"`` — inject ``ac.eta`` directly (the surrogate's raw,
+          scheduled TTA actually shifted) — today's behaviour, ongoing
+          replanning for the whole episode.
+        - ``"static"`` — inject the *same* greedy-scheduled TTA from the
+          *same* scheduler, but only on an acid's first-ever assignment;
+          every later replanning cycle is computed (so other, not-yet-
+          assigned aircraft are still correctly sequenced) but never
+          re-injected into the env for an already-assigned acid. This is
+          the literal complement of ``"cps"`` required by
+          Eq. tracking_degradation/RQ2.2 — "does replanning itself cost
+          tracking accuracy" needs a condition that is identical except for
+          the replanning, not a differently-scheduled one.
+        - ``"solo"``   — inject ``ac.eta`` directly (the surrogate's raw,
           unconstrained per-aircraft ETA prediction *before* k-CPS
           scheduling), every step, for every active aircraft. This is the
           frozen worker's own unconstrained target, uncontaminated by the
-          CPS scheduler's positional shifting.
+          CPS scheduler's positional shifting — a locally-generated
+          uncoordinated reference, not Groot et al.'s published baseline.
 
-        The caller (``evaluate()``) runs both modes against the *same* env
-        with the *same* seed and joins the two aircraft-indexed record sets
-        by ``arrival_index`` — never by acid, since a rolling-arrival-stream
+        The caller (``evaluate()``) runs all three modes against the *same*
+        env with the *same* seed and joins the record sets by
+        ``arrival_index`` — never by acid, since a rolling-arrival-stream
         config would reuse acids per-slot and a literal-callsign join could
         pair the wrong physical flights across passes.
 
@@ -577,23 +621,35 @@ class CPSCoordinationExperiment(BaseExperiment):
         ep_idx : int
             Episode index (used for logging).
         tta_mode : str
-            ``"cps"`` or ``"solo"`` — see above.
+            ``"cps"``, ``"static"``, or ``"solo"`` — see above.
 
         Returns
         -------
         List[_EpisodeRecord]
             One record per aircraft in this episode, in arrival order.
-            ``rta_error_solo`` is left as NaN here in both modes — the
-            caller fills it in during the join (see :meth:`_join_two_pass`).
+            ``rta_error_solo``/``rta_error_static`` are left as NaN here in
+            every mode — the caller fills them in during the join (see
+            :meth:`_join_three_pass`).
         """
-        if tta_mode not in ("cps", "solo"):
-            raise ValueError(f"tta_mode must be 'cps' or 'solo', got {tta_mode!r}")
+        if tta_mode not in ("cps", "static", "solo"):
+            raise ValueError(f"tta_mode must be 'cps', 'static', or 'solo', got {tta_mode!r}")
 
         obs, info_list = env.reset(seed=seed)
         sim_time = 0.0
         records: List[_EpisodeRecord] = []
         last_tta: Dict[str, float] = {}
         arrival_order: Dict[str, int] = {}
+        # Monotonic counter for `arrival_order` values -- NOT `len(arrival_order)`.
+        # Under a rolling-arrival-stream config, `arrival_order` only ever holds
+        # `max_concurrent_aircraft` distinct acid keys (one per slot): once every
+        # slot has spawned its first occupant, `len(arrival_order)` stops growing,
+        # so re-keying a recycled slot's *second* (or later) occupant with
+        # `len(arrival_order)` would silently reassign the exact same value every
+        # time a slot recycles -- collapsing every non-first occupant of every
+        # slot onto one shared `arrival_index`/`flight_id`, and reintroducing the
+        # cross-contaminated `_join_three_pass` join this whole detector exists to
+        # prevent, just with a different trigger than the original acid-reuse bug.
+        next_arrival_order = 0
         # Test A (pre-Step-10 audit §1.2/§1.4): per-episode cache of each
         # acid's first-committed remaining_time_budget value, populated and
         # consulted by _compute_remaining_time_budget only when
@@ -616,18 +672,33 @@ class CPSCoordinationExperiment(BaseExperiment):
         # an earlier, unrelated arrival's state (this previously caused
         # `records` -- then a Dict[str, _EpisodeRecord] -- to silently drop
         # every arrival but the last one per slot).
-        prev_active_acids: set = set()
+        #
+        # A plain "acid not seen last iteration" set-diff is NOT sufficient:
+        # MultiAgentPathPlanningGoalEnv._finalize_step refills a freed slot
+        # with the next scheduled arrival within the *same* env.step() call
+        # that terminated the previous occupant, so the acid string is never
+        # actually absent between two consecutive info_list snapshots -- the
+        # new occupant is silently missed and inherits the old occupant's
+        # bookkeeping. `info["spawn_time"]` (the slot's absolute spawn
+        # instant) is unique per physical occupancy of a slot -- it strictly
+        # increases across a same-step swap -- so diffing on (acid,
+        # spawn_time) instead of acid alone detects same-step refills too.
+        prev_slot_spawn_time: Dict[str, float] = {}
 
         while not env.is_episode_done():
-            current_acids = {info["acid"] for info in info_list}
-            for acid in current_acids - prev_active_acids:
-                arrival_order[acid] = len(arrival_order)
-                trajectories.pop(acid, None)
-                assigned_once.discard(acid)
-                mid_traj_updated.discard(acid)
-                last_tta.pop(acid, None)
-                frozen_remaining_time_budget.pop(acid, None)
-            prev_active_acids = current_acids
+            current_slot_spawn_time = {
+                info["acid"]: info.get("spawn_time", 0.0) for info in info_list
+            }
+            for acid, spawn_time in current_slot_spawn_time.items():
+                if prev_slot_spawn_time.get(acid) != spawn_time:
+                    arrival_order[acid] = next_arrival_order
+                    next_arrival_order += 1
+                    trajectories.pop(acid, None)
+                    assigned_once.discard(acid)
+                    mid_traj_updated.discard(acid)
+                    last_tta.pop(acid, None)
+                    frozen_remaining_time_budget.pop(acid, None)
+            prev_slot_spawn_time = current_slot_spawn_time
 
             fleet = self._build_fleet(obs, info_list, sim_time, frozen_remaining_time_budget)
             acid_to_slot = {info["acid"]: info["slot"] for info in info_list}
@@ -652,8 +723,10 @@ class CPSCoordinationExperiment(BaseExperiment):
                 if ac.runway_id != env.current_runway[slot]:
                     env.set_runway(slot, ac.runway_id)
 
-            if tta_mode == "cps":
+            if tta_mode in ("cps", "static"):
                 for acid in changed:
+                    if tta_mode == "static" and acid in assigned_once:
+                        continue  # frozen: never re-inject after the first assignment
                     tta = cps_manager.get_tta(acid)
                     if tta is not None:
                         if acid in assigned_once:
@@ -707,6 +780,7 @@ class CPSCoordinationExperiment(BaseExperiment):
                         actual_landing_time=landing_time,
                         rta_error_cps=rta_error_cps,
                         rta_error_solo=float("nan"),
+                        rta_error_static=float("nan"),
                         tta_updated_mid_trajectory=tta_updated_mid_trajectory,
                         stall_detected=stall_detected,
                         success=success,
@@ -723,37 +797,44 @@ class CPSCoordinationExperiment(BaseExperiment):
         return records
 
     @staticmethod
-    def _join_two_pass(
+    def _join_three_pass(
         cps_records: List[_EpisodeRecord],
+        static_records: List[_EpisodeRecord],
         solo_records: List[_EpisodeRecord],
     ) -> List[_EpisodeRecord]:
-        """Join a CPS-pass and solo-pass record set by ``arrival_index``.
+        """Join the CPS/static/solo pass record sets by ``arrival_index``.
 
         Returns the CPS-pass records (runway/success/assigned_tta/landing
-        time all come from the CPS-coordinated rollout) with ``rta_error_solo``
-        filled in from the matching solo-pass record's own tracking error
-        (``rta_error_cps`` field of that record, since :meth:`_run_episode`
-        computes "error vs. whatever was actually injected" identically in
-        both modes — in solo mode that's the unconstrained ETA). Joining by
-        ``arrival_index`` rather than ``acid`` keeps this correct even under
-        a future rolling-arrival-stream config where per-slot acids repeat.
+        time all come from the CPS-coordinated rollout) with
+        ``rta_error_static``/``rta_error_solo`` filled in from the matching
+        static-pass/solo-pass record's own tracking error (``rta_error_cps``
+        field of that record, since :meth:`_run_episode` computes "error vs.
+        whatever was actually injected" identically in every mode — in
+        static mode that's the once-assigned, frozen TTA; in solo mode the
+        unconstrained ETA). Joining by ``arrival_index`` rather than ``acid``
+        keeps this correct even under a rolling-arrival-stream config where
+        per-slot acids repeat.
 
-        An arrival present in one pass but not the other (e.g. a truncation
+        An arrival present in one pass but not another (e.g. a truncation
         that changes step timing enough to shift a later spawn) is dropped
         with a printed warning rather than silently producing a NaN Δε.
         """
+        static_by_arrival = {rec.arrival_index: rec for rec in static_records}
         solo_by_arrival = {rec.arrival_index: rec for rec in solo_records}
 
         joined: List[_EpisodeRecord] = []
         for cps_rec in cps_records:
+            static_rec = static_by_arrival.get(cps_rec.arrival_index)
             solo_rec = solo_by_arrival.get(cps_rec.arrival_index)
-            if solo_rec is None:
+            if static_rec is None or solo_rec is None:
+                missing = "static-pass" if static_rec is None else "solo-pass"
                 print(
-                    f"WARNING: no solo-pass match for arrival_index="
+                    f"WARNING: no {missing} match for arrival_index="
                     f"{cps_rec.arrival_index} (acid={cps_rec.acid!r}); "
                     "dropping from this episode's joined records."
                 )
                 continue
+            cps_rec.rta_error_static = static_rec.rta_error_cps
             cps_rec.rta_error_solo = solo_rec.rta_error_cps
             joined.append(cps_rec)
         return joined
@@ -812,6 +893,7 @@ class CPSCoordinationExperiment(BaseExperiment):
                     runway_id=str(info["current_runway"]),
                     eta=eta,
                     wake_cat="C",
+                    spawn_time=float(info.get("spawn_time", 0.0)),
                 )
             )
         return fleet
