@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import os
+import shutil
 import signal
 from types import FrameType
 from typing import Any, Dict, List, Optional
@@ -83,7 +84,15 @@ def _load_yaml(path: str) -> Dict[str, Any]:
         return yaml.safe_load(fh) or {}
 
 
-def _parse_args() -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
+    """Split out from _parse_args() so callers that need a Namespace with
+    every flag's real default (e.g. smoke_test_step10.py, which only wants
+    to override a handful of fields) can do
+    ``_build_parser().parse_args([...])`` instead of hand-building an
+    argparse.Namespace -- the latter has silently broken twice in one
+    session (missing --episode-id-offset, then missing --resume) every
+    time a new flag was added here, since nothing forces a hand-built
+    Namespace to stay in sync with this parser."""
     defaults = _load_yaml(_DEFAULT_CONFIG)
     model_d = defaults.get("model", {})
     cps_eval_d = defaults.get("cps_eval", {})
@@ -139,11 +148,97 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed-base", type=int, default=0,
                    help="Episode seed = seed_base + episode_index; matched between "
                         "the CPS, static, and solo passes of the same episode.")
+    p.add_argument("--episode-id-offset", type=int, default=0,
+                   help="Added to episode_index to form the logged episode_id. "
+                        "Use this to shard one combo's M episodes across several "
+                        "concurrent processes (each covering a disjoint --episodes "
+                        "range via --seed-base, with a matching disjoint "
+                        "--episode-id-offset) without colliding episode_ids when "
+                        "the shards' Parquet output is later concatenated -- "
+                        "c_sep and other metrics group by (runway_id, episode_id), "
+                        "so colliding ids across shards would silently corrupt them.")
     p.add_argument("--no-fresh-start", action="store_true", default=False,
                    help="Append to existing Parquet files instead of overwriting.")
+    p.add_argument("--resume", action="store_true", default=False,
+                   help="Per combo, resume from the highest episode_id already durably "
+                        "written to that combo's cps_eval_aircraft.parquet (accounting "
+                        "for --episode-id-offset) instead of starting at episode 0. A "
+                        "combo whose file already covers --episodes is skipped entirely. "
+                        "Safe against both clean (SIGINT/SIGTERM) and hard-crash "
+                        "interruption: the collector's close() force-flushes any "
+                        "buffered episodes first, so the file never has a gap or a "
+                        "duplicate -- worst case after a hard crash is re-running up to "
+                        "--chunk-size episodes that were computed but not yet flushed, "
+                        "never silent data loss/corruption. Overrides --no-fresh-start "
+                        "per combo (always appends once a resume point > 0 is found).")
     p.add_argument("--log-every", type=int, default=100,
                    help="Print progress every N episodes.")
-    return p.parse_args()
+    return p
+
+
+def _parse_args() -> argparse.Namespace:
+    return _build_parser().parse_args()
+
+
+def _resolve_resume_start(save_path: str, episode_id_offset: int) -> int:
+    """Returns the episode_index to resume this combo's loop at, derived
+    from the highest episode_id already durably present in this combo's
+    cps_eval_aircraft.parquet (0 if the file doesn't exist, is empty, or
+    can't be read). Deliberately reads from the data itself rather than a
+    separately-tracked checkpoint counter -- a checkpoint file could desync
+    from what the collector actually flushed; the Parquet file's own
+    contents can't."""
+    path = os.path.join(save_path, "cps_eval_aircraft.parquet")
+    if not os.path.exists(path):
+        return 0
+    try:
+        import pyarrow.compute as pc
+        import pyarrow.parquet as pq
+        table = pq.read_table(path, columns=["episode_id"])
+        if table.num_rows == 0:
+            return 0
+        max_episode_id = int(pc.max(table.column("episode_id")).as_py())
+    except Exception as exc:
+        print(f"[run_batch_eval] --resume: couldn't read {path} ({exc}) -- "
+              f"treating as no prior progress, starting this combo at episode 0.")
+        return 0
+    return max(0, max_episode_id - episode_id_offset + 1)
+
+
+def _merge_resume_delta(save_path: str, delta_path: str) -> None:
+    """Merges a resumed combo's newly-written delta Parquet files into the
+    pre-existing combo directory.
+
+    Parquet has no true row-group append -- ParquetDataCollector._flush
+    always opens a fresh pyarrow.parquet.ParquetWriter on the target path,
+    which truncates it, regardless of the collector's own fresh_start flag
+    (that flag only controls a pre-emptive unlink(), not the writer's own
+    open mode). Writing a resumed combo's new episodes in place would
+    therefore silently destroy the already-durable episodes _resolve_resume_
+    start found -- confirmed by an end-to-end resume test before this fix
+    existed. Instead, resumed episodes are written to a throwaway
+    `{save_path}__resume_delta` directory (fresh_start=True there, since
+    it's brand new) and combined here via read+concat+atomic-replace once
+    the combo's episode loop finishes (however it finished -- this runs in
+    a `finally`, so an interrupted resume still merges whatever was
+    completed, and a subsequent --resume re-derives the next start point
+    from the newly-merged file, same as any other run)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    for filename in ("cps_eval_aircraft.parquet", "cps_eval_separation.parquet"):
+        old_path = os.path.join(save_path, filename)
+        new_path = os.path.join(delta_path, filename)
+        if not os.path.exists(new_path):
+            continue
+        tables = [pq.read_table(old_path)] if os.path.exists(old_path) else []
+        tables.append(pq.read_table(new_path))
+        merged = pa.concat_tables(tables)
+        tmp_path = old_path + ".merging"
+        pq.write_table(merged, tmp_path)
+        os.replace(tmp_path, old_path)
+
+    shutil.rmtree(delta_path, ignore_errors=True)
 
 
 def _new_manager(
@@ -233,6 +328,30 @@ def run_sweep(args: argparse.Namespace) -> None:
                 break
 
             save_path = os.path.join(args.save_path_root, f"k{k_cps}_{mode}_fw{fairness_weight:g}")
+
+            start_ep_idx = 0
+            resuming = False
+            if args.resume:
+                start_ep_idx = _resolve_resume_start(save_path, args.episode_id_offset)
+                if start_ep_idx >= args.episodes:
+                    print(f"\n--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} "
+                          f"-> {save_path}: already complete ({start_ep_idx}/{args.episodes} episodes "
+                          f"durably written), skipping ---")
+                    continue
+                if start_ep_idx > 0:
+                    resuming = True
+                    print(f"\n--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} "
+                          f"-> {save_path}: resuming at episode {start_ep_idx}/{args.episodes} "
+                          f"({start_ep_idx} already durably written) ---")
+
+            # Parquet has no true row-group append (see _merge_resume_delta's
+            # docstring) -- a resumed combo writes to a throwaway delta dir
+            # and gets merged with the pre-existing file once its loop ends,
+            # rather than risking an in-place write clobbering already-
+            # durable episodes.
+            collector_path = f"{save_path}__resume_delta" if resuming else save_path
+            collector_fresh_start = True if resuming else not args.no_fresh_start
+
             cps_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                         args.delta_update, available_runways,
                                         fairness_weight, enable_cross_cycle_runway_seeding)
@@ -243,12 +362,12 @@ def run_sweep(args: argparse.Namespace) -> None:
                                          args.delta_update, available_runways,
                                          fairness_weight, enable_cross_cycle_runway_seeding)
             aircraft_collector, separation_collector = build_collectors(
-                save_path, chunk_size=args.chunk_size, fresh_start=not args.no_fresh_start,
+                collector_path, chunk_size=args.chunk_size, fresh_start=collector_fresh_start,
             )
 
             print(f"\n--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} -> {save_path} ---")
             try:
-                for ep_idx in range(args.episodes):
+                for ep_idx in range(start_ep_idx, args.episodes):
                     if _stop_requested:
                         print(f"[run_batch_eval] stop requested mid-combo "
                               f"(k_cps={k_cps}, mode={mode}) at episode {ep_idx}/{args.episodes} - "
@@ -256,31 +375,35 @@ def run_sweep(args: argparse.Namespace) -> None:
                         break
 
                     ep_seed = args.seed_base + ep_idx
+                    # Only the logged episode_id is offset -- the seed and the
+                    # progress-print index stay tied to this process's local
+                    # loop, so seed_base is still the sole seed-sharding knob.
+                    episode_id = args.episode_id_offset + ep_idx
 
                     cps_records = experiment._run_episode(
                         env=env, model=model, cps_manager=cps_manager, surrogate=surrogate,
-                        deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="cps",
+                        deterministic=True, ep_idx=episode_id, seed=ep_seed, tta_mode="cps",
                         track_trajectory=True,
                     )
                     cps_manager.reset()
 
                     static_records = experiment._run_episode(
                         env=env, model=model, cps_manager=static_manager, surrogate=surrogate,
-                        deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="static",
+                        deterministic=True, ep_idx=episode_id, seed=ep_seed, tta_mode="static",
                         track_trajectory=False,
                     )
                     static_manager.reset()
 
                     solo_records = experiment._run_episode(
                         env=env, model=model, cps_manager=solo_manager, surrogate=surrogate,
-                        deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="solo",
+                        deterministic=True, ep_idx=episode_id, seed=ep_seed, tta_mode="solo",
                         track_trajectory=False,
                     )
                     solo_manager.reset()
 
                     ep_records = experiment._join_three_pass(cps_records, static_records, solo_records)
                     _log_episode(
-                        aircraft_collector, separation_collector, ep_idx, ep_records,
+                        aircraft_collector, separation_collector, episode_id, ep_records,
                         k_cps=k_cps, mode=mode, recat_matrix=recat_matrix,
                         fairness_weight=fairness_weight,
                     )
@@ -290,6 +413,8 @@ def run_sweep(args: argparse.Namespace) -> None:
             finally:
                 aircraft_collector.close()
                 separation_collector.close()
+                if resuming:
+                    _merge_resume_delta(save_path, collector_path)
                 print(f"--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} done -> {save_path} ---")
     finally:
         env.close()

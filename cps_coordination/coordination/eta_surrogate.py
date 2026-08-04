@@ -777,7 +777,15 @@ class ETASurrogate:
         -------
         ETASurrogate
         """
-        return joblib.load(Path(path))
+        surrogate = joblib.load(Path(path))
+        # Shipped models are trained with n_jobs=-1 (right for fitting), but
+        # inference here calls .predict() once per decision step on a tiny
+        # batch (~n_aircraft x 12 runways) -- profiling showed joblib's
+        # process-pool spin-up/teardown dominating that call, not tree
+        # evaluation. n_jobs is read fresh at predict() time, not baked into
+        # the fitted trees, so this changes nothing about the model's output.
+        surrogate._model.n_jobs = 1
+        return surrogate
 
     @classmethod
     def from_sampler_path(

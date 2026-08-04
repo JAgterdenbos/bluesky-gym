@@ -109,6 +109,97 @@ from bluesky_gym.envs.pathplanning_goal_env import (
 )
 
 
+# Kill-switch between the two _check_terminal implementations, both kept in
+# this file: True (default) uses _check_terminal_batched (one vectorized
+# numpy call per tick across all active aircraft, ~2.8x faster -- see
+# cps_coordination/testing/prototype_numpy_path_check.py for the validation
+# this was ported from); False uses the original per-slot, per-shape
+# matplotlib.path.Path.intersects_path loop (_check_terminal). Both were
+# verified bit-for-bit equivalent via validate_multiagent_env.py and a
+# metrics-identical M=30/8-combo compare -- toggle this if you need to A/B
+# them again, or as a quick rollback without reverting code.
+USE_NUMPY_TERMINAL_CHECK = True
+
+
+# --------------------------------------------------------------------- #
+# Batched terminal-condition geometry (segment crossing OR full enclosure,
+# matching matplotlib.path.Path.intersects_path's default filled=True
+# semantics -- reverse-engineered and validated to bit-exact agreement
+# against real matplotlib across 100k+ random + adversarial cases and
+# 2000+ batched multi-shape/multi-aircraft ticks; see
+# cps_coordination/testing/prototype_numpy_path_check.py for the full
+# derivation/validation this was ported from). Tests one aircraft-tick's
+# tiny movement segment against ALL of a runway pool's SINK/RESTRICT
+# shapes in one vectorized call instead of one matplotlib call per shape
+# per aircraft -- see _check_terminal_batched below for how the result
+# maps back to per-aircraft death_cause/reward, preserving the exact
+# sink > restrict > other-runway priority order _check_terminal used.
+# --------------------------------------------------------------------- #
+
+def _cross_batch(ox, oy, ux, uy, vx, vy):
+    return (ux - ox) * (vy - oy) - (uy - oy) * (vx - ox)
+
+
+def _on_segment_batch(ux, uy, vx, vy, wx, wy):
+    return (np.minimum(ux, vx) <= wx) & (wx <= np.maximum(ux, vx)) & \
+           (np.minimum(uy, vy) <= wy) & (wy <= np.maximum(uy, vy))
+
+
+def _segment_hits_batch(p1s: np.ndarray, p2s: np.ndarray, ax, ay, bx, by,
+                         boundaries: np.ndarray) -> np.ndarray:
+    """(n_agents, 2) x edges -> (n_agents, n_groups) segment-crossing bool,
+    reduced per shape group via np.logical_or.reduceat."""
+    p1x, p1y = p1s[:, None, 0], p1s[:, None, 1]
+    p2x, p2y = p2s[:, None, 0], p2s[:, None, 1]
+
+    d1 = _cross_batch(ax, ay, bx, by, p1x, p1y)
+    d2 = _cross_batch(ax, ay, bx, by, p2x, p2y)
+    d3 = _cross_batch(p1x, p1y, p2x, p2y, ax, ay)
+    d4 = _cross_batch(p1x, p1y, p2x, p2y, bx, by)
+
+    proper = (((d1 > 0) & (d2 < 0)) | ((d1 < 0) & (d2 > 0))) & \
+             (((d3 > 0) & (d4 < 0)) | ((d3 < 0) & (d4 > 0)))
+
+    touching = (
+        ((d1 == 0) & _on_segment_batch(ax, ay, bx, by, p1x, p1y)) |
+        ((d2 == 0) & _on_segment_batch(ax, ay, bx, by, p2x, p2y)) |
+        ((d3 == 0) & _on_segment_batch(p1x, p1y, p2x, p2y, ax, ay)) |
+        ((d4 == 0) & _on_segment_batch(p1x, p1y, p2x, p2y, bx, by))
+    )
+    edge_hits = proper | touching
+    return np.logical_or.reduceat(edge_hits, boundaries, axis=1)
+
+
+def _point_in_polygon_crossings_batch(pts: np.ndarray, ax, ay, bx, by) -> np.ndarray:
+    """Ray-cast crossing test (pts: (n_pts, 2)) against closing (wraparound-
+    included) edges; caller reduces+parity-checks per shape group."""
+    x, y = pts[:, 0:1], pts[:, 1:2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x_intersect = (bx - ax) * (y - ay) / (by - ay) + ax
+    return ((ay > y) != (by > y)) & (x < x_intersect)
+
+
+def _filled_hits_batch(
+    p1s: np.ndarray, p2s: np.ndarray,
+    open_ax, open_ay, open_bx, open_by, open_boundaries: np.ndarray,
+    close_ax, close_ay, close_bx, close_by, close_boundaries: np.ndarray,
+) -> np.ndarray:
+    """(n_agents, n_groups) bool: segment crossing OR both query endpoints
+    enclosed -- the exact behavior of
+    ``shape_path.intersects_path(query_path)`` (matplotlib's default
+    filled=True), for every active aircraft against every shape in one call."""
+    seg_hits = _segment_hits_batch(p1s, p2s, open_ax, open_ay, open_bx, open_by, open_boundaries)
+
+    n_agents = p1s.shape[0]
+    stacked = np.concatenate([p1s, p2s], axis=0)  # (2*n_agents, 2)
+    crossings = _point_in_polygon_crossings_batch(stacked, close_ax, close_ay, close_bx, close_by)
+    counts = np.add.reduceat(crossings.astype(np.int64), close_boundaries, axis=1)
+    inside = (counts % 2) == 1
+    p1_in, p2_in = inside[:n_agents], inside[n_agents:]
+
+    return seg_hits | (p1_in & p2_in)
+
+
 class MultiAgentPathPlanningGoalEnv(gym.Env):
     """Multi-aircraft, single-BlueSky-instance version of ``PathPlanningGoalEnv``.
 
@@ -194,6 +285,30 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
 
         self.population_weight = POPULATION_WEIGHT
         self.path_length_weight = PATH_LENGTH_WEIGHT
+
+        # SINK{rwy}/RESTRICT{rwy} shape coordinates are static for the whole
+        # process lifetime once registered below -- cache their Path objects
+        # instead of rebuilding one from scratch on every _check_terminal call
+        # (was ~1.3M Path()/np.reshape() constructions per M=5 profiling run).
+        self._shape_path_cache: Dict[str, Path] = {}
+
+        # Batched terminal-check geometry (segment+enclosure across all
+        # runways' shapes in one call, see _check_terminal_batched) --
+        # built lazily on first use, same reasoning as _shape_path_cache
+        # above: shape coordinates aren't guaranteed registered in
+        # bs.tools.areafilter.basic_shapes until after the POLYLINE stack
+        # commands below are actually processed.
+        self._batch_shapes_built = False
+
+        # Bound ONCE here rather than branched on every tick in step()'s
+        # inner loop (up to ACTION_FREQUENCY=24x per step() call) -- the
+        # closest Python equivalent of a C preprocessor #ifdef/#else
+        # selecting which implementation gets compiled in, since Python has
+        # no compile-time macros: pick the method reference once, call it
+        # unconditionally thereafter. See USE_NUMPY_TERMINAL_CHECK above.
+        self._check_terminal_impl = (
+            self._check_terminal_batched if USE_NUMPY_TERMINAL_CHECK else self._check_terminal_looped
+        )
 
         self._set_terminal_conditions(self.runways)
 
@@ -311,12 +426,17 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
             if not still_active:
                 break
             bs.sim.step()
-            for slot in list(still_active):
+            active_list = list(still_active)
+            for slot in active_list:
                 idx = idxs[slot]
                 self.simt[slot] += bs.sim.simdt
                 self._update_reward(slot, idx)
-                term, trunc = self._check_terminal(slot, idx)
+
+            term_trunc = self._check_terminal_impl(active_list, idxs)
+            for slot in active_list:
+                term, trunc = term_trunc[slot]
                 if term or trunc:
+                    idx = idxs[slot]
                     terminated[slot] = term
                     truncated[slot] = trunc
                     frozen_obs[slot] = self._get_obs_single(slot, idx)
@@ -594,34 +714,41 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
             return 1.0 - (abs_x / RTA_TOLERANCE) ** 2
         return 0.0
 
+    def _get_shape_path(self, name: str) -> Path:
+        cached = self._shape_path_cache.get(name)
+        if cached is None:
+            coords = bs.tools.areafilter.basic_shapes[name].coordinates
+            cached = Path(np.reshape(coords, (-1, 2)))
+            self._shape_path_cache[name] = cached
+        return cached
+
     def _check_terminal(self, slot: int, idx: int) -> Tuple[bool, bool]:
-        shapes = bs.tools.areafilter.basic_shapes
         lat, lon = float(bs.traf.lat[idx]), float(bs.traf.lon[idx])
         line_ac = Path(np.array([[self.prev_lat[slot], self.prev_lon[slot]], [lat, lon]]))
         self.prev_lat[slot] = lat
         self.prev_lon[slot] = lon
 
         rwy = self.current_runway[slot]
-        target_sink = Path(np.reshape(shapes[f"SINK{rwy}"].coordinates, (-1, 2)))
+        target_sink = self._get_shape_path(f"SINK{rwy}")
         if target_sink.intersects_path(line_ac):
             self.segment_reward[slot] += 10.0 * self._rta_penalty_mult(slot)
             self.death_cause[slot] = "success"
             return True, False
 
-        target_restrict = Path(np.reshape(shapes[f"RESTRICT{rwy}"].coordinates, (-1, 2)))
+        target_restrict = self._get_shape_path(f"RESTRICT{rwy}")
         if target_restrict.intersects_path(line_ac):
             self.segment_reward[slot] += -1.0
             self.death_cause[slot] = "restrict"
             return True, False
 
         for other_rwy in self.non_overlapping_runways[slot]:
-            other_sink = Path(np.reshape(shapes[f"SINK{other_rwy}"].coordinates, (-1, 2)))
+            other_sink = self._get_shape_path(f"SINK{other_rwy}")
             if other_sink.intersects_path(line_ac):
                 self.segment_reward[slot] += -1.0
                 self.death_cause[slot] = "wrong_runway"
                 return True, False
 
-            other_restrict = Path(np.reshape(shapes[f"RESTRICT{other_rwy}"].coordinates, (-1, 2)))
+            other_restrict = self._get_shape_path(f"RESTRICT{other_rwy}")
             if other_restrict.intersects_path(line_ac):
                 self.segment_reward[slot] += -1.0
                 self.death_cause[slot] = "restrict"
@@ -639,6 +766,152 @@ class MultiAgentPathPlanningGoalEnv(gym.Env):
             return False, True
 
         return False, False
+
+    def _check_terminal_looped(
+        self, slots: List[int], idxs: Dict[int, int]
+    ) -> Dict[int, Tuple[bool, bool]]:
+        """Same interface as _check_terminal_batched (one call per tick,
+        covering every active slot) but delegates to the original per-slot,
+        per-shape matplotlib.path.Path.intersects_path loop -- the USE_NUMPY_
+        TERMINAL_CHECK=False path, kept for A/B comparison and rollback."""
+        return {slot: self._check_terminal(slot, idxs[slot]) for slot in slots}
+
+    def _build_batch_shapes(self) -> None:
+        """One-time (lazy, like _get_shape_path) construction of the
+        vectorized geometry inputs for _check_terminal_batched: every
+        SINK{rwy}/RESTRICT{rwy} shape's edges flattened into one array per
+        test type (segment-crossing edges, point-in-polygon closing edges),
+        plus a per-runway priority-ordered list mirroring _check_terminal's
+        own sink -> restrict -> other-runway short-circuit order (built from
+        _compute_non_overlapping_runways, the same deterministic function
+        that populates self.non_overlapping_runways per slot -- so the order
+        here is guaranteed identical to what a per-slot call would use)."""
+        if self._batch_shapes_built:
+            return
+
+        shape_names: List[str] = []
+        for rwy in self.runways:
+            shape_names.append(f"SINK{rwy}")
+            shape_names.append(f"RESTRICT{rwy}")
+        shape_index = {name: i for i, name in enumerate(shape_names)}
+        polys = [self._get_shape_path(name).vertices for name in shape_names]
+
+        open_starts, open_ends, open_group_ids = [], [], []
+        for gi, poly in enumerate(polys):
+            open_starts.append(poly[:-1])
+            open_ends.append(poly[1:])
+        open_edge_starts = np.concatenate(open_starts, axis=0)
+        open_edge_ends = np.concatenate(open_ends, axis=0)
+        open_counts = np.array([len(p) - 1 for p in polys])
+        open_boundaries = np.concatenate([[0], np.cumsum(open_counts)[:-1]])
+
+        close_starts, close_ends = [], []
+        for poly in polys:
+            close_starts.append(poly)
+            close_ends.append(np.roll(poly, -1, axis=0))
+        close_edge_starts = np.concatenate(close_starts, axis=0)
+        close_edge_ends = np.concatenate(close_ends, axis=0)
+        close_counts = np.array([len(p) for p in polys])
+        close_boundaries = np.concatenate([[0], np.cumsum(close_counts)[:-1]])
+
+        self._batch_open_ax = open_edge_starts[None, :, 0]
+        self._batch_open_ay = open_edge_starts[None, :, 1]
+        self._batch_open_bx = open_edge_ends[None, :, 0]
+        self._batch_open_by = open_edge_ends[None, :, 1]
+        self._batch_open_boundaries = open_boundaries
+
+        self._batch_close_ax = close_edge_starts[None, :, 0]
+        self._batch_close_ay = close_edge_starts[None, :, 1]
+        self._batch_close_bx = close_edge_ends[None, :, 0]
+        self._batch_close_by = close_edge_ends[None, :, 1]
+        self._batch_close_boundaries = close_boundaries
+
+        self._priority_order_by_runway: Dict[str, List[Tuple[int, str]]] = {}
+        for rwy in self.runways:
+            order = [
+                (shape_index[f"SINK{rwy}"], "success"),
+                (shape_index[f"RESTRICT{rwy}"], "restrict"),
+            ]
+            for other_rwy in self._compute_non_overlapping_runways(rwy):
+                order.append((shape_index[f"SINK{other_rwy}"], "wrong_runway"))
+                order.append((shape_index[f"RESTRICT{other_rwy}"], "restrict"))
+            self._priority_order_by_runway[rwy] = order
+
+        self._batch_shapes_built = True
+
+    def _check_terminal_batched(
+        self, slots: List[int], idxs: Dict[int, int]
+    ) -> Dict[int, Tuple[bool, bool]]:
+        """Batched replacement for calling _check_terminal once per slot:
+        tests every active aircraft's tick movement against every runway's
+        SINK/RESTRICT shape in ONE vectorized call (see _filled_hits_batch),
+        then walks each aircraft's own priority-ordered shape list (built in
+        _build_batch_shapes) to pick the first hit -- identical short-circuit
+        semantics to _check_terminal's sequential if-return chain, just with
+        the underlying per-shape test batched instead of looped."""
+        self._build_batch_shapes()
+
+        n = len(slots)
+        p1s = np.empty((n, 2))
+        p2s = np.empty((n, 2))
+        for i, slot in enumerate(slots):
+            idx = idxs[slot]
+            lat, lon = float(bs.traf.lat[idx]), float(bs.traf.lon[idx])
+            p1s[i] = (self.prev_lat[slot], self.prev_lon[slot])
+            p2s[i] = (lat, lon)
+            self.prev_lat[slot] = lat
+            self.prev_lon[slot] = lon
+
+        hits = _filled_hits_batch(
+            p1s, p2s,
+            self._batch_open_ax, self._batch_open_ay, self._batch_open_bx, self._batch_open_by,
+            self._batch_open_boundaries,
+            self._batch_close_ax, self._batch_close_ay, self._batch_close_bx, self._batch_close_by,
+            self._batch_close_boundaries,
+        )
+
+        results: Dict[int, Tuple[bool, bool]] = {}
+        for i, slot in enumerate(slots):
+            rwy = self.current_runway[slot]
+            winner = None
+            for shape_idx, label in self._priority_order_by_runway[rwy]:
+                if hits[i, shape_idx]:
+                    winner = label
+                    break
+
+            if winner == "success":
+                self.segment_reward[slot] += 10.0 * self._rta_penalty_mult(slot)
+                self.death_cause[slot] = "success"
+                results[slot] = (True, False)
+                continue
+            if winner == "restrict":
+                self.segment_reward[slot] += -1.0
+                self.death_cause[slot] = "restrict"
+                results[slot] = (True, False)
+                continue
+            if winner == "wrong_runway":
+                self.segment_reward[slot] += -1.0
+                self.death_cause[slot] = "wrong_runway"
+                results[slot] = (True, False)
+                continue
+
+            if self.simt[slot] >= MAX_TIME:
+                self.segment_reward[slot] += -1.0
+                self.death_cause[slot] = "timeout"
+                results[slot] = (False, True)
+                continue
+
+            lat, lon = p2s[i]
+            dis_origin = bs.tools.geo.kwikdist(SCHIPHOL[0], SCHIPHOL[1], lat, lon) * NM2KM
+            if dis_origin > MAX_DISTANCE * 1.05:
+                self.segment_reward[slot] += -1.0
+                self.death_cause[slot] = "out_of_bounds"
+                results[slot] = (False, True)
+                continue
+
+            results[slot] = (False, False)
+
+        return results
 
     # ------------------------------------------------------------------ #
     # Action

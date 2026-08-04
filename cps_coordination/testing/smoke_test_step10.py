@@ -45,7 +45,7 @@ import os
 import shutil
 import tempfile
 
-from cps_coordination.testing.run_batch_eval import _DEFAULT_CONFIG, _load_yaml, run_sweep
+from cps_coordination.testing.run_batch_eval import _DEFAULT_CONFIG, _build_parser, run_sweep
 from cps_coordination.testing.cps_metrics_offline import (
     load_recat_matrix,
     load_telemetry,
@@ -74,29 +74,29 @@ def _find_pretrained_run_id() -> str:
 
 
 def _build_smoke_args(run_id: str, save_path_root: str) -> argparse.Namespace:
-    defaults = _load_yaml(_DEFAULT_CONFIG)
-    model_d = defaults.get("model", {})
-    return argparse.Namespace(
-        run_id=run_id,
-        config=_DEFAULT_CONFIG,
-        episodes=M_EPISODES,
-        k_cps_sweep=K_CPS_SWEEP,
-        mode_sweep=MODE_SWEEP,
-        fairness_weight_sweep=FAIRNESS_WEIGHT_SWEEP,
-        disable_cross_cycle_runway_seeding=False,
-        max_concurrent_aircraft=MAX_CONCURRENT_AIRCRAFT,
-        total_arrivals_per_episode=TOTAL_ARRIVALS_PER_EPISODE,
-        spawn_window_s=SPAWN_WINDOW_S,
-        delta_t_plan=model_d.get("delta_t_plan", 120),
-        delta_update=model_d.get("delta_update", 1.0),
-        runways=None,
-        eta_surrogate_path=model_d.get("eta_surrogate_path"),
-        save_path_root=save_path_root,
-        chunk_size=250,
-        seed_base=0,
-        no_fresh_start=False,
-        log_every=5,
-    )
+    """Built via run_batch_eval's own argument parser (parsing a synthetic
+    argv of just the fields this smoke test cares to override) rather than
+    a hand-built argparse.Namespace -- the latter silently broke twice in
+    one session (missing --episode-id-offset, then missing --resume)
+    every time a new flag was added to run_batch_eval.py, since nothing
+    forced it to stay in sync. Parsing through the real parser means every
+    other flag (present now or added later) gets its real, correct
+    default automatically."""
+    argv = [
+        "--run-id", run_id,
+        "--config", _DEFAULT_CONFIG,
+        "--episodes", str(M_EPISODES),
+        "--k-cps-sweep", *[str(k) for k in K_CPS_SWEEP],
+        "--mode-sweep", *MODE_SWEEP,
+        "--fairness-weight-sweep", *[str(fw) for fw in FAIRNESS_WEIGHT_SWEEP],
+        "--max-concurrent-aircraft", str(MAX_CONCURRENT_AIRCRAFT),
+        "--total-arrivals-per-episode", str(TOTAL_ARRIVALS_PER_EPISODE),
+        "--spawn-window-s", str(SPAWN_WINDOW_S),
+        "--save-path-root", save_path_root,
+        "--chunk-size", "250",
+        "--log-every", "5",
+    ]
+    return _build_parser().parse_args(argv)
 
 
 def main() -> None:
