@@ -99,9 +99,14 @@ env:
 # inventing a dataclass that doesn't fit the framework.
 # ──────────────────────────────────────────────────────────────────────────────
 cps_eval:
-  n_aircraft_per_episode: 5       # Legacy single-wave field, kept for
-                                   # CPSCoordinationExperiment.evaluate() compat.
-                                   # run_batch_eval.py uses max_concurrent_aircraft/
+  n_aircraft_per_episode: 5       # Legacy single-wave field. Dead in this file:
+                                   # CPSCoordinationExperiment._get_n_aircraft()
+                                   # hardcodes a read from cps_base.yaml regardless
+                                   # of which --config is passed, so this copy is
+                                   # never read even under evaluate(). Kept only
+                                   # so this file documents the same cps_eval:
+                                   # shape as cps_base.yaml. run_batch_eval.py
+                                   # uses max_concurrent_aircraft/
                                    # total_arrivals_per_episode below instead.
   max_concurrent_aircraft: 10     # Maximum simultaneously active aircraft ("slots").
                                    # Raised from 5 -> 10 (2x) for higher per-episode

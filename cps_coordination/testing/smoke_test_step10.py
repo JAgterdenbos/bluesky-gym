@@ -1,12 +1,12 @@
 """
 cps_coordination/testing/smoke_test_step10.py
 ------------------------------------------------
-Capped local verification for Phase III roadmap Step 10 (M=10,000
+Capped local verification for Phase III roadmap Step 10 (M=2,000
 scale-up config/script generation) -- runs a small M=10 sweep through
 ``run_batch_eval.py``'s real sweep machinery to sanity-check the
 generated scripts before anything is handed off to a cluster/runner.
 
-This is NOT a stand-in for the M=10,000 production run (see
+This is NOT a stand-in for the M=2,000 production run (see
 ``.claude/step10_execution_and_data_collection_plan.md`` for that). Its
 job is narrower and specific: ``max_concurrent_aircraft=5,
 total_arrivals_per_episode=10, spawn_window_s=1800.0`` deliberately
@@ -159,7 +159,7 @@ def main() -> None:
                 f"  FAIL: max successful actual_landing_time ({overall_max_landing_time:.1f}s) "
                 f"did not exceed spawn_window_s ({SPAWN_WINDOW_S}s) -- this is the exact "
                 f"signature of the pre-fix local/global clock bug (landing times never "
-                f"reflect spawn offset). Investigate before trusting the M=10,000 config."
+                f"reflect spawn offset). Investigate before trusting the M=2,000 config."
             )
     finally:
         print(f"\nCleaning up scratch dir: {save_path_root}")

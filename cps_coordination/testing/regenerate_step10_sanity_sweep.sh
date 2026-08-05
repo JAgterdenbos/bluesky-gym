@@ -17,11 +17,13 @@
 # numbers change).
 #
 # Reconstructed from cps_coordination/testing/run_batch_eval.py's CLI +
-# cps_coordination/configs/cps_scale_10k.yaml's cps_eval: defaults (the same
-# max_concurrent_aircraft/total_arrivals_per_episode/spawn_window_s the M=10,000
-# launch config uses, confirmed by direct inspection of the collected Parquet:
-# 5 concurrent slots, 10 arrivals/episode, spawn_window_s=0.0 for THIS sweep
-# specifically -- the M=10,000 launch config instead uses spawn_window_s=1800.0,
+# cps_coordination/configs/cps_scale_10k.yaml's cps_eval: defaults (this
+# sweep predates the density rescale documented in
+# .claude/plans/step10_execution_and_data_collection_plan.md -- it used the
+# pre-rescale max_concurrent_aircraft/total_arrivals_per_episode/spawn_window_s
+# values: 5 concurrent slots, 10 arrivals/episode, spawn_window_s=0.0 for
+# THIS sweep specifically -- the current M=2,000 launch config instead uses
+# max_concurrent_aircraft=10/total_arrivals_per_episode=25/spawn_window_s=2400.0,
 # see cps_scale_10k.yaml). The exact --run-id (frozen worker checkpoint) used
 # for the original 2026-08-03 run is not recorded in any committed doc/config
 # found during this analysis -- fill in the correct one below before running.

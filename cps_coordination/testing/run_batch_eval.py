@@ -1,7 +1,7 @@
 """
 cps_coordination/testing/run_batch_eval.py
 -------------------------------------------
-Production batch runner for the M=10,000-episode CPS coordination
+Production batch runner for the M=2,000-episode CPS coordination
 scale-up evaluation (Phase III roadmap Step 10). Wraps the same
 CPSCoordinationExperiment / CPSManager / MultiAgentPathPlanningGoalEnv
 machinery ``run_cps_eval.py`` already exercises for a single
@@ -13,7 +13,7 @@ machinery ``run_cps_eval.py`` already exercises for a single
     env/model/surrogate/recat-matrix across the whole sweep (only cheap
     objects -- CPSManager pairs and Parquet collectors -- are rebuilt per
     combination) since BlueSky init + frozen-SAC load are the expensive
-    parts and this matters at 6 x M=10,000 scale;
+    parts and this matters at 6 x M=2,000 scale;
   - SIGINT/SIGTERM handling that flushes and closes the in-flight combo's
     Parquet streams cleanly before exiting, rather than corrupting a
     partial chunk;
@@ -104,7 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Batch CPS coordination evaluation: sweep k_cps x "
             "runway_assignment_mode x fairness_weight, three-pass (CPS + static + solo) "
             "per episode, streaming telemetry to Parquet. Production driver "
-            "for the M=10,000 scale-up (Phase III roadmap Step 10)."
+            "for the M=2,000 scale-up (Phase III roadmap Step 10)."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -114,7 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", type=str, default=_DEFAULT_CONFIG,
                    help="YAML config providing defaults for the flags below "
                         "(cps_scale_10k.yaml's model:/cps_eval:/logging: sections).")
-    p.add_argument("--episodes", type=int, default=session_d.get("eval_episodes", 10000),
+    p.add_argument("--episodes", type=int, default=session_d.get("eval_episodes", 2000),
                    help="Episodes (M) per (k_cps, mode) combination.")
     p.add_argument("--k-cps-sweep", type=int, nargs="+", default=[0, 1, 3],
                    help="k_cps values to sweep.")

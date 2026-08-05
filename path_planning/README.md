@@ -10,7 +10,7 @@ It is a `uv` workspace member (`path-planning` package) that depends on `bluesky
 path_planning/
 ├── main.py                  CLI entry point (train / evaluate / enjoy / rta subcommands)
 ├── experiment/
-│   ├── base.py               PathPlanningExperiment + its Model/Env config subclasses
+│   ├── base.py               BasePathPlanningExperiment + its Model/Env config subclasses
 │   ├── base_critic.py         BaseCriticExperiment / CriticProbe for critic ablations
 │   └── registry.py           PathPlanningRegistry (per-run intent/priority/quality tracking)
 ├── rta/                      RTA goal-sampler pipeline
@@ -30,7 +30,7 @@ path_planning/
 - `PathPlanningModelConfig` — adds `net_arch`, `policy_kwargs`, and HER-specific fields on top of `bluesky_gym.experiment.ModelConfig`
 - `PathPlanningEnvKwargsConfig` — `gym.make()` kwargs: `action_mode`, `use_rta`, `runways`
 - `PathPlanningEnvConfig` — wraps the above, sets `env_name`, `group_key`, `success_key`
-- `PathPlanningExperiment` (subclass of `bluesky_gym.experiment.BaseExperiment`) — implements `make_env`, `make_model`, and the `MetricExtractor`
+- `BasePathPlanningExperiment` (subclass of `bluesky_gym.experiment.BaseExperiment`) — implements `make_env`, `make_model`, and the `MetricExtractor`
 
 `PathPlanningRegistry` (subclass of `bluesky_gym.experiment.BaseRegistry`) tracks per-run `intent`, `priority`, `status`, and `quality` in a CSV; per-run hyperparameters live in each run's `config.yaml` instead.
 
@@ -105,7 +105,7 @@ python path_planning/main.py --help
 - `configs/long_run.yaml` — 500k timestep SAC+HER config
 - `configs/main_model/spatial.yaml` — phase-1 (spatial): SAC no-HER, 500k timesteps, 500 eval episodes
 - `configs/main_model/temporal.yaml` — phase-2 (temporal): resumes from the phase-1 pretrained run, adds the fitted RTA sampler
-- `configs/spatial_comparison/` and `configs/temporal_comparison/` — HER × environment-variant ablation grids (`her`, `her_hdg`, `no_her`, `no_her_hdg`, with an `extended`-duration variant under `temporal_comparison/`)
+- `configs/spatial_comparison/` and `configs/temporal_comparison/` — HER × environment-variant ablation grids (`her`, `her_hdg`, `no_her`, `no_her_hdg`)
 
 Priority chain: dataclass defaults → YAML config → CLI flags.
 
@@ -119,7 +119,7 @@ Priority chain: dataclass defaults → YAML config → CLI flags.
 
 This package implements the tactical layer of the thesis's Goal-Conditioned Hierarchical Reinforcement Learning (GCHRL) framework for the Trajectory Based Aircraft Landing Problem (TBALP):
 
-- **`experiment/base.py` (`PathPlanningExperiment`, SAC + HER)** implements the paper's **"4D-Worker"** — the tactical RL agent trained with Hindsight Experience Replay (HER) on Soft Actor-Critic (SAC) via Stable-Baselines3. The paper evaluates it using metrics computed from the fields this package logs: RTA tracking error (ε_RTA), path tortuosity (T), spatial visitation entropy (H), and success rate (S).
+- **`experiment/base.py` (`BasePathPlanningExperiment`, SAC + HER)** implements the paper's **"4D-Worker"** — the tactical RL agent trained with Hindsight Experience Replay (HER) on Soft Actor-Critic (SAC) via Stable-Baselines3. The paper evaluates it using metrics computed from the fields this package logs: RTA tracking error (ε_RTA), path tortuosity (T), spatial visitation entropy (H), and success rate (S).
 - **`configs/main_model/spatial.yaml` then `temporal.yaml`** implement the paper's **"Two-Stage Spatial-to-Spatial-Temporal Training Pipeline"**: phase 1 (spatial) trains the worker without RTA goals; phase 2 (temporal) resumes from that checkpoint and adds RTA-conditioned goals sampled by the fitted DTG sampler.
 - **`rta/` (the DTG/Distance-To-Go sampler pipeline, `ExtraTreesSampler` / `SamplerRegistry`)** implements the paper's **"DTG Sampler"** — modeled with an Extra Trees (ET) Regressor (Geurts et al.) and validated against competing sampler families (KNN, linear, ridge, lasso, MLP, gradient-boosted, etc. in `rta/testing/samplers/`) using the Diebold-Mariano and Wilcoxon signed-rank tests. The paper documents this as a **future-proofing** choice — modeling distance-to-go rather than the more constrained time-to-go, so the same sampler adapts to variable aircraft speed and wind — and notes the memory-cost trade-off between a 100-estimator and a slimmer 15-estimator forest for deployment.
 - The paper also uses this DTG sampler's architecture as an **(explicitly flagged, unvalidated) analogy** for `cps_coordination`'s `ETASurrogate` — see that package's README for the corresponding "ETA Surrogate Model" mapping.

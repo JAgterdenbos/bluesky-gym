@@ -16,11 +16,12 @@ cps_coordination/
 ├── experiments/
 │   ├── config.py                      CPSModelConfig / CPSEnvConfig / CPSEnvKwargsConfig
 │   └── coordination_baseline.py       CPSCoordinationExperiment + CPSCoordinationRegistry
-├── testing/                          validation & offline surrogate-training scripts
+├── testing/                          validation, offline surrogate-training, and Step 10 batch-eval scripts
 ├── configs/
-│   └── cps_base.yaml                  default experiment config (k-CPS params, RECAT-EU matrix, eval params)
+│   ├── cps_base.yaml                  default experiment config (k-CPS params, RECAT-EU matrix, eval params)
+│   └── cps_scale_10k.yaml             Step 10 scale-up config (rolling arrival stream, higher aircraft density)
 ├── models/                           fitted ETASurrogate .pkl artifacts
-└── figures/                          output figures from surrogate_analyse.py
+└── figures/                          output figures from surrogate_analyse.py / step10_deep_analysis.py
 ```
 
 ## Core coordination algorithm — `CPSManager`
@@ -69,7 +70,17 @@ Training pipeline (`testing/train_surrogate.py`):
 
 - **`validate_multiagent_env.py`** — regression gates for `MultiAgentPathPlanningGoalEnv` itself: (1) at `max_concurrent_aircraft=1, n_aircraft_total=1` it must reproduce `PathPlanningGoalEnv-v0` bit-for-bit given the same seed/actions; (2) at `max_concurrent_aircraft=2, n_aircraft_total=3` it verifies the acid→traffic-index remap survives a mid-episode delete/respawn with no observation "jumping" between aircraft.
 - **`validate_cps_pipeline.py`** — exercises the real `CPSCoordinationExperiment` evaluation pipeline end-to-end with an actual frozen SAC worker: confirms TTA injection changes worker behaviour vs. an uncoordinated control run (k=0 FCFS), and that every consecutive landing pair on a forced-shared runway respects RECAT-EU separation (k>0, `N_a > 2`).
-- **`train_surrogate.py`** / **`surrogate_analyse.py`** — see above.
+- **`train_surrogate.py`** / **`surrogate_analyse.py`** / **`validate_surrogate.py`** — see above.
+
+### Step 10 scale-up evaluation path
+
+The production evaluation flow for the Phase III Step 10 scale-up (rolling arrival stream, `configs/cps_scale_10k.yaml`) lives in `testing/`, layered on top of the validation scripts above:
+
+- **`run_batch_eval.py`** — production batch driver: sweeps `k_cps` × `runway_assignment_mode` × `fairness_weight`, streaming telemetry to Parquet via `telemetry.py`.
+- **`run_step10_scale10k.sh`** — the actual launch script wrapping `run_batch_eval.py` with the current production combo grid and per-mode `fairness_weight` values.
+- **`smoke_test_step10.py`** — capped local sanity check of `run_batch_eval.py`'s real sweep machinery before a full/cluster run.
+- **`merge_shards.py`** — merges sharded (`SHARDS`/`SHARD_INDEX`-split) Parquet output back into the unsharded per-combo layout.
+- **`cps_metrics_offline.py`** → **`summarize_batch_sweep.py`** → **`step10_deep_analysis.py`** → **`analyze_fairness_weight_offline.py`** — a layered offline-metrics pipeline: base per-combo metric recomputation, sweep-wide tabulation, deep collision/stall/tortuosity diagnostics, and the `fairness_weight` calibration analysis, each building on the one before it rather than duplicating it.
 
 ## CLI usage
 

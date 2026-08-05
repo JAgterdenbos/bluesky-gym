@@ -306,7 +306,7 @@ class CPSCoordinationExperiment(BaseExperiment):
         defaults to ``n_aircraft`` (one "wave" of N_a aircraft per episode,
         matching the original single-wave-per-episode semantics used by
         every roadmap step through Step 9) — pass a larger value to get a
-        genuine rolling arrival stream (Step 10's M=10,000 scale-up config).
+        genuine rolling arrival stream (Step 10's M=2,000 scale-up config).
         ``spawn_window_s`` defaults to ``0.0`` (every arrival eligible from
         time zero, i.e. today's instant-spawn/instant-refill behavior).
 

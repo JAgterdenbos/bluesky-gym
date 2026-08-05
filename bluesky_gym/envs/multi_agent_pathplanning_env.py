@@ -111,9 +111,10 @@ from bluesky_gym.envs.pathplanning_goal_env import (
 
 # Kill-switch between the two _check_terminal implementations, both kept in
 # this file: True (default) uses _check_terminal_batched (one vectorized
-# numpy call per tick across all active aircraft, ~2.8x faster -- see
-# cps_coordination/testing/prototype_numpy_path_check.py for the validation
-# this was ported from); False uses the original per-slot, per-shape
+# numpy call per tick across all active aircraft, ~2.8x faster -- ported
+# from a prototype/validation harness, see git history for
+# cps_coordination/testing/prototype_numpy_path_check.py, deleted once its
+# derivation was merged here); False uses the original per-slot, per-shape
 # matplotlib.path.Path.intersects_path loop (_check_terminal). Both were
 # verified bit-for-bit equivalent via validate_multiagent_env.py and a
 # metrics-identical M=30/8-combo compare -- toggle this if you need to A/B
@@ -126,14 +127,15 @@ USE_NUMPY_TERMINAL_CHECK = True
 # matching matplotlib.path.Path.intersects_path's default filled=True
 # semantics -- reverse-engineered and validated to bit-exact agreement
 # against real matplotlib across 100k+ random + adversarial cases and
-# 2000+ batched multi-shape/multi-aircraft ticks; see
+# 2000+ batched multi-shape/multi-aircraft ticks; see git history for
 # cps_coordination/testing/prototype_numpy_path_check.py for the full
-# derivation/validation this was ported from). Tests one aircraft-tick's
-# tiny movement segment against ALL of a runway pool's SINK/RESTRICT
-# shapes in one vectorized call instead of one matplotlib call per shape
-# per aircraft -- see _check_terminal_batched below for how the result
-# maps back to per-aircraft death_cause/reward, preserving the exact
-# sink > restrict > other-runway priority order _check_terminal used.
+# derivation/validation this was ported from, deleted once merged here).
+# Tests one aircraft-tick's tiny movement segment against ALL of a runway
+# pool's SINK/RESTRICT shapes in one vectorized call instead of one
+# matplotlib call per shape per aircraft -- see _check_terminal_batched
+# below for how the result maps back to per-aircraft death_cause/reward,
+# preserving the exact sink > restrict > other-runway priority order
+# _check_terminal used.
 # --------------------------------------------------------------------- #
 
 def _cross_batch(ox, oy, ux, uy, vx, vy):
