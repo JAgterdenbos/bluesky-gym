@@ -108,16 +108,33 @@ class CPSModelConfig(ModelConfig):
 
     fairness_weight: float = 0.0
     """Weight on the slack-protection term in ``CPSManager``'s k-CPS window
-    selection rule (``_apply_k_cps_constraint``). ``0.0`` (default)
-    reproduces exact FCFS ordering -- proven total-delay-optimal under
-    today's wake-homogeneity assumption (pre-Step-10 audit §2.2), so this
-    is a strict, opt-in generalisation of the pre-fix no-op k-CPS behaviour,
-    not a change to any already-validated baseline. ``> 0.0`` biases k-CPS
-    window selection to prioritise aircraft with less remaining slack (and
-    any already-stalled aircraft) for earlier, lower-imposed-delay
-    scheduling positions -- a genuine, k-sensitive ablation axis even under
-    wake homogeneity (see ``cps_manager.py``'s ``_apply_k_cps_constraint``
-    docstring for the full cost rule)."""
+    selection rule (``_apply_k_cps_constraint``). ``0.0`` (this dataclass
+    default) reproduces exact FCFS ordering -- proven total-delay-optimal
+    under today's wake-homogeneity assumption (pre-Step-10 audit §2.2), so
+    this is a strict, opt-in generalisation of the pre-fix no-op k-CPS
+    behaviour, not a change to any already-validated baseline. ``> 0.0``
+    biases k-CPS window selection to prioritise aircraft with less
+    remaining slack (and any already-stalled aircraft) for earlier,
+    lower-imposed-delay scheduling positions -- a genuine, k-sensitive
+    ablation axis even under wake homogeneity (see ``cps_manager.py``'s
+    ``_apply_k_cps_constraint`` docstring for the full cost rule).
+
+    The M=2,000 production launch does NOT use this dataclass default --
+    it deploys a **mode-specific** calibrated value
+    (``run_step10_scale10k.sh``'s ``STATIC_FW``/``DYNAMIC_FW``, currently
+    1.0/0.5), derived from a local Stage 1/2 sweep (see
+    ``cps_coordination/testing/analyze_fairness_weight_offline.py`` and
+    ``cps_coordination/data/fairness_weight_calibration_sweep/``). The
+    calibration had to be run with the ratchet ON
+    (``enable_cross_cycle_runway_seeding=True``) to get any signal at all
+    -- the production ratchet-OFF default drives ``stall_detected`` to
+    ~0% on its own at the launch density, leaving fairness_weight almost
+    nothing to protect against there; the calibrated value is a near-no-op
+    in production but a genuine safety net for whatever residual
+    contention does occur. ``0.0`` remains the dataclass default here
+    since it's the correct value for any other consumer of
+    ``CPSModelConfig`` (e.g. ad-hoc single-run scripts) that doesn't
+    explicitly opt into the calibrated production settings."""
 
     freeze_remaining_time_budget: bool = False
     """Test A (pre-Step-10 audit §1.2/§1.4, TTA feedback-loop falsification):

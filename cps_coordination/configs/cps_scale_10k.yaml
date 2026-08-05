@@ -1,7 +1,10 @@
 # cps_coordination/configs/cps_scale_10k.yaml
 # ----------------------------------------
-# Production configuration for the M=10,000-episode CPS coordination
-# scale-up evaluation (Phase III roadmap Step 10).
+# Production configuration for the M=2,000-episode CPS coordination
+# scale-up evaluation (Phase III roadmap Step 10 — rescaled from the
+# original M=10,000/low-density config toward higher per-episode traffic
+# density and fewer episodes; see cps_eval: below and the "Density
+# rescale" section of step10_execution_and_data_collection_plan.md).
 #
 # This is a config + launch-script generation step only — it is NOT meant
 # to be run locally end-to-end. Use
@@ -15,15 +18,25 @@
 #
 # Note on scope: unlike cps_base.yaml's `model.k_cps`/`model.
 # runway_assignment_mode`, this config intentionally leaves those two
-# fields (plus `model.fairness_weight`) at their CPSModelConfig defaults —
-# run_batch_eval.py sweeps all three per the --k-cps-sweep/--mode-sweep/
-# --fairness-weight-sweep CLI flags (default 0/1/3 x static/dynamic x
-# [0.0], 6 combinations) rather than fixing a single value here.
+# fields at their CPSModelConfig defaults — run_batch_eval.py sweeps both
+# per the --k-cps-sweep/--mode-sweep CLI flags (k_cps in {0,3} x mode in
+# {static,dynamic}, 4 combinations). `model.fairness_weight` is NOT fixed
+# here, deliberately: the Stage 1/2 calibration sweep (see
+# cps_coordination/testing/analyze_fairness_weight_offline.py and
+# cps_coordination/data/fairness_weight_calibration_sweep/) found a
+# genuine, well-resolved MODE-SPECIFIC optimum (static≈1.0, dynamic≈0.5,
+# not a single shared value) -- a single scalar field here can't represent
+# that. The actual production launch applies the calibrated per-mode
+# values via run_step10_scale10k.sh's STATIC_FW/DYNAMIC_FW (currently
+# 1.0/0.5), one run_batch_eval.py invocation per mode. `fairness_weight`
+# below stays at the CPSModelConfig dataclass default (0.0, plain FCFS)
+# for any non-sweep, non-launch-script consumer of this YAML.
 
 model:
   # CPS coordination hyper-parameters. k_cps / runway_assignment_mode /
-  # fairness_weight are NOT set here - run_batch_eval.py overrides them
-  # per sweep combination.
+  # fairness_weight are NOT set here - run_batch_eval.py (via
+  # run_step10_scale10k.sh) overrides them per sweep combination, with
+  # fairness_weight applied per-mode (see note above, not a single value).
   delta_t_plan: 120               # Aligned with ACTION_TIME=120s (avoids the
                                    # CPSModelConfig.validate() cadence-mismatch warning)
   delta_update: 1.0               # Minimum TTA change delta_update to push a worker update (s)
@@ -37,7 +50,10 @@ session:
   total_timesteps: 0              # No training steps; evaluation-only experiment
   do_train: false
   do_evaluate: true
-  eval_episodes: 10000            # M = 10,000 per (k_cps, runway_assignment_mode) combination
+  eval_episodes: 2000             # M = 2,000 per (k_cps, runway_assignment_mode) combination.
+                                   # Reduced from 10,000 in favor of higher per-episode traffic
+                                   # density (see cps_eval: below) — see the "Density rescale"
+                                   # section of step10_execution_and_data_collection_plan.md.
 
   # Point at a pre-trained path_planning run to use as the frozen worker policy.
   # Must be overridden at runtime - there is no default worker checkpoint baked
@@ -87,16 +103,26 @@ cps_eval:
                                    # CPSCoordinationExperiment.evaluate() compat.
                                    # run_batch_eval.py uses max_concurrent_aircraft/
                                    # total_arrivals_per_episode below instead.
-  max_concurrent_aircraft: 5      # Maximum simultaneously active aircraft ("slots")
-  total_arrivals_per_episode: 10  # Total arrivals generated per episode (rolling
+  max_concurrent_aircraft: 10     # Maximum simultaneously active aircraft ("slots").
+                                   # Raised from 5 -> 10 (2x) for higher per-episode
+                                   # runway contention/multi-agent interaction density
+                                   # -- see "Density rescale" in
+                                   # step10_execution_and_data_collection_plan.md.
+  total_arrivals_per_episode: 25  # Total arrivals generated per episode (rolling
                                    # arrival stream: > max_concurrent_aircraft means
-                                   # later arrivals spawn into slots as they free up)
-  spawn_window_s: 1800.0          # Each arrival's scheduled spawn time is drawn
+                                   # later arrivals spawn into slots as they free up).
+                                   # Raised from 10 -> 25 (2.5x, ratio to
+                                   # max_concurrent_aircraft goes 2:1 -> 2.5:1).
+  spawn_window_s: 2400.0          # Each arrival's scheduled spawn time is drawn
                                    # i.i.d. Uniform(0, spawn_window_s) at episode
                                    # reset (MultiAgentPathPlanningGoalEnv's
                                    # spawn_window_s param) - models arrivals
-                                   # entering the sector over a 30-minute window
-                                   # rather than all at once.
+                                   # entering the sector over a 40-minute window
+                                   # rather than all at once. Raised from 1800 ->
+                                   # 2400 (not held fixed) so arrival cadence still
+                                   # tightens (180s/arrival -> 96s/arrival) against
+                                   # the larger concurrent-slot pool above, rather
+                                   # than becoming degenerate.
   separation_tolerance_s: 5.0     # Slack (s) within which C_sep compliance is credited
   rta_tolerance_s: 60.0           # delta_t (Eq. recovery_rate): R_rec's RTA tolerance
   ripple_lag: 1                   # Lag for rho_ripple autocorrelation (always 1 per methodology)
