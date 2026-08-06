@@ -2,11 +2,13 @@
 cps_coordination/scripts/generate_paper_report.py
 -----------------------------------------------------
 Single consolidated script producing every LaTeX-ready table/figure the
-Phase III thesis chapter needs, per `.claude/plans/reporting_code_plan.md`
-(folded into `.claude/plans/phase3_cps_coordination_plan.md`'s dated session
-log once this script landed). One script, one output folder, per explicit
-user request -- every paper-facing artifact can be regenerated from a single
-command instead of being scattered across `cps_coordination/scripts/`.
+Phase III thesis chapter needs. Design history and decisions live in
+`.claude/plans/phase3_cps_coordination_plan.md`'s seventh-session section
+(the original `reporting_code_plan.md` this script implemented was folded
+in there and deleted once superseded). One script, one output folder, per
+explicit user request -- every paper-facing artifact can be regenerated
+from a single command instead of being scattered across
+`cps_coordination/scripts/`.
 
 Wraps, does not reimplement, four existing scripts:
   - cps_metrics_offline.py       (per-combo metric recomputation)
@@ -218,25 +220,54 @@ def build_delay_ripple_table(combo_rows: List[Dict[str, Any]]) -> str:
 
 # Groot et al. (`hierarchical_RL_arrival_draft.pdf`, "Autonomous air traffic
 # control with hierarchical reinforcement learning in real world scenarios",
-# groot2026model) Table 11 (total landing-interval violations by traffic
-# scenario, Base/SA/MA) and Table 12 (same, split 18R vs. 27 for MA) --
+# D.J. Groot, J. Ellerbroek, J.M. Hoekstra, groot2026model), Table 11 (p.18,
+# total landing-interval violations by traffic scenario, Base/SA/MA) and
+# Table 12 (pp.18-19, same metric, MA model only, split 18R vs. 27) --
 # see .claude/plans/phase3_cps_coordination_plan.md's sixth-session section
-# and .claude/plans/paper_update_plan.md item 3 ("fig:runway_load_balance
-# needs Groot et al.'s published per-runway numbers"). NOT YET POPULATED:
-# the source PDF wasn't available in the session that wrote this script --
-# ask the user to paste the exact Table 11/Table 12 values rather than
-# guessing (explicit instruction, do not fabricate). Until populated, the
-# figure renders CPS throughput only and annotates the missing panel.
+# and .claude/plans/paper_update_plan.md item 3. Transcribed 2026-08-06 from
+# values the user extracted via Gemini (both tables' cells reported as
+# clearly legible, no inferred/guessed values) and cross-checked here for
+# internal consistency: Table 11's MA row equals Table 12's 18R+27 sum in
+# every scenario (e.g. Medium: 51 == 50+1; Low: 9 == 9+0) -- a good sign the
+# transcription is accurate, not just plausible-looking.
 #
-# Expected shape once filled in (Table 12, MA model, violations by runway):
-#   GROOT_TABLE12_MA_VIOLATIONS_BY_RUNWAY = {
-#       "<density_or_scenario>": {"18R": <violations>, "27": <violations>},
-#       ...
-#   }
-# Explicitly a DIFFERENT metric from this codebase's Gamma_r (landing-
-# interval violations vs. throughput) -- label/caption must say so, never
-# overlay as if directly comparable.
-GROOT_TABLE12_MA_VIOLATIONS_BY_RUNWAY: Optional[Dict[str, Dict[str, float]]] = None
+# "Landing-interval violation" definition (Sec 5.4, p.15, quoted exactly):
+# "The landing interval is defined as the time between two consecutive
+# landings on the same runway, which should not exceed 50 s according to
+# Eurocontrol's Optimised Runway Occupancy Time Spacings for Arrivals [40]."
+# Explicitly a DIFFERENT metric from this codebase's Gamma_r (violation
+# count vs. throughput) -- label/caption must say so, never overlay as if
+# directly comparable.
+GROOT_VIOLATION_DEFINITION = (
+    "consecutive landings on the same runway $<$50s apart "
+    "(Eurocontrol Optimised ROT Spacings for Arrivals)"
+)
+
+# Table 11: total landing-interval violations by traffic scenario, all three
+# models (Base = non-learning baseline, SA = single-agent RL, MA = the
+# multi-agent hierarchical RL coordination system this codebase is compared
+# against). Not itself plotted in fig:runway_load_balance (no per-runway
+# split) -- rendered as a small reference table for the appendix instead.
+GROOT_TABLE11_VIOLATIONS_BY_METHOD: Dict[str, Dict[str, int]] = {
+    "Base": {"Synthetic (Low)": 1136, "Synthetic (Medium)": 2313, "Synthetic (High)": 3826,
+             "Historical (Jan)": 2009, "Historical (Mar)": 2065, "Historical (Jul)": 2093},
+    "SA":   {"Synthetic (Low)": 1488, "Synthetic (Medium)": 2889, "Synthetic (High)": 4127,
+             "Historical (Jan)": 2509, "Historical (Mar)": 2696, "Historical (Jul)": 2626},
+    "MA":   {"Synthetic (Low)": 9, "Synthetic (Medium)": 51, "Synthetic (High)": 131,
+             "Historical (Jan)": 58, "Historical (Mar)": 72, "Historical (Jul)": 64},
+}
+
+# Table 12: same metric, MA model only, split by runway -- the direct
+# comparison point for fig:runway_load_balance (shows the runway-overload
+# signature: 18R absorbs nearly all violations, 27 is nearly clean).
+GROOT_TABLE12_MA_VIOLATIONS_BY_RUNWAY: Optional[Dict[str, Dict[str, float]]] = {
+    "Synthetic (Low)": {"18R": 9, "27": 0},
+    "Synthetic (Medium)": {"18R": 50, "27": 1},
+    "Synthetic (High)": {"18R": 131, "27": 0},
+    "Historical (Jan)": {"18R": 58, "27": 0},
+    "Historical (Mar)": {"18R": 72, "27": 0},
+    "Historical (Jul)": {"18R": 64, "27": 0},
+}
 
 
 def build_runway_load_balance_figure(combo_rows: List[Dict[str, Any]], out_dir: Path) -> Path:
@@ -272,7 +303,12 @@ def build_runway_load_balance_figure(combo_rows: List[Dict[str, Any]], out_dir: 
         ax_groot.set_xticklabels(groot_runways)
         ax_groot.set_xlabel("Runway")
         ax_groot.set_ylabel("Landing-interval violations (Groot et al., MA)")
-        ax_groot.set_title("Groot et al. Table 12 (reference only --\nnot the same metric as $\\Gamma_r$)")
+        ax_groot.set_title(
+            "Groot et al. Table 12, MA model\n"
+            "(landing-interval violations, $<$50s gap --\n"
+            "reference only, NOT the same metric as $\\Gamma_r$)",
+            fontsize=10,
+        )
         ax_groot.legend(fontsize=7)
     else:
         print("WARNING: GROOT_TABLE12_MA_VIOLATIONS_BY_RUNWAY not populated -- "
@@ -286,6 +322,27 @@ def build_runway_load_balance_figure(combo_rows: List[Dict[str, Any]], out_dir: 
     fig.savefig(out_path, dpi=_DPI)
     plt.close(fig)
     return out_path
+
+
+def build_groot_table11_reference_table() -> str:
+    """Appendix reference table for Groot et al. Table 11 (Base/SA/MA, no
+    runway split -- not itself plotted in fig:runway_load_balance, which
+    needs Table 12's per-runway granularity, but transcribed per the plan's
+    explicit "transcribe both into the reference dict" instruction)."""
+    scenarios = list(next(iter(GROOT_TABLE11_VIOLATIONS_BY_METHOD.values())).keys())
+    out_rows = []
+    for method, row in GROOT_TABLE11_VIOLATIONS_BY_METHOD.items():
+        out_rows.append({"method": method, **{s: str(row[s]) for s in scenarios}})
+    df = pd.DataFrame(out_rows)
+    return _df_to_latex(
+        df,
+        caption="Groot et al., Table 11: total landing-interval violations "
+                f"({GROOT_VIOLATION_DEFINITION}) by traffic scenario, "
+                "Base/SA/MA models. Reference only -- landing-interval "
+                "violations are a different metric from this codebase's "
+                "$\\Gamma_r$ throughput, not directly comparable.",
+        label="tab:groot_table11_reference",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -418,12 +475,11 @@ def repoint_deep_analysis_figures(sweep_root: str, out_dir: Path) -> bool:
     """Attempts fig1-4 generation via step10_deep_analysis.py's own
     workstream3_stalling, confirmed compatible with the 4-combo production
     naming convention by a dry run against step10_verification_new_density_
-    final/ while building this script (see repoint_deep_analysis_figures's
-    docstring history in generate_paper_report.py's own commit / the
-    reporting_code_plan.md session note) -- fig4 needed a small fix
-    (see step10_deep_analysis.py's _pick_k3_combo) since it originally
-    hardcoded a "k3_{mode}_fw0" combo name that doesn't exist under the
-    per-mode-calibrated production fairness_weight layout.
+    final/ while building this script (see phase3_cps_coordination_plan.md's
+    seventh-session section) -- fig4 needed a small fix (see
+    step10_deep_analysis.py's _pick_k3_combo) since it originally hardcoded
+    a "k3_{mode}_fw0" combo name that doesn't exist under the per-mode-
+    calibrated production fairness_weight layout.
 
     Wrapped in try/except (not asserted unconditionally) -- this function's
     whole point per the plan is "verify, don't assume it works unmodified,"
@@ -489,6 +545,10 @@ def main() -> None:
 
     fig_path = build_runway_load_balance_figure(combo_rows, out_dir)
     print(f"Wrote -> {fig_path}")
+
+    if GROOT_TABLE11_VIOLATIONS_BY_METHOD is not None:
+        (out_dir / "tab_groot_table11_reference.tex").write_text(build_groot_table11_reference_table())
+        print(f"Wrote -> {out_dir / 'tab_groot_table11_reference.tex'}")
 
     print(f"\nLoading fairness_weight calibration data from {args.fairness_sweep_roots} ...")
     (out_dir / "tab_fairness_weight_calibration.tex").write_text(
