@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/analyze_fairness_weight_offline.py
+cps_coordination/scripts/analyze_fairness_weight_offline.py
 --------------------------------------------------------------
 Offline analysis of the local `fairness_weight` calibration sweep (Stage 1
 coarse + Stage 2 refine, see `.claude/plans/step10_execution_and_data_
@@ -23,11 +23,11 @@ metric math: `load_all_combos`/`validate_occurrence_ordering` from
 Usage
 -----
   # Stage 1 only (coarse):
-  python cps_coordination/testing/analyze_fairness_weight_offline.py \\
+  python cps_coordination/scripts/analyze_fairness_weight_offline.py \\
       --sweep-roots cps_coordination/data/fairness_weight_calibration_sweep/stage1
 
   # Stage 1 + Stage 2 combined (final recommendation):
-  python cps_coordination/testing/analyze_fairness_weight_offline.py \\
+  python cps_coordination/scripts/analyze_fairness_weight_offline.py \\
       --sweep-roots cps_coordination/data/fairness_weight_calibration_sweep/stage1 \\
                     cps_coordination/data/fairness_weight_calibration_sweep/stage2 \\
       --out cps_coordination/data/fairness_weight_calibration_sweep/report.txt
@@ -51,9 +51,9 @@ import pandas as pd
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from cps_coordination.testing.cps_metrics_offline import load_recat_matrix, recompute_metrics
-from cps_coordination.testing.step10_deep_analysis import load_all_combos, validate_occurrence_ordering
-from cps_coordination.testing.summarize_batch_sweep import _COMBO_RE
+from cps_coordination.scripts.cps_metrics_offline import load_recat_matrix, recompute_metrics
+from cps_coordination.scripts.step10_deep_analysis import load_all_combos, validate_occurrence_ordering
+from cps_coordination.scripts.summarize_batch_sweep import _COMBO_RE
 
 DEFAULT_FW_BASELINE = 0.0
 DEFAULT_SUCCESS_REGRESSION_TOLERANCE_PP = 2.0

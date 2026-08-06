@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/select_surrogate_features.py
+cps_coordination/scripts/select_surrogate_features.py
 --------------------------------------------------------
 One-time (or occasional) analysis: decide which of the 14 canonical
 ETASurrogate features to keep and which target transform to use, and save
@@ -24,7 +24,7 @@ comparing transforms doesn't need full production precision.
 
 Usage
 -----
-  python cps_coordination/testing/select_surrogate_features.py \\
+  python cps_coordination/scripts/select_surrogate_features.py \\
       path_planning/rta/data/temporal/No_HER_main/500_training_rta_data.parquet \\
       --output cps_coordination/models/surrogate_feature_selection.yaml
 """
@@ -41,7 +41,7 @@ from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.model_selection import GroupKFold
 
 from cps_coordination.coordination.eta_surrogate import TRANSFORMS, _LAG_COL_START, _N_LAG
-from cps_coordination.testing.surrogate_data import (
+from cps_coordination.scripts.surrogate_data import (
     build_feature_matrix,
     et_metrics,
     prepare_modelling_features,

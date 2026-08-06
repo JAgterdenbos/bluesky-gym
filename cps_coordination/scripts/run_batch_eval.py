@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/run_batch_eval.py
+cps_coordination/scripts/run_batch_eval.py
 -------------------------------------------
 Production batch runner for the M=2,000-episode CPS coordination
 scale-up evaluation (Phase III roadmap Step 10). Wraps the same
@@ -24,13 +24,13 @@ machinery ``run_cps_eval.py`` already exercises for a single
 
 Usage
 -----
-  python cps_coordination/testing/run_batch_eval.py \\
+  python cps_coordination/scripts/run_batch_eval.py \\
       --run-id 20260301_120000 \\
       --config cps_coordination/configs/cps_scale_10k.yaml \\
       --save-path-root experiments/cps_eval/scale_10k
 
   # Capped local sanity check (see smoke_test_step10.py for the real one):
-  python cps_coordination/testing/run_batch_eval.py \\
+  python cps_coordination/scripts/run_batch_eval.py \\
       --run-id 20260301_120000 --episodes 10 \\
       --k-cps-sweep 0 3 --mode-sweep static dynamic \\
       --fairness-weight-sweep 0.0 0.3 \\
@@ -56,7 +56,7 @@ from cps_coordination.coordination.cps_manager import CPSManager
 from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
 from cps_coordination.experiments.config import CPSEnvConfig, CPSEnvKwargsConfig, CPSModelConfig
 from cps_coordination.experiments.coordination_baseline import CPSCoordinationExperiment
-from cps_coordination.testing.run_cps_eval import _log_episode
+from cps_coordination.scripts.run_cps_eval import _log_episode
 from cps_coordination.testing.telemetry import build_collectors
 
 _DEFAULT_CONFIG = os.path.normpath(

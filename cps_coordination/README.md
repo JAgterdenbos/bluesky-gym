@@ -16,7 +16,8 @@ cps_coordination/
 ├── experiments/
 │   ├── config.py                      CPSModelConfig / CPSEnvConfig / CPSEnvKwargsConfig
 │   └── coordination_baseline.py       CPSCoordinationExperiment + CPSCoordinationRegistry
-├── testing/                          validation, offline surrogate-training, and Step 10 batch-eval scripts
+├── testing/                          validation/regression gates only (see below)
+├── scripts/                           offline surrogate-training, Step 10 batch-eval, and paper-reporting scripts
 ├── configs/
 │   ├── cps_base.yaml                  default experiment config (k-CPS params, RECAT-EU matrix, eval params)
 │   └── cps_scale_10k.yaml             Step 10 scale-up config (rolling arrival stream, higher aircraft density)
@@ -41,7 +42,7 @@ An optional `TrajectoryBuffer` (per-aircraft rolling `(x, y, heading_rad)` deque
 
 `coordination/eta_surrogate.py` predicts `T̂_i` — remaining simulation steps until an aircraft crosses its assigned Initial Approach Fix (IAF) — from a 13-column feature set (polar position, runway code, elapsed steps, heading decomposition, along-track/cross-track/heading error, plus lag features). It is **self-describing**: `from_training()` bakes in the IAF anchors, surviving feature columns, and target transform, so callers don't need to specify a feature mode at inference.
 
-Training pipeline (`testing/train_surrogate.py`):
+Training pipeline (`scripts/train_surrogate.py`):
 1. Load parquet RTA data (produced by `path_planning`'s `collect-rta`), filter successful episodes, compute steps-to-go.
 2. Derive exact IAF anchors from `PathPlanningGoalEnv` constants.
 3. Engineer static geometric features, then lag features.
@@ -49,7 +50,7 @@ Training pipeline (`testing/train_surrogate.py`):
 5. Feature reduction via a scout `ExtraTreesRegressor`; select the best target transform (identity/log1p/sqrt) by OOF RMSE.
 6. Fit the final model and package it via `ETASurrogate.from_training()`; save with `joblib`.
 
-`testing/surrogate_analyse.py` runs exploratory analysis (feature/coordinate-system justification) and writes figures to `cps_coordination/figures/`.
+`scripts/surrogate_analyse.py` runs exploratory analysis (feature/coordinate-system justification) and writes figures to `cps_coordination/figures/`.
 
 ## `CPSCoordinationExperiment`
 
@@ -66,21 +67,33 @@ Training pipeline (`testing/train_surrogate.py`):
 
 `experiments/config.py` defines `CPSModelConfig` (k-CPS hyperparameters: `k_cps`, `delta_t_plan`, `delta_update`, `runway_assignment_mode`, `eta_surrogate_path`), `CPSEnvConfig`, and `CPSEnvKwargsConfig` (env kwargs: `v_app`, `runways`, sampler path) — all auto-exposed as `--model-*` / `--env-*` CLI flags by the shared framework runner.
 
-## `testing/` — validation scripts
+## `testing/` — validation/regression gates
+
+Genuine validation/regression scripts only — everything else (production launch
+drivers, offline analysis, paper-reporting) lives in `scripts/`, below.
 
 - **`validate_multiagent_env.py`** — regression gates for `MultiAgentPathPlanningGoalEnv` itself: (1) at `max_concurrent_aircraft=1, n_aircraft_total=1` it must reproduce `PathPlanningGoalEnv-v0` bit-for-bit given the same seed/actions; (2) at `max_concurrent_aircraft=2, n_aircraft_total=3` it verifies the acid→traffic-index remap survives a mid-episode delete/respawn with no observation "jumping" between aircraft.
 - **`validate_cps_pipeline.py`** — exercises the real `CPSCoordinationExperiment` evaluation pipeline end-to-end with an actual frozen SAC worker: confirms TTA injection changes worker behaviour vs. an uncoordinated control run (k=0 FCFS), and that every consecutive landing pair on a forced-shared runway respects RECAT-EU separation (k>0, `N_a > 2`).
-- **`train_surrogate.py`** / **`surrogate_analyse.py`** / **`validate_surrogate.py`** — see above.
+- **`validate_surrogate.py`** — held-out CV + end-to-end condition-3 gate for `ETASurrogate` (imports the training/analysis pipeline from `scripts/`).
+- **`smoke_test_step10.py`** — capped local sanity check of `scripts/run_batch_eval.py`'s real sweep machinery before a full/cluster run.
+- **`telemetry.py`** — shared Parquet telemetry collector, used by both validation gates and the `scripts/` production pipeline.
+
+## `scripts/` — production pipelines, offline analysis, paper reporting
+
+- **`train_surrogate.py`** / **`surrogate_data.py`** / **`select_surrogate_features.py`** / **`surrogate_analyse.py`** — `ETASurrogate` training pipeline (feature selection → training → exploratory analysis); see above.
+- **`diagnose_success_rate.py`** — standalone success-rate diagnostic, also exercised by `testing/validate_surrogate.py`'s end-to-end gate.
 
 ### Step 10 scale-up evaluation path
 
-The production evaluation flow for the Phase III Step 10 scale-up (rolling arrival stream, `configs/cps_scale_10k.yaml`) lives in `testing/`, layered on top of the validation scripts above:
+The production evaluation flow for the Phase III Step 10 scale-up (rolling arrival stream, `configs/cps_scale_10k.yaml`) lives in `scripts/`, layered on top of the validation gates in `testing/`:
 
-- **`run_batch_eval.py`** — production batch driver: sweeps `k_cps` × `runway_assignment_mode` × `fairness_weight`, streaming telemetry to Parquet via `telemetry.py`.
+- **`run_batch_eval.py`** — production batch driver: sweeps `k_cps` × `runway_assignment_mode` × `fairness_weight`, streaming telemetry to Parquet via `testing/telemetry.py`.
+- **`run_cps_eval.py`** — single-combo (non-sweep) evaluation driver; `run_batch_eval.py` reuses its `_log_episode`.
 - **`run_step10_scale10k.sh`** — the actual launch script wrapping `run_batch_eval.py` with the current production combo grid and per-mode `fairness_weight` values.
-- **`smoke_test_step10.py`** — capped local sanity check of `run_batch_eval.py`'s real sweep machinery before a full/cluster run.
+- **`regenerate_step10_sanity_sweep.sh`** — regenerates the M=100 sanity-sweep dataset used to validate exit criterion #6.
 - **`merge_shards.py`** — merges sharded (`SHARDS`/`SHARD_INDEX`-split) Parquet output back into the unsharded per-combo layout.
 - **`cps_metrics_offline.py`** → **`summarize_batch_sweep.py`** → **`step10_deep_analysis.py`** → **`analyze_fairness_weight_offline.py`** — a layered offline-metrics pipeline: base per-combo metric recomputation, sweep-wide tabulation, deep collision/stall/tortuosity diagnostics, and the `fairness_weight` calibration analysis, each building on the one before it rather than duplicating it.
+- **`generate_paper_report.py`** — single consolidated script producing every LaTeX table/figure the Phase III thesis chapter needs, wrapping (not reimplementing) the four scripts above; output lands in `cps_coordination/figures/paper_report/`. See `.claude/plans/phase3_cps_coordination_plan.md` for the session that built it.
 
 ## CLI usage
 

@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/diagnose_success_rate.py
+cps_coordination/scripts/diagnose_success_rate.py
 ---------------------------------------------------
 Empirical diagnosis for the single-agent (>95%) vs. multi-agent (<2%)
 ``is_success`` gap reported against ``MultiAgentPathPlanningGoalEnv``.
@@ -29,7 +29,7 @@ For condition 4's first episode, also prints a per-decision-step trace
 ``death_cause``) so the failure mode is visible directly, not just in
 aggregate.
 
-Run: python cps_coordination/testing/diagnose_success_rate.py [--episodes 30]
+Run: python cps_coordination/scripts/diagnose_success_rate.py [--episodes 30]
 """
 
 from __future__ import annotations

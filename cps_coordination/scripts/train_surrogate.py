@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/train_surrogate.py
+cps_coordination/scripts/train_surrogate.py
 --------------------------------------------
 Routine (re)training script for the self-describing ETASurrogate.
 
@@ -28,11 +28,11 @@ Pipeline
 Usage
 -----
   # 1. One-time (or occasional) feature/transform selection:
-  python cps_coordination/testing/select_surrogate_features.py \\
+  python cps_coordination/scripts/select_surrogate_features.py \\
       path_planning/rta/data/temporal/No_HER_main/500_training_rta_data.parquet
 
   # 2. Routine training, reusing that selection:
-  python cps_coordination/testing/train_surrogate.py \\
+  python cps_coordination/scripts/train_surrogate.py \\
       path_planning/rta/data/temporal/No_HER_main/500_training_rta_data.parquet \\
       --output cps_coordination/models/eta_surrogate.pkl
 """
@@ -50,7 +50,7 @@ from sklearn.model_selection import GroupKFold
 
 from bluesky_gym.envs.pathplanning_goal_env import ACTION_TIME
 from cps_coordination.coordination.eta_surrogate import ETASurrogate, TRANSFORMS
-from cps_coordination.testing.surrogate_data import (
+from cps_coordination.scripts.surrogate_data import (
     build_feature_matrix,
     et_metrics,
     prepare_modelling_features,

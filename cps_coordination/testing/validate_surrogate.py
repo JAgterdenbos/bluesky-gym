@@ -57,12 +57,12 @@ from cps_coordination.coordination.eta_surrogate import (
     TRANSFORMS,
     cartesian_to_polar,
 )
-from cps_coordination.testing.surrogate_data import (
+from cps_coordination.scripts.surrogate_data import (
     build_feature_matrix,
     et_metrics,
     prepare_modelling_features,
 )
-from cps_coordination.testing.surrogate_analyse import (
+from cps_coordination.scripts.surrogate_analyse import (
     _apply_style,
     _tolerance_ratio_str,
     plot_error_by_horizon,
@@ -179,7 +179,7 @@ def run_condition_3_gate(surrogate: ETASurrogate, n_episodes: int) -> list:
     metrics alone are not sufficient (Finding 1: they looked fine once while
     deployment error stayed high).
     """
-    from cps_coordination.testing.diagnose_success_rate import (
+    from cps_coordination.scripts.diagnose_success_rate import (
         _make_experiment,
         _summarize,
         run_multi_agent_condition,

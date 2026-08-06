@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# cps_coordination/testing/run_step10_scale10k.sh
+# cps_coordination/scripts/run_step10_scale10k.sh
 # --------------------------------------------------------------
 # Production launch script for the M=2,000-episode CPS coordination
 # scale-up evaluation (Phase III roadmap Step 10 -- rescaled from the
 # original M=10,000/low-density config toward higher per-episode traffic
-# density and fewer episodes). Wraps cps_coordination/testing/run_batch_eval.py
+# density and fewer episodes). Wraps cps_coordination/scripts/run_batch_eval.py
 # with the settings validated throughout the pre-launch audit (see
 # .claude/plans/phase3_cps_coordination_plan.md,
 # .claude/plans/m10000_launch_readiness_plan.md, and
@@ -48,7 +48,7 @@
 # k-CPS-fix/ratchet investigation (originally alongside fairness_weight in
 # {0.0,0.3}, 8 combos -- see phase3_cps_coordination_plan.md).
 # fairness_weight is now FIXED (not swept) via a local Stage 1/2 calibration
-# sweep -- see cps_coordination/testing/analyze_fairness_weight_offline.py
+# sweep -- see cps_coordination/scripts/analyze_fairness_weight_offline.py
 # and task-optimize-fairness-fizzy-moth.md. Launching with the script's bare
 # defaults would silently evaluate an untested grid.
 #
@@ -90,7 +90,7 @@
 # SAVE_ROOT/shard_{i}of{N}/ directory (Parquet has no true row-group append,
 # so concurrent shards must never target the same file); once all N shards
 # for a combo finish, merge them with:
-#   uv run python cps_coordination/testing/merge_shards.py \
+#   uv run python cps_coordination/scripts/merge_shards.py \
 #       --save-root "$SAVE_ROOT" --combo "k3_dynamic_fw0.3" --shards 4
 # which verifies there are no colliding episode_ids across shards before
 # writing the merged, final-looking SAVE_ROOT/k3_dynamic_fw0.3/ directory.
@@ -101,20 +101,20 @@
 #   # Full 4-combo sweep, sequential (~8.2h measured, only if your cluster truly
 #   # runs this as one long single job -- runs TWO run_batch_eval.py
 #   # invocations, one per mode with its own calibrated fairness_weight):
-#   RUN_ID=20260615_095840 ./cps_coordination/testing/run_step10_scale10k.sh
+#   RUN_ID=20260615_095840 ./cps_coordination/scripts/run_step10_scale10k.sh
 #
 #   # One combo per job (recommended for real cluster use -- launch 4 of
 #   # these, one per k_cps/mode combination, with the fw matching that
 #   # mode's calibrated value, however your scheduler fans out jobs):
-#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" ./cps_coordination/testing/run_step10_scale10k.sh
-#   RUN_ID=20260615_095840 COMBO="3:static:1.0" ./cps_coordination/testing/run_step10_scale10k.sh
+#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" ./cps_coordination/scripts/run_step10_scale10k.sh
+#   RUN_ID=20260615_095840 COMBO="3:static:1.0" ./cps_coordination/scripts/run_step10_scale10k.sh
 #
 #   # One combo, sharded across 4 more processes (needs 4 separate
 #   # invocations, SHARD_INDEX=0..3, then merge_shards.py afterward):
-#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" SHARDS=4 SHARD_INDEX=0 ./cps_coordination/testing/run_step10_scale10k.sh
+#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" SHARDS=4 SHARD_INDEX=0 ./cps_coordination/scripts/run_step10_scale10k.sh
 #
 #   # Resume a combo (or full sequential sweep) that was interrupted:
-#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" RESUME=1 SAVE_ROOT=experiments/cps_eval/scale_10k_20260801_000000 ./cps_coordination/testing/run_step10_scale10k.sh
+#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" RESUME=1 SAVE_ROOT=experiments/cps_eval/scale_10k_20260801_000000 ./cps_coordination/scripts/run_step10_scale10k.sh
 
 set -euo pipefail
 
@@ -176,7 +176,7 @@ fi
 # sweeping both modes with a single fw value.
 run_one_mode() {
     local mode="$1" fw="$2"
-    uv run python cps_coordination/testing/run_batch_eval.py \
+    uv run python cps_coordination/scripts/run_batch_eval.py \
         --run-id "$RUN_ID" \
         --config "$CONFIG" \
         --episodes "$RUN_EPISODES" \
@@ -202,7 +202,7 @@ run_one_mode() {
 if [ -n "${COMBO:-}" ]; then
     IFS=':' read -r K_CPS MODE FW <<< "$COMBO"
     echo "Single-combo mode: k_cps=$K_CPS mode=$MODE fairness_weight=$FW"
-    uv run python cps_coordination/testing/run_batch_eval.py \
+    uv run python cps_coordination/scripts/run_batch_eval.py \
         --run-id "$RUN_ID" \
         --config "$CONFIG" \
         --episodes "$RUN_EPISODES" \
@@ -218,7 +218,7 @@ if [ -n "${COMBO:-}" ]; then
     echo "Done -> $SAVE_ROOT/k${K_CPS}_${MODE}_fw${FW}/"
     if [ "$SHARDS" -gt 1 ]; then
         echo "This was shard $SHARD_INDEX/$SHARDS -- once all $SHARDS shards finish, merge with:"
-        echo "  uv run python cps_coordination/testing/merge_shards.py --save-root <root_without_shard_suffix> --combo k${K_CPS}_${MODE}_fw${FW} --shards $SHARDS"
+        echo "  uv run python cps_coordination/scripts/merge_shards.py --save-root <root_without_shard_suffix> --combo k${K_CPS}_${MODE}_fw${FW} --shards $SHARDS"
     fi
 else
     if [ "$SHARDS" -gt 1 ]; then
@@ -234,4 +234,4 @@ else
     echo "Done -> $SAVE_ROOT/k{0,3}_static_fw${STATIC_FW}/ and $SAVE_ROOT/k{0,3}_dynamic_fw${DYNAMIC_FW}/"
 fi
 
-echo "Then: uv run python cps_coordination/testing/step10_deep_analysis.py --sweep-root $SAVE_ROOT"
+echo "Then: uv run python cps_coordination/scripts/step10_deep_analysis.py --sweep-root $SAVE_ROOT"

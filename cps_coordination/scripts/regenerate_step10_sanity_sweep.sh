@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# cps_coordination/testing/regenerate_step10_sanity_sweep.sh
+# cps_coordination/scripts/regenerate_step10_sanity_sweep.sh
 # --------------------------------------------------------------
 # Documents (does NOT execute automatically) how to regenerate the M=100,
 # 8-combo "step 10 sanity sweep" analyzed by
-# cps_coordination/testing/step10_deep_analysis.py and
+# cps_coordination/scripts/step10_deep_analysis.py and
 # .claude/plans/step10_deep_analysis_findings.md.
 #
 # WARNING: this takes roughly 1.5-2 HOURS to run end-to-end (8 combos x 100
@@ -16,7 +16,7 @@
 # slot-recycling bug documented in the findings report, to see whether the
 # numbers change).
 #
-# Reconstructed from cps_coordination/testing/run_batch_eval.py's CLI +
+# Reconstructed from cps_coordination/scripts/run_batch_eval.py's CLI +
 # cps_coordination/configs/cps_scale_10k.yaml's cps_eval: defaults (this
 # sweep predates the density rescale documented in
 # .claude/plans/step10_execution_and_data_collection_plan.md -- it used the
@@ -38,7 +38,7 @@ SAVE_ROOT="${SAVE_ROOT:-cps_coordination/data/step10_sanity_sweep_regenerated}"
 echo "This will take ~1.5-2 hours. Ctrl-C now if you did not mean to run this."
 sleep 5
 
-uv run python cps_coordination/testing/run_batch_eval.py \
+uv run python cps_coordination/scripts/run_batch_eval.py \
     --run-id "$RUN_ID" \
     --episodes 100 \
     --k-cps-sweep 0 3 \
@@ -52,4 +52,4 @@ uv run python cps_coordination/testing/run_batch_eval.py \
     --seed-base 0
 
 echo "Done -> $SAVE_ROOT/k<k_cps>_<mode>_fw<fairness_weight>/"
-echo "Then: uv run python cps_coordination/testing/step10_deep_analysis.py --sweep-root $SAVE_ROOT"
+echo "Then: uv run python cps_coordination/scripts/step10_deep_analysis.py --sweep-root $SAVE_ROOT"

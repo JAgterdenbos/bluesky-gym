@@ -113,7 +113,7 @@ Priority chain: dataclass defaults → YAML config → CLI flags.
 
 - Depends on `bluesky_gym` for the environments (`PathPlanningGoalEnv-v0`, `-heading`), the experiment framework (`BaseExperiment`, `ExperimentConfig`, `BaseRegistry`), and `BaseSampler`.
 - The worker policy trained here (`experiments/PathPlanningGoalEnv-v0/SAC/models/<run_id>/final_model.zip`) is loaded as a **frozen** policy by `cps_coordination.experiments.coordination_baseline.CPSCoordinationExperiment` via `session.pretrained_run_id` / `pretrained_model_path`, and driven inside `bluesky_gym`'s `MultiAgentPathPlanningGoalEnv` under CPS coordination.
-- RTA training data collected here also feeds `cps_coordination`'s `ETASurrogate` training pipeline (`cps_coordination/testing/train_surrogate.py` consumes the same parquet output as `collect-rta`).
+- RTA training data collected here also feeds `cps_coordination`'s `ETASurrogate` training pipeline (`cps_coordination/scripts/train_surrogate.py` consumes the same parquet output as `collect-rta`).
 
 ## Relationship to the thesis (`docs/paper/Thesis_Paper_draft.pdf`)
 

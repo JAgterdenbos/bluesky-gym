@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/step10_deep_analysis.py
+cps_coordination/scripts/step10_deep_analysis.py
 --------------------------------------------------
 Deep, reproducible re-analysis of the M=100, 8-combo "step 10 sanity sweep"
 (k_cps in {0,3} x mode in {static,dynamic} x fairness_weight in {0.0,0.3}),
@@ -26,12 +26,12 @@ for trajectory-shape analysis (both already the pattern
 
 Usage
 -----
-  python cps_coordination/testing/step10_deep_analysis.py \\
+  python cps_coordination/scripts/step10_deep_analysis.py \\
       --sweep-root cps_coordination/data/step10_sanity_sweep_regenerated
 
   # Diff headline metrics against another already-analyzed sweep (e.g. a
   # ratchet on/off or spawn_window_s before/after comparison):
-  python cps_coordination/testing/step10_deep_analysis.py \\
+  python cps_coordination/scripts/step10_deep_analysis.py \\
       --sweep-root cps_coordination/data/<new_sweep> \\
       --compare-root cps_coordination/data/<old_sweep>
 
@@ -56,11 +56,11 @@ import pandas as pd
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from cps_coordination.testing.cps_metrics_offline import (
+from cps_coordination.scripts.cps_metrics_offline import (
     explode_trajectories, load_recat_matrix, load_telemetry, recompute_metrics,
     recompute_separation_compliance,
 )
-from cps_coordination.testing.summarize_batch_sweep import _COMBO_RE, discover_combos
+from cps_coordination.scripts.summarize_batch_sweep import _COMBO_RE, discover_combos
 from path_planning.rta.testing.spatial_visitation_analysis import (
     build_heatmap, compute_information_metrics, compute_tortuosity,
 )
@@ -518,11 +518,28 @@ def workstream3_stalling(
     print(f"Saved -> {out_dir / 'fig3_fairness_weight_stall_recovery_clean.png'}")
 
     # --- Figure: spatial heatmap, stalled vs non-stalled, dynamic AND static (k3, clean) ---
-    modes_present = [m for m in ("dynamic", "static") if f"k3_{m}_fw0" in all_data]
+    # Combo naming isn't fixed across sweep layouts: the old 8-combo sanity
+    # sweep used a shared fw in {0.0, 0.3} per mode, while the production
+    # 4-combo layout deploys a per-mode calibrated fw (no "fw0" combo exists
+    # for either mode there) -- so this picks whatever single k3 combo is
+    # present per mode instead of assuming "fw0", preferring fw=0.0 when
+    # multiple fw values for the same mode are present (old-layout baseline).
+    def _pick_k3_combo(mode: str) -> str | None:
+        candidates = sorted(
+            (n for n in all_data if (m := _COMBO_RE.match(n)) and m.group("k_cps") == "3" and m.group("mode") == mode),
+            key=lambda n: float(_COMBO_RE.match(n).group("fw")),
+        )
+        if not candidates:
+            return None
+        zero_fw = [n for n in candidates if float(_COMBO_RE.match(n).group("fw")) == 0.0]
+        return zero_fw[0] if zero_fw else candidates[0]
+
+    mode_to_combo = {m: _pick_k3_combo(m) for m in ("dynamic", "static")}
+    modes_present = [m for m, name in mode_to_combo.items() if name is not None]
     if modes_present:
         fig, axes = plt.subplots(len(modes_present), 2, figsize=(11, 5 * len(modes_present)), squeeze=False)
         for row, mode in enumerate(modes_present):
-            name = f"k3_{mode}_fw0"
+            name = mode_to_combo[mode]
             df, _ = all_data[name]
             clean = df[(df["occurrence"] == 1) & (df["traj_x"].apply(len) >= 3)]
             for ax, flag, title in zip(axes[row], (True, False), ("Stalled", "Non-stalled")):
@@ -537,7 +554,8 @@ def workstream3_stalling(
                 _, H_log, vmin, vmax, extent, _ = build_heatmap(pc, bins=150)
                 ax.imshow(H_log, origin="lower", extent=extent, cmap="inferno", vmin=vmin, vmax=vmax, aspect="equal")
                 ax.set_title(f"{mode}: {title} (n_flights={sub.shape[0]})")
-        fig.suptitle("Spatial visitation: k_cps=3, fw=0, occurrence==1 only")
+        combo_desc = ", ".join(f"{m}={mode_to_combo[m]}" for m in modes_present)
+        fig.suptitle(f"Spatial visitation: k_cps=3, occurrence==1 only ({combo_desc})")
         fig.savefig(out_dir / "fig4_spatial_stalled_vs_nonstalled_k3.png", dpi=_DPI)
         plt.close(fig)
         print(f"Saved -> {out_dir / 'fig4_spatial_stalled_vs_nonstalled_k3.png'}")

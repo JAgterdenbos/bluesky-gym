@@ -30,7 +30,7 @@ Utility functions (re-exported for convenience)
 Quick start
 -----------
   # Train a surrogate (run train_surrogate.py first):
-  #   python cps_coordination/testing/train_surrogate.py data.parquet
+  #   python cps_coordination/scripts/train_surrogate.py data.parquet
 
   from cps_coordination import ETASurrogate
   import numpy as np

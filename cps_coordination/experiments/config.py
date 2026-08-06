@@ -123,7 +123,7 @@ class CPSModelConfig(ModelConfig):
     it deploys a **mode-specific** calibrated value
     (``run_step10_scale10k.sh``'s ``STATIC_FW``/``DYNAMIC_FW``, currently
     1.0/0.5), derived from a local Stage 1/2 sweep (see
-    ``cps_coordination/testing/analyze_fairness_weight_offline.py`` and
+    ``cps_coordination/scripts/analyze_fairness_weight_offline.py`` and
     ``cps_coordination/data/fairness_weight_calibration_sweep/``). The
     calibration had to be run with the ratchet ON
     (``enable_cross_cycle_runway_seeding=True``) to get any signal at all

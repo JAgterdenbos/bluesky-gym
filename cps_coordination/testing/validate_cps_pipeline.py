@@ -59,7 +59,7 @@ from cps_coordination.experiments.coordination_baseline import (
     _EpisodeRecord,
 )
 from cps_coordination.experiments.metrics import CPSMetricsReporter
-from cps_coordination.testing.cps_metrics_offline import (
+from cps_coordination.scripts.cps_metrics_offline import (
     load_recat_matrix,
     recompute_metrics,
     recompute_separation_compliance,

@@ -1,13 +1,13 @@
 """
-cps_coordination/testing/surrogate_analyse.py
+cps_coordination/scripts/surrogate_analyse.py
 ----------------------------------------------
 Exploratory analysis to justify feature and coordinate-system choices for the
 ETASurrogate.  Outputs publication-ready figures to cps_coordination/figures/.
 
 Usage
 -----
-  python cps_coordination/testing/surrogate_analyse.py <path-to-data>
-  python cps_coordination/testing/surrogate_analyse.py \\
+  python cps_coordination/scripts/surrogate_analyse.py <path-to-data>
+  python cps_coordination/scripts/surrogate_analyse.py \\
       path_planning/rta/data/temporal/No_HER_main/500_training_rta_data.parquet
 """
 
@@ -29,7 +29,7 @@ from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import LabelEncoder
 
 from bluesky_gym.envs.pathplanning_goal_env import ACTION_TIME, RTA_TOLERANCE
-from cps_coordination.testing.surrogate_data import (
+from cps_coordination.scripts.surrogate_data import (
     MAX_TIME,
     add_lag_features,
     build_feature_matrix,

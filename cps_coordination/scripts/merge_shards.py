@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/merge_shards.py
+cps_coordination/scripts/merge_shards.py
 ------------------------------------------
 Merges one combo's sharded Parquet output (see run_step10_scale10k.sh's
 SHARDS/SHARD_INDEX support) into the single combo directory the rest of
@@ -18,7 +18,7 @@ actual data rather than assuming the math held).
 
 Usage
 -----
-  uv run python cps_coordination/testing/merge_shards.py \\
+  uv run python cps_coordination/scripts/merge_shards.py \\
       --save-root experiments/cps_eval/scale_10k_20260801_000000 \\
       --combo k3_dynamic_fw0.3 \\
       --shards 4

@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/summarize_batch_sweep.py
+cps_coordination/scripts/summarize_batch_sweep.py
 ----------------------------------------------------
 Tabulate ``cps_metrics_offline.recompute_metrics`` across every combo
 directory produced by ``run_batch_eval.py``'s sweep (``k{k_cps}_{mode}_
@@ -11,7 +11,7 @@ Not a new metrics pipeline -- purely a thin wrapper that discovers combo
 directories under a sweep root and calls the existing offline recompute
 once per directory.
 
-Run: python cps_coordination/testing/summarize_batch_sweep.py --sweep-root <path>
+Run: python cps_coordination/scripts/summarize_batch_sweep.py --sweep-root <path>
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from cps_coordination.testing.cps_metrics_offline import (
+from cps_coordination.scripts.cps_metrics_offline import (
     load_recat_matrix,
     load_telemetry,
     recompute_metrics,

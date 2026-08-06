@@ -45,8 +45,8 @@ import os
 import shutil
 import tempfile
 
-from cps_coordination.testing.run_batch_eval import _DEFAULT_CONFIG, _build_parser, run_sweep
-from cps_coordination.testing.cps_metrics_offline import (
+from cps_coordination.scripts.run_batch_eval import _DEFAULT_CONFIG, _build_parser, run_sweep
+from cps_coordination.scripts.cps_metrics_offline import (
     load_recat_matrix,
     load_telemetry,
     recompute_metrics,

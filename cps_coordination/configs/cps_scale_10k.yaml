@@ -8,7 +8,7 @@
 #
 # This is a config + launch-script generation step only — it is NOT meant
 # to be run locally end-to-end. Use
-# cps_coordination/testing/run_batch_eval.py to launch the sweep on a
+# cps_coordination/scripts/run_batch_eval.py to launch the sweep on a
 # cluster/runner, and cps_coordination/testing/smoke_test_step10.py for a
 # capped local M=10 sanity check. See
 # .claude/step10_execution_and_data_collection_plan.md for the full
@@ -22,7 +22,7 @@
 # per the --k-cps-sweep/--mode-sweep CLI flags (k_cps in {0,3} x mode in
 # {static,dynamic}, 4 combinations). `model.fairness_weight` is NOT fixed
 # here, deliberately: the Stage 1/2 calibration sweep (see
-# cps_coordination/testing/analyze_fairness_weight_offline.py and
+# cps_coordination/scripts/analyze_fairness_weight_offline.py and
 # cps_coordination/data/fairness_weight_calibration_sweep/) found a
 # genuine, well-resolved MODE-SPECIFIC optimum (static≈1.0, dynamic≈0.5,
 # not a single shared value) -- a single scalar field here can't represent

@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/run_cps_eval.py
+cps_coordination/scripts/run_cps_eval.py
 -------------------------------------------
 CLI: builds the multi-agent env + CPSManager + frozen SAC worker, runs the
 matched-seed three-pass evaluation (CPS pass + static-TTA pass + solo/
@@ -9,12 +9,12 @@ telemetry Parquet collectors (roadmap step 8, see ``telemetry.py``).
 
 Usage
 -----
-  python cps_coordination/testing/run_cps_eval.py \\
+  python cps_coordination/scripts/run_cps_eval.py \\
       --run-id 20260615_095840 --episodes 100 --n-aircraft 5 \\
       --k-cps 3 --mode static --save-path experiments/cps_eval/manual_run
 
   # All options:
-  python cps_coordination/testing/run_cps_eval.py \\
+  python cps_coordination/scripts/run_cps_eval.py \\
       --run-id <pretrained_run_id> \\
       --episodes 100 \\
       --n-aircraft 5 \\

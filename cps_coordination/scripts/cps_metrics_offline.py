@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/cps_metrics_offline.py
+cps_coordination/scripts/cps_metrics_offline.py
 --------------------------------------------------
 Recompute CPS coordination metrics (Gamma, Gamma_r, C_sep, Delta epsilon vs.
 static/uncoordinated, R_rec, rho_ripple) plus spatial tortuosity/entropy/KL
@@ -19,7 +19,7 @@ by the Phase D.4 split.
 
 Usage
 -----
-  python cps_coordination/testing/cps_metrics_offline.py --save-path experiments/cps_eval/manual_run
+  python cps_coordination/scripts/cps_metrics_offline.py --save-path experiments/cps_eval/manual_run
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-cps_coordination/testing/surrogate_data.py
+cps_coordination/scripts/surrogate_data.py
 --------------------------------------------
 Shared data-loading / feature-engineering pipeline for the ETASurrogate
 training tools (:mod:`select_surrogate_features` and :mod:`train_surrogate`).
