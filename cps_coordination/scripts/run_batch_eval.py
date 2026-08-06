@@ -98,6 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cps_eval_d = defaults.get("cps_eval", {})
     logging_d = defaults.get("logging", {})
     session_d = defaults.get("session", {})
+    env_kwargs_d = defaults.get("env", {}).get("env_kwargs", {})
 
     p = argparse.ArgumentParser(
         description=(
@@ -134,8 +135,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    default=cps_eval_d.get("spawn_window_s", 0.0))
     p.add_argument("--delta-t-plan", type=int, default=model_d.get("delta_t_plan", 120))
     p.add_argument("--delta-update", type=float, default=model_d.get("delta_update", 1.0))
-    p.add_argument("--runways", type=str, nargs="*", default=None,
-                   help="Subset of runways to sample from (default: all 12).")
+    p.add_argument("--runways", type=str, nargs="*",
+                   default=env_kwargs_d.get("runways"),
+                   help="Subset of runways to sample from. Defaults to "
+                        "--config's env.env_kwargs.runways (None/unset in "
+                        "the YAML -> all 12) -- unlike run_step10_scale10k.sh's "
+                        "other config-sourced flags, this one previously had a "
+                        "hardcoded None default that silently ignored the YAML "
+                        "entirely; fixed to match every other flag's pattern.")
     p.add_argument("--eta-surrogate-path", type=str,
                    default=model_d.get("eta_surrogate_path"),
                    help="Path to a fitted ETASurrogate .pkl. Defaults to "

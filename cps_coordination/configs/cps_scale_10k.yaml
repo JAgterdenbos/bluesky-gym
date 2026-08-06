@@ -78,7 +78,10 @@ env:
 
   env_kwargs:
     action_mode: hdg
-    runways: null           # null -> use all 12 available runways
+    runways: ["18R", "27"]  # Groot et al.'s dual-runway baseline scope,
+                             # confirmed 2026-08-06 from hierarchical_RL_arrival_draft.pdf
+                             # (was null/all-12 -- see phase3_cps_coordination_plan.md,
+                             # "Runway scope confirmed from Groot et al.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # RECAT-EU separation matrix: intentionally NOT duplicated here. run_batch_eval.py

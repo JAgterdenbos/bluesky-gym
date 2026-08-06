@@ -189,14 +189,17 @@ def compute_information_metrics(Ha, Hb = None):
     return h_a, h_b, kl_div
 
 def compute_tortuosity(df):
-    def get_path_metrics(group):
-        dx = group['x'].diff()
-        dy = group['y'].diff()
-        path_length = np.sum(np.sqrt(dx**2 + dy**2))
-        chord = np.sqrt((group['x'].iloc[-1] - group['x'].iloc[0])**2 + 
-                        (group['y'].iloc[-1] - group['y'].iloc[0])**2)
-        return path_length / chord if chord > 0 else 1.0
-    tortuosities = df.groupby('episode').apply(get_path_metrics)
+    grouped = df.groupby('episode')
+    # Per-row step length (NaN on each group's first row, skipped by .sum()
+    # the same way np.sum(group['x'].diff()...) skipped it per-group above).
+    step_length = np.sqrt(grouped['x'].diff()**2 + grouped['y'].diff()**2)
+    path_length = step_length.groupby(df['episode']).sum()
+
+    firsts = grouped[['x', 'y']].first()
+    lasts = grouped[['x', 'y']].last()
+    chord = np.sqrt((lasts['x'] - firsts['x'])**2 + (lasts['y'] - firsts['y'])**2)
+
+    tortuosities = (path_length / chord).where(chord > 0, 1.0)
     return tortuosities.mean()
 
 def compute_mean_population_exposure(df, X, Y, Z):

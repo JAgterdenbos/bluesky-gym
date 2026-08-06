@@ -288,6 +288,11 @@ class CPSManager:
         self._frozen_eta: Dict[str, float] = {}
         self._frozen_runway: Dict[str, str] = {}
         self._frozen_tta: Dict[str, float] = {}
+        # Dense RECAT-EU separation lookup, built lazily and cached -- see
+        # _separation_table(). recat_matrix is fixed after construction, so
+        # this never needs invalidating.
+        self._sep_table: Optional[np.ndarray] = None
+        self._sep_table_cat_index: Optional[Dict[str, int]] = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -554,15 +559,56 @@ class CPSManager:
 
         n = len(fcfs_order)
         k = self.k_cps
-        scheduled_mask = [False] * n
+        scheduled_mask = np.zeros(n, dtype=bool)
         scheduled: List[AircraftState] = []
-        runway_last: Dict[str, AircraftState] = {}  # virtual -- mirrors _greedy_schedule
+
+        # Per-position, the ~2k+1-wide eligible window's candidates are
+        # mutually independent (runway_last/scheduled_mask are both fixed
+        # for the duration of one position's evaluation) -- so each
+        # position's cost(idx) for every candidate is batch-evaluated against
+        # precomputed lookup tables instead of the original per-candidate
+        # _tta_for/_slack_penalty/_get_separation method calls (each of
+        # which re-did a dict-of-dict probe and its own attribute lookups).
+        # The outer `for pos in range(n)` loop itself stays sequential:
+        # runway_last is genuinely mutated after every position commits, so
+        # a later position's candidates can depend on an aircraft chosen
+        # just now.
+        #
+        # Deliberately plain Python lists/floats here, not numpy arrays: at
+        # the real window width (2k+1, ~7 at production k_cps=3) numpy's
+        # fixed per-call dispatch overhead measurably *exceeds* what it
+        # saves versus a tight Python loop over a flat table (confirmed via
+        # cps_coordination/testing/test_vectorization_performance.py's
+        # benchmark -- an array-per-position version of this loop was ~5x
+        # *slower* than the original, unlike Finding 1's eligibility loop
+        # where n*n*r broadcasting is a genuine win). "Vectorized" here means
+        # "lookup tables instead of iterative re-derivation", per the task
+        # spec, not necessarily numpy.
+        sep_table_np, cat_index = self._separation_table()
+        sep_table = sep_table_np.tolist()  # plain nested list: fast scalar indexing
+        n_cats = len(cat_index)
+        etas = [ac.eta for ac in fcfs_order]
+        cat_idx = [cat_index.get(ac.wake_cat, n_cats) for ac in fcfs_order]
+        runway_ids = [ac.runway_id for ac in fcfs_order]
+        acids = [ac.acid for ac in fcfs_order]
+        # Matches _slack_penalty exactly; fcfs_order/current_time/
+        # _stalled_acids are all fixed for the whole call, so this is
+        # computed once rather than once per candidate per position.
+        slack_penalty = [
+            max(0.0, self.SLACK_REFERENCE_S - (etas[i] - current_time))
+            + (self.STALL_SLACK_PENALTY_BOOST_S if acids[i] in self._stalled_acids else 0.0)
+            for i in range(n)
+        ]
+        # runway_last, keyed by runway id -> (tta, cat_idx) of the last
+        # aircraft committed to it this sweep -- avoids re-deriving cat_idx
+        # via a dict lookup on the AircraftState itself each candidate.
+        runway_last_cat: Dict[str, Tuple[float, int]] = {}
 
         for pos in range(n):
             window_lo = max(0, pos - k)
             window_hi = min(pos + k, n - 1)
-            eligible = [i for i in range(window_lo, window_hi + 1) if not scheduled_mask[i]]
-            if not eligible:
+            idxs = [i for i in range(window_lo, window_hi + 1) if not scheduled_mask[i]]
+            if not idxs:
                 # An earlier position can pull an index out of a *later*
                 # position's own window before that position is reached
                 # (the window shifts every step, it isn't reserved) -- rare,
@@ -570,31 +616,50 @@ class CPSManager:
                 # the identical reason: fall back to any remaining
                 # unscheduled index. n - pos unscheduled indices always
                 # remain at this point, so this is never itself empty.
-                eligible = [i for i in range(n) if not scheduled_mask[i]]
+                idxs = [i for i in range(n) if not scheduled_mask[i]]
 
             best_idx: Optional[int] = None
             best_cost: Optional[float] = None
             best_tta: float = 0.0
-            for idx in eligible:
-                ac = fcfs_order[idx]
-                tta_if_here = self._tta_for(ac, runway_last)
-                imposed_delay = max(0.0, tta_if_here - ac.eta)
-                cost = imposed_delay - self.fairness_weight * self._slack_penalty(ac, current_time)
+            for idx in idxs:
+                rwy = runway_ids[idx]
+                own_eta = etas[idx]
+                own_cat = cat_idx[idx]
+
+                prev = runway_last_cat.get(rwy)
+                if prev is None and self.enable_cross_cycle_runway_seeding:
+                    committed = self._runway_last_committed.get(rwy)
+                    if committed is not None:
+                        c_tta, c_wake_cat, c_acid = committed
+                        if c_acid != acids[idx]:
+                            prev = (c_tta, cat_index.get(c_wake_cat, n_cats))
+
+                if prev is None:
+                    tta_if_here = own_eta
+                else:
+                    prev_tta, prev_cat = prev
+                    sep = sep_table[prev_cat][own_cat]
+                    tta_if_here = own_eta if prev_tta + sep < own_eta else prev_tta + sep
+
+                imposed_delay = tta_if_here - own_eta
+                if imposed_delay < 0.0:
+                    imposed_delay = 0.0
+                cost = imposed_delay - self.fairness_weight * slack_penalty[idx]
                 if best_cost is None or cost < best_cost:
                     best_idx, best_cost, best_tta = idx, cost, tta_if_here
 
-            chosen = fcfs_order[best_idx]  # type: ignore[arg-type]
+            chosen = fcfs_order[best_idx]  # type: ignore[index]
             scheduled_mask[best_idx] = True
             scheduled.append(chosen)
             # Commit the virtual TTA now so later positions on the same
-            # runway see it via `runway_last`, exactly mirroring
+            # runway see it via `runway_last_cat`, exactly mirroring
             # _greedy_schedule's own incremental state. _greedy_schedule
             # re-derives (and overwrites) the identical value when it
             # processes `scheduled` afterward, since it walks the same
             # order through the same _tta_for rule from the same starting
             # state (self._runway_last_committed, untouched until then).
             chosen.tta = best_tta
-            runway_last[chosen.runway_id] = chosen
+            runway_last_cat[chosen.runway_id] = (best_tta, cat_idx[best_idx])
 
         return scheduled
 
@@ -698,6 +763,38 @@ class CPSManager:
             self.recat_matrix.get(leading_cat, {}).get(trailing_cat, 90.0)
         )
 
+    def _separation_table(self) -> Tuple[np.ndarray, Dict[str, int]]:
+        """Dense ``(n_cats+1, n_cats+1)`` RECAT-EU separation lookup.
+
+        Built once (cached in ``self._sep_table``) from ``self.recat_matrix``
+        so :meth:`_apply_k_cps_constraint`'s per-candidate separation lookup
+        becomes a single array index instead of :meth:`_get_separation`'s
+        nested-dict probe. ``n_cats`` is the number of distinct categories
+        appearing anywhere in ``recat_matrix`` (as either a leading or
+        trailing key); every entry defaults to 90.0 and only pairs actually
+        present in ``recat_matrix`` are overwritten, so any category or pair
+        absent from the matrix -- including one that never appears in
+        ``recat_matrix`` at all, routed to the extra fallback row/col at
+        index ``n_cats`` -- resolves to exactly the same 90.0 default
+        :meth:`_get_separation` would return.
+        """
+        if self._sep_table is not None and self._sep_table_cat_index is not None:
+            return self._sep_table, self._sep_table_cat_index
+
+        cats = sorted(
+            {*self.recat_matrix.keys()}
+            | {trail for row in self.recat_matrix.values() for trail in row.keys()}
+        )
+        cat_index = {c: i for i, c in enumerate(cats)}
+        table = np.full((len(cats) + 1, len(cats) + 1), 90.0)
+        for lead, row in self.recat_matrix.items():
+            for trail, sep in row.items():
+                table[cat_index[lead], cat_index[trail]] = float(sep)
+
+        self._sep_table = table
+        self._sep_table_cat_index = cat_index
+        return table, cat_index
+
     # ------------------------------------------------------------------ #
     # Dynamic runway assignment
     # ------------------------------------------------------------------ #
@@ -770,23 +867,38 @@ class CPSManager:
         for i, ac in enumerate(self._fleet):
             ac.fcfs_rank = int(fcfs_rank[i])
 
-        best_rwy_idx = np.empty(n, dtype=int)
-        for i, ac in enumerate(self._fleet):
-            eligible: List[int] = []
-            for j, rwy in enumerate(self.available_runways):
-                other_etas = [
-                    eta_matrix[i2, j]
-                    for i2, ac2 in enumerate(self._fleet)
-                    if i2 != i and ac2.runway_id == rwy
-                ]
-                sigma_r = sum(1 for e in other_etas if e < eta_matrix[i, j])
-                if abs(sigma_r - int(fcfs_rank[i])) <= k:
-                    eligible.append(j)
-            if not eligible:
-                eligible = [
-                    rwy_index.get(ac.runway_id, int(np.argmin(eta_matrix[i])))
-                ]
-            best_rwy_idx[i] = min(eligible, key=lambda j: eta_matrix[i, j])
+        # Vectorized eligibility/rank computation -- a literal, order-
+        # independent restatement of the nested-loop form above (see
+        # `.claude/plans/phase3_cps_coordination_plan.md`'s "Vectorization &
+        # Optimization" section for the derivation this mirrors exactly).
+        n_rwy = len(self.available_runways)
+        # member[i2, j]: is aircraft i2 currently assigned to candidate
+        # runway j? (current_col already encodes ac2.runway_id via rwy_index,
+        # consistent with current_eta/fcfs_rank above.)
+        member = current_col[:, None] == np.arange(n_rwy)[None, :]  # (n, r)
+        # less[i2, i, j]: aircraft i2's ETA on runway j strictly less than
+        # aircraft i's ETA on runway j. less[i, i, j] is always False (an
+        # element is never < itself), so this subsumes the original loop's
+        # `i2 != i` guard without needing it explicitly.
+        less = eta_matrix[:, None, :] < eta_matrix[None, :, :]  # (n, n, r)
+        # sigma_matrix[i, j]: rank aircraft i would hold on runway j among
+        # the *other* aircraft currently assigned to j.
+        sigma_matrix = (less & member[:, None, :]).sum(axis=0)  # (n, r)
+
+        eligible = np.abs(sigma_matrix - fcfs_rank[:, None]) <= k  # (n, r)
+        no_eligible = ~eligible.any(axis=1)
+        if no_eligible.any():
+            runway_found = np.array(
+                [ac.runway_id in rwy_index for ac in self._fleet]
+            )
+            argmin_eta = np.argmin(eta_matrix, axis=1)
+            fallback_col = np.where(runway_found, current_col, argmin_eta)
+            eligible[no_eligible, fallback_col[no_eligible]] = True
+
+        # np.argmin, like the original min(eligible, key=...), returns the
+        # first (lowest-j) occurrence of the minimum on ties.
+        masked_eta = np.where(eligible, eta_matrix, np.inf)
+        best_rwy_idx = np.argmin(masked_eta, axis=1)
 
         for i, ac in enumerate(self._fleet):
             if self.enable_stall_detection and ac.acid in self._stalled_acids:
