@@ -95,6 +95,51 @@ The production evaluation flow for the Phase III Step 10 scale-up (rolling arriv
 - **`cps_metrics_offline.py`** → **`summarize_batch_sweep.py`** → **`step10_deep_analysis.py`** → **`analyze_fairness_weight_offline.py`** — a layered offline-metrics pipeline: base per-combo metric recomputation, sweep-wide tabulation, deep collision/stall/tortuosity diagnostics, and the `fairness_weight` calibration analysis, each building on the one before it rather than duplicating it.
 - **`generate_paper_report.py`** — single consolidated script producing every LaTeX table/figure the Phase III thesis chapter needs, wrapping (not reimplementing) the four scripts above; output lands in `cps_coordination/figures/paper_report/`. See `.claude/plans/phase3_cps_coordination_plan.md` for the session that built it.
 
+### Launching Step 10 in a dedicated terminal (macOS)
+
+`run_step10_scale10k.sh` is sized for a cluster/runner, not a quick local check — the full 4-combo grid at M=2,000 measures ~8.2h wall-clock sequentially (~2.1h/combo). Two things matter for a run that long in Terminal.app: closing the window normally kills the process (`SIGHUP`), and macOS can sleep mid-run. All commands below assume your working directory is the repo root (the parent of `cps_coordination/`).
+
+Before launching, find the frozen worker `run_id` you'll pass in (the latest run with a `final_model.zip`):
+
+```bash
+python3 -c "import glob,os; c=sorted(glob.glob('experiments/PathPlanningGoalEnv-v0/SAC/models/*/final_model.zip')); print(os.path.basename(os.path.dirname(c[-1])))"
+```
+
+**Recommended: `nohup` + `caffeinate`, log to a file (no extra installs — both ship with macOS)**
+
+```bash
+SAVE_ROOT=experiments/cps_eval/scale_10k_$(date +%Y%m%d_%H%M%S)
+LOG=cps_coordination/data/step10_launch_$(date +%Y%m%d_%H%M%S).log
+
+RUN_ID=<your_run_id> SAVE_ROOT=$SAVE_ROOT \
+  nohup caffeinate -i ./cps_coordination/scripts/run_step10_scale10k.sh > "$LOG" 2>&1 &
+disown
+
+echo "PID: $!"
+echo "Log: $LOG"
+echo "Save root: $SAVE_ROOT"
+```
+
+You can now close the Terminal window/tab — `nohup` ignores the hangup signal and `disown` detaches the job from the shell, so it keeps running. `caffeinate -i` blocks idle sleep for as long as the wrapped command runs.
+
+- Check progress: `tail -f "$LOG"`
+- Stop cleanly (flushes telemetry first, safe to resume): `kill -INT <PID>` — avoid `kill -9`, which skips the flush.
+- Resume an interrupted run: re-run the same command with `RESUME=1` added and the same `SAVE_ROOT`.
+
+**Alternative: `screen`** (also ships with macOS) if you'd rather reattach to a live session than tail a log file:
+
+```bash
+screen -S step10
+# inside the screen session:
+SAVE_ROOT=experiments/cps_eval/scale_10k_$(date +%Y%m%d_%H%M%S) RUN_ID=<your_run_id> ./cps_coordination/scripts/run_step10_scale10k.sh
+# detach: Ctrl-A then D  (leaves it running)
+# reattach later: screen -r step10
+```
+
+Either way, `caffeinate -i` only blocks *idle* sleep, not a manually closed laptop lid — keep the machine plugged in with the lid open, or add `caffeinate -s` too, if you're not certain about your sleep-on-lid-close setting.
+
+Once a combo (or the whole sweep) finishes: `python cps_coordination/scripts/step10_deep_analysis.py --sweep-root $SAVE_ROOT`.
+
 ## CLI usage
 
 ```bash
