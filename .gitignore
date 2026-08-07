@@ -13,6 +13,7 @@ dist/
 path_planning/rta/data/
 cps_coordination/data/
 *.png
+*.parquet
 
 graphify-out/
 .claude/

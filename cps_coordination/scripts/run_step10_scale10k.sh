@@ -118,6 +118,34 @@
 
 set -euo pipefail
 
+# --- clean, resumable stop on kill -INT / kill -TERM ----------------------
+# A plain foreground `uv run python ...` call defeats a script's own signal
+# trap: bash defers trap handling until that command returns on its own, AND
+# an interactive-shell-style bash actively IGNORES SIGINT while it has a
+# foreground child running (so a stray Ctrl-C/kill -INT wouldn't stop this
+# script at all, only whatever it happened to be running at the time).
+# Backgrounding each run_batch_eval.py invocation (`&` + explicit
+# `wait "$CHILD_PID"`, see run_one_mode() and the COMBO branch below) makes
+# the wait interruptible, so a single kill -INT/-TERM sent to *this script's
+# own PID* (what launch_step10_dedicated_terminal.sh reports and $! captures)
+# reliably: forwards the signal to the actual worker -- which has its own
+# SIGINT/SIGTERM handler (finishes the in-flight episode, flushes and closes
+# the current combo's telemetry) -- waits for it to exit, then exits this
+# script itself, critically WITHOUT starting the next mode/combo. Safe to
+# resume afterward with RESUME=1.
+CHILD_PID=""
+_cleanup() {
+    trap - INT TERM  # don't re-enter if a second signal arrives mid-cleanup
+    echo "" >&2
+    echo "[run_step10_scale10k] stop requested -- forwarding to worker (pid ${CHILD_PID:-none yet}) and exiting once it flushes (not starting any further combos/modes)." >&2
+    if [ -n "$CHILD_PID" ]; then
+        kill -TERM "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
+    fi
+    exit 130
+}
+trap _cleanup INT TERM
+
 # --- REQUIRED ---
 RUN_ID="${RUN_ID:?Set RUN_ID to the frozen worker run_id under experiments/PathPlanningGoalEnv-v0/SAC/models/ (e.g. 20260615_095840, the latest run with a final_model.zip as of this writing -- verify with: python3 -c \"import glob,os; c=sorted(glob.glob('experiments/PathPlanningGoalEnv-v0/SAC/models/*/final_model.zip')); print(os.path.basename(os.path.dirname(c[-1])))\").}"
 
@@ -188,7 +216,10 @@ run_one_mode() {
         --save-path-root "$SAVE_ROOT" \
         --seed-base "$RUN_SEED_BASE" \
         --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
-        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}"
+        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" &
+    CHILD_PID=$!
+    wait "$CHILD_PID"
+    CHILD_PID=""
 }
 
 # --- combo selection ---
@@ -214,7 +245,10 @@ if [ -n "${COMBO:-}" ]; then
         --save-path-root "$SAVE_ROOT" \
         --seed-base "$RUN_SEED_BASE" \
         --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
-        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}"
+        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" &
+    CHILD_PID=$!
+    wait "$CHILD_PID"
+    CHILD_PID=""
     echo "Done -> $SAVE_ROOT/k${K_CPS}_${MODE}_fw${FW}/"
     if [ "$SHARDS" -gt 1 ]; then
         echo "This was shard $SHARD_INDEX/$SHARDS -- once all $SHARDS shards finish, merge with:"

@@ -95,50 +95,73 @@ The production evaluation flow for the Phase III Step 10 scale-up (rolling arriv
 - **`cps_metrics_offline.py`** → **`summarize_batch_sweep.py`** → **`step10_deep_analysis.py`** → **`analyze_fairness_weight_offline.py`** — a layered offline-metrics pipeline: base per-combo metric recomputation, sweep-wide tabulation, deep collision/stall/tortuosity diagnostics, and the `fairness_weight` calibration analysis, each building on the one before it rather than duplicating it.
 - **`generate_paper_report.py`** — single consolidated script producing every LaTeX table/figure the Phase III thesis chapter needs, wrapping (not reimplementing) the four scripts above; output lands in `cps_coordination/figures/paper_report/`. See `.claude/plans/phase3_cps_coordination_plan.md` for the session that built it.
 
-### Launching Step 10 in a dedicated terminal (macOS)
+### Running Step 10 in a dedicated terminal (macOS)
 
-`run_step10_scale10k.sh` is sized for a cluster/runner, not a quick local check — the full 4-combo grid at M=2,000 measures ~8.2h wall-clock sequentially (~2.1h/combo). Two things matter for a run that long in Terminal.app: closing the window normally kills the process (`SIGHUP`), and macOS can sleep mid-run. All commands below assume your working directory is the repo root (the parent of `cps_coordination/`).
+`run_step10_scale10k.sh` is sized for a cluster/runner, not a quick local check — the full 4-combo grid at M=2,000 measures ~8.2h wall-clock sequentially (~2.1h/combo). Three scripts wrap it for unattended local use, each doing one job:
 
-Before launching, find the frozen worker `run_id` you'll pass in (the latest run with a `final_model.zip`):
+| Script | Purpose |
+|---|---|
+| `scripts/launch_step10_dedicated_terminal.sh` | Start a run, safely, from Terminal.app |
+| `scripts/step10_progress.sh` | Check (or watch) how far along a run is |
+| `scripts/step10_stop.sh` | Stop a run cleanly and resumably |
+
+#### Starting a run
 
 ```bash
-python3 -c "import glob,os; c=sorted(glob.glob('experiments/PathPlanningGoalEnv-v0/SAC/models/*/final_model.zip')); print(os.path.basename(os.path.dirname(c[-1])))"
+./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
 ```
 
-**Recommended: `nohup` + `caffeinate`, log to a file (no extra installs — both ship with macOS)**
+Run it from the repo root (it also `cd`s there itself, so it works from anywhere). It:
+
+1. Auto-resolves the frozen worker `run_id` (latest run with a `final_model.zip`) unless `RUN_ID` is set.
+2. Asserts `cps_scale_10k.yaml`'s runway scope still resolves to `18R 27` and **aborts instead of launching** if it doesn't — `run_step10_scale10k.sh` never passes `--runways` itself, it relies entirely on that YAML field, so this catches a silent drift back to all-12-runways before an 8-hour run rather than after.
+3. Prints the full resolved config (runway scope, episodes/combo, worker checkpoint path, per-mode `fairness_weight`, save root) for you to review.
+4. Runs the capped M=10 smoke test (skip with `SKIP_SMOKE=1` — not recommended except when resuming a `SAVE_ROOT` already smoke-tested this session).
+5. Asks for a `y/N` confirmation.
+6. Launches with `PYTHONUNBUFFERED=1` (Python block-buffers stdout when it's not a TTY, i.e. redirected to a file — without this, progress prints wouldn't reach the log until an internal buffer happened to fill), wrapped in `nohup caffeinate -i ... &` + `disown` so it survives closing the Terminal window and blocks idle sleep, logging to a timestamped file under `cps_coordination/data/`.
+
+It then prints exactly what to run next:
+```
+Progress:                  ./cps_coordination/scripts/step10_progress.sh <save_root>
+Watch + notify on stop:    ./cps_coordination/scripts/step10_progress.sh <save_root> --watch --notify
+Stop cleanly (resumable):  ./cps_coordination/scripts/step10_stop.sh <save_root>
+Resume later:              RESUME=1 SAVE_ROOT=<save_root> ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
+```
+
+Useful env var overrides (see the script header for the full list): `RUN_ID`, `SAVE_ROOT`, `COMBO="k_cps:mode:fw"` (single combo instead of the full sweep — e.g. `COMBO="3:dynamic:0.5"`), `RESUME=1`, `STATIC_FW`/`DYNAMIC_FW`.
+
+`caffeinate -i` only blocks *idle* sleep, not a manually closed laptop lid, so keep the machine plugged in with the lid open (or set `caffeinate -s` yourself if unsure about your sleep-on-lid-close setting).
+
+#### Checking progress
 
 ```bash
-SAVE_ROOT=experiments/cps_eval/scale_10k_$(date +%Y%m%d_%H%M%S)
-LOG=cps_coordination/data/step10_launch_$(date +%Y%m%d_%H%M%S).log
-
-RUN_ID=<your_run_id> SAVE_ROOT=$SAVE_ROOT \
-  nohup caffeinate -i ./cps_coordination/scripts/run_step10_scale10k.sh > "$LOG" 2>&1 &
-disown
-
-echo "PID: $!"
-echo "Log: $LOG"
-echo "Save root: $SAVE_ROOT"
+./cps_coordination/scripts/step10_progress.sh                    # newest SAVE_ROOT, one-shot
+./cps_coordination/scripts/step10_progress.sh <save_root> --watch --notify
 ```
 
-You can now close the Terminal window/tab — `nohup` ignores the hangup signal and `disown` detaches the job from the shell, so it keeps running. `caffeinate -i` blocks idle sleep for as long as the wrapped command runs.
+Per combo, it shows exact episode/success-rate counts once a combo's Parquet file is durably readable (`source: parquet (final)`), or the latest `[N/M] episodes logged` line from the log while a combo is still in progress (`source: log, attempted (live)`) — `run_batch_eval.py`'s Parquet writer stays open for a combo's *entire* run and is only closed when that combo finishes or is cleanly stopped, so it's genuinely unreadable the whole time in between, not just briefly. A trailing `Verdict:` line summarizes `RUNNING` / `COMPLETE` / `STOPPED_EARLY (x/y combos complete)`.
 
-- Check progress: `tail -f "$LOG"`
-- Stop cleanly (flushes telemetry first, safe to resume): `kill -INT <PID>` — avoid `kill -9`, which skips the flush.
-- Resume an interrupted run: re-run the same command with `RESUME=1` added and the same `SAVE_ROOT`.
+`--watch --notify` refreshes every `INTERVAL` seconds (default 30) and, the moment it detects the process has stopped — whether it finished normally or died/was interrupted — fires a native macOS notification with the verdict and exits, so an 8-20h run doesn't need a terminal babysat the whole time.
 
-**Alternative: `screen`** (also ships with macOS) if you'd rather reattach to a live session than tail a log file:
+#### Stopping a run
+
+```bash
+./cps_coordination/scripts/step10_stop.sh <save_root>
+```
+
+Don't `kill` a PID directly. `run_step10_scale10k.sh`'s "full sequential" mode runs static and dynamic mode as two *separate* `run_batch_eval.py` invocations back to back — signaling only the current worker just makes the wrapper move on and start the next mode's worker fresh, and `$!` from a `nohup caffeinate -i ... &` launch doesn't reliably resolve to the process that can stop that chain either. `step10_stop.sh` finds the actual live worker for a `SAVE_ROOT`, walks up its process ancestry to the `run_step10_scale10k.sh` wrapper (which installs its own signal trap), and signals that — stopping the current combo gracefully (finishes the in-flight episode, flushes and closes telemetry) *and* preventing any further combo/mode from starting. Safe to resume afterward with `RESUME=1`.
+
+**Alternative: `screen`** (ships with macOS) if you'd rather reattach to a live session than tail a log file — the launcher's nohup approach still applies underneath, this just changes how you observe it:
 
 ```bash
 screen -S step10
 # inside the screen session:
-SAVE_ROOT=experiments/cps_eval/scale_10k_$(date +%Y%m%d_%H%M%S) RUN_ID=<your_run_id> ./cps_coordination/scripts/run_step10_scale10k.sh
+./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
 # detach: Ctrl-A then D  (leaves it running)
 # reattach later: screen -r step10
 ```
 
-Either way, `caffeinate -i` only blocks *idle* sleep, not a manually closed laptop lid — keep the machine plugged in with the lid open, or add `caffeinate -s` too, if you're not certain about your sleep-on-lid-close setting.
-
-Once a combo (or the whole sweep) finishes: `python cps_coordination/scripts/step10_deep_analysis.py --sweep-root $SAVE_ROOT`.
+Once a combo (or the whole sweep) finishes: `uv run python cps_coordination/scripts/step10_deep_analysis.py --sweep-root <save_root>`.
 
 ## CLI usage
 
