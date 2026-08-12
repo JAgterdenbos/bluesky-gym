@@ -127,6 +127,29 @@ def _num(x: Any, decimals: int = 2) -> str:
     return "--" if x != x or x == "nan" else f"{float(x):.{decimals}f}"
 
 
+def _is_nan_like(x: Any) -> bool:
+    return x != x or x == "nan"
+
+
+def _num_std(mean: Any, std: Any, decimals: int = 2) -> str:
+    """``mean`` formatted as by :func:`_num`, with `` $\\pm$ std`` appended
+    when a defined std is available (episode-to-episode variance, from the
+    metric's ``<metric>_std`` companion key)."""
+    mean_s = _num(mean, decimals)
+    if mean_s == "--" or _is_nan_like(std):
+        return mean_s
+    return f"{mean_s} $\\pm$ {float(std):.{decimals}f}"
+
+
+def _pct_std(mean: Any, std: Any) -> str:
+    """``mean`` formatted as by :func:`_pct`, with `` $\\pm$ std%`` appended
+    when a defined std is available."""
+    mean_s = _pct(mean)
+    if mean_s == "--" or _is_nan_like(std):
+        return mean_s
+    return f"{mean_s} $\\pm$ {float(std) * 100:.1f}\\%"
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Combo metric loading (reuses discover_combos + recompute_metrics directly,
 # not summarize_batch_sweep.summarize()'s DataFrame -- that wrapper drops
@@ -169,15 +192,18 @@ def build_throughput_table(combo_rows: List[Dict[str, Any]]) -> str:
             "M (episodes)": r["n_episodes"],
             "N (aircraft)": r["n_aircraft"],
             "success rate": _pct(r["success_rate"]),
-            r"$\Gamma$ (ac/h)": _num(r["gamma"], 2),
-            r"$C_{sep}$": _pct(r["c_sep"]),
-            r"$R_{rec}$": _pct(r["r_rec"]),
+            r"$\Gamma$ (ac/h)": _num_std(r["gamma"], r.get("gamma_std"), 2),
+            r"$C_{sep}$": _pct_std(r["c_sep"], r.get("c_sep_std")),
+            r"$R_{rec}$": _pct_std(r["r_rec"], r.get("r_rec_std")),
         })
     df = pd.DataFrame(out_rows)
     return _df_to_latex(
         df,
         caption="Throughput and separation-compliance results across the "
-                "$k_{cps} \\times$ runway\\_assignment\\_mode grid.",
+                "$k_{cps} \\times$ runway\\_assignment\\_mode grid. "
+                "$\\pm$ figures are the sample standard deviation across "
+                "episodes (episode-to-episode variance, not a standard "
+                "error of the mean).",
         label="tab:throughput_results",
     )
 
@@ -193,11 +219,15 @@ def build_delay_ripple_table(combo_rows: List[Dict[str, Any]]) -> str:
         out_rows.append({
             "k": r["k_cps"],
             "mode": r["mode"],
-            r"$\Delta\epsilon_{static}$ (s)": _num(r["delta_epsilon_vs_static"], 1),
-            r"$\Delta\epsilon_{uncoord}$ (s)": _num(r["delta_epsilon_vs_uncoordinated"], 1),
-            r"$\rho_{ripple}$": _num(r["rho_ripple"], 3),
-            "stall\\_unrecovered": _pct(r["stall_unrecovered"]),
-            "stall\\_recovery\\_rate": _pct(r["stall_recovery_rate"]),
+            r"$\Delta\epsilon_{static}$ (s)": _num_std(
+                r["delta_epsilon_vs_static"], r.get("delta_epsilon_vs_static_std"), 1
+            ),
+            r"$\Delta\epsilon_{uncoord}$ (s)": _num_std(
+                r["delta_epsilon_vs_uncoordinated"], r.get("delta_epsilon_vs_uncoordinated_std"), 1
+            ),
+            r"$\rho_{ripple}$": _num_std(r["rho_ripple"], r.get("rho_ripple_std"), 3),
+            "stall\\_unrecovered": _pct_std(r["stall_unrecovered"], r.get("stall_unrecovered_std")),
+            "stall\\_recovery\\_rate": _pct_std(r["stall_recovery_rate"], r.get("stall_recovery_rate_std")),
         })
     df = pd.DataFrame(out_rows)
     return _df_to_latex(
@@ -209,7 +239,8 @@ def build_delay_ripple_table(combo_rows: List[Dict[str, Any]]) -> str:
                 "eq:tracking\\_degradation quantity (RQ2.2 headline); "
                 "$\\Delta\\epsilon_{uncoord}$ is a secondary, "
                 "explicitly-not-Groot-et-al.\\ reference against an "
-                "uncoordinated control run.",
+                "uncoordinated control run. $\\pm$ figures are the sample "
+                "standard deviation across episodes.",
         label="tab:delay_ripple",
     )
 

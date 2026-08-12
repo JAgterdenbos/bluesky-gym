@@ -1,0 +1,29 @@
+n_episodes: 2000
+n_aircraft: 50000
+success_rate: 0.997
+gamma: 9.6345
+gamma_std: 0.5373
+gamma_r:
+  18R: 8.0916
+  '27': 1.5429
+c_sep: 0.9628
+c_sep_std: 0.0397
+c_sep_from_landings_crosscheck: 0.9628
+delta_epsilon_vs_static: -644.1232
+delta_epsilon_vs_static_std: 126.0274
+delta_epsilon_vs_uncoordinated: 0.4694
+delta_epsilon_vs_uncoordinated_std: 5.1649
+r_rec: 0.9971
+r_rec_std: 0.0112
+rho_ripple: 0.0384
+rho_ripple_std: 0.2398
+stall_unrecovered: 0.0
+stall_unrecovered_std: 0.0
+stall_recovery_rate: 1.0
+stall_recovery_rate_std: 0.0
+stall_recovered: 0.0001
+stall_recovered_std: 0.0018
+stall_rate: 0.0001
+stall_rate_std: 0.0018
+tortuosity_mean: 5.2526
+entropy_bits: 12.5886

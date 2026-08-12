@@ -36,7 +36,8 @@ import yaml
 from cps_coordination.experiments.metrics import (
     _compute_separation_compliance,
     _compute_throughput,
-    _lag1_autocorrelation,
+    _episode_ratio_mean_std,
+    _grouped_lag1_autocorrelation,
 )
 from path_planning.rta.testing.spatial_visitation_analysis import (
     build_heatmap,
@@ -116,9 +117,11 @@ def recompute_metrics(
     success_rate = float(aircraft_df["success"].mean())
 
     successful = aircraft_df[aircraft_df["success"]]
-    # Pooled by runway_id alone: correct for throughput (a landing count over
-    # the total observed time span), but NOT valid for separation-compliance
-    # pairwise gaps -- see landing_times_by_rwy_episode below.
+    # Landing COUNTS can be pooled by runway_id alone -- correct for
+    # throughput's numerator, NOT valid for separation-compliance pairwise
+    # gaps (see landing_times_by_rwy_episode below). The elapsed-time
+    # DENOMINATOR needs its own per-episode handling below (bug found
+    # 2026-08-08; mirrors the fix in experiments/metrics.py).
     landing_times_by_rwy: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
     # Separation compliance must never compare landing times across
     # different episodes' independent simulation clocks -- each episode
@@ -135,11 +138,40 @@ def recompute_metrics(
             (float(row["actual_landing_time"]), row["acid"])
         )
 
-    total_time_s = float(successful["actual_landing_time"].max()) if not successful.empty else 3600.0
+    # Sum each episode's own elapsed span (max successful landing time
+    # within that episode) rather than a pooled max() across all episodes --
+    # actual_landing_time resets near zero at every episode's env.reset(),
+    # so a global max() only recovers the single largest episode's own
+    # duration, not the true total elapsed time across all episodes.
+    total_time_s = (
+        float(successful.groupby("episode_id")["actual_landing_time"].max().sum())
+        if not successful.empty else 3600.0
+    )
     window_h = max(total_time_s / 3600.0, 1e-6)
     gamma, gamma_r = _compute_throughput(landing_times_by_rwy, window_h)
 
-    wake_cats = dict(zip(aircraft_df["acid"], aircraft_df["wake_cat"]))
+    # gamma_std: dispersion of each episode's OWN landings/hour ratio --
+    # a genuinely different quantity from gamma itself (a pooled
+    # total/total-window ratio, not a mean of per-episode ratios), kept
+    # purely as an episode-to-episode variance diagnostic.
+    if not successful.empty:
+        episode_counts = successful.groupby("episode_id").size()
+        episode_span_h = (successful.groupby("episode_id")["actual_landing_time"].max() / 3600.0).clip(
+            lower=1e-6
+        )
+        per_episode_gamma = (episode_counts / episode_span_h).to_numpy()
+        gamma_std = (
+            float(np.std(per_episode_gamma, ddof=1)) if len(per_episode_gamma) >= 2 else float("nan")
+        )
+    else:
+        gamma_std = float("nan")
+
+    # Keyed by (episode_id, acid), not acid alone -- see
+    # _compute_separation_compliance's docstring for the collision rationale
+    # (acids are reused across episode slots).
+    wake_cats = dict(
+        zip(zip(aircraft_df["episode_id"], aircraft_df["acid"]), aircraft_df["wake_cat"])
+    )
     c_sep_from_pairs = recompute_separation_compliance(separation_df, sep_tolerance_s)
     # Cross-check against the from-scratch derivation used at collection
     # time (same landing-time-sorted-pairs logic, episode-scoped) — should
@@ -147,6 +179,17 @@ def recompute_metrics(
     c_sep_from_landings = _compute_separation_compliance(
         landing_times_by_rwy_episode, wake_cats, recat_matrix, tolerance_s=sep_tolerance_s,
     )
+    # c_sep_std: from the same per-pair separation_df the primary c_sep
+    # (c_sep_from_pairs) is computed from, grouped by episode_id.
+    if not separation_df.empty:
+        compliant_indicator = (
+            separation_df["gap_actual_s"] >= (separation_df["required_sep_s"] - sep_tolerance_s)
+        ).to_numpy(dtype=float)
+        _, c_sep_std = _episode_ratio_mean_std(
+            separation_df["episode_id"].to_numpy(), compliant_indicator
+        )
+    else:
+        c_sep_std = float("nan")
 
     # Two distinct Δε comparisons -- see metrics.py::compute_aggregate_metrics
     # for the full rationale. `vs_static` is the literal Eq. tracking_degradation
@@ -155,6 +198,16 @@ def recompute_metrics(
     # al.'s published data. `rta_error_static` is only present in telemetry
     # collected after the static-TTA addition -- older Parquet files (e.g.
     # a sweep collected pre-addition) simply have no `vs_static` metric.
+    #
+    # `_std` masks require BOTH rta_error_cps and rta_error_static/solo to
+    # be non-NaN, matching `.dropna()`'s effective mask on the primary
+    # value above -- not just the static/solo side. The cps/static/solo
+    # passes are three causally independent env rollouts (see
+    # metrics.py), so a stray cps-side NaN on an otherwise-valid record
+    # would otherwise poison that record's whole *episode* in
+    # `_episode_ratio_mean_std`'s per-episode sum (the dataset on disk
+    # currently has zero such rows -- checked directly).
+    cps_valid = ~aircraft_df["rta_error_cps"].isna()
     if "rta_error_static" in aircraft_df:
         delta_eps_static_values = (
             aircraft_df["rta_error_cps"].abs() - aircraft_df["rta_error_static"].abs()
@@ -162,13 +215,24 @@ def recompute_metrics(
         delta_epsilon_vs_static = (
             float(delta_eps_static_values.mean()) if len(delta_eps_static_values) else float("nan")
         )
+        _, delta_epsilon_vs_static_std = _episode_ratio_mean_std(
+            aircraft_df["episode_id"].to_numpy(),
+            (aircraft_df["rta_error_cps"].abs() - aircraft_df["rta_error_static"].abs()).to_numpy(),
+            (cps_valid & ~aircraft_df["rta_error_static"].isna()).to_numpy(),
+        )
     else:
         delta_epsilon_vs_static = float("nan")
+        delta_epsilon_vs_static_std = float("nan")
     delta_eps_uncoord_values = (
         aircraft_df["rta_error_cps"].abs() - aircraft_df["rta_error_solo"].abs()
     ).dropna()
     delta_epsilon_vs_uncoordinated = (
         float(delta_eps_uncoord_values.mean()) if len(delta_eps_uncoord_values) else float("nan")
+    )
+    _, delta_epsilon_vs_uncoordinated_std = _episode_ratio_mean_std(
+        aircraft_df["episode_id"].to_numpy(),
+        (aircraft_df["rta_error_cps"].abs() - aircraft_df["rta_error_solo"].abs()).to_numpy(),
+        (cps_valid & ~aircraft_df["rta_error_solo"].isna()).to_numpy(),
     )
 
     # --- R_rec (Eq. recovery_rate): M_update = mid-trajectory-updated
@@ -178,9 +242,27 @@ def recompute_metrics(
         float((updated["rta_error_cps"].abs() <= rta_tolerance_s).mean())
         if len(updated) else float("nan")
     )
+    _, r_rec_std = _episode_ratio_mean_std(
+        aircraft_df["episode_id"].to_numpy(),
+        (aircraft_df["rta_error_cps"].abs() <= rta_tolerance_s).to_numpy(dtype=float),
+        aircraft_df["tta_updated_mid_trajectory"].to_numpy(dtype=bool),
+    )
 
-    sorted_success = successful.sort_values("actual_landing_time")
-    rho_ripple = _lag1_autocorrelation(list(sorted_success["rta_error_cps"]))
+    # Lag-1 autocorrelation must be computed WITHIN each episode's own
+    # arrival sequence, not pooled across episodes -- a lag-1 pair must
+    # never straddle two independent simulation runs' clocks (same bug
+    # class as throughput's total_time_s, fixed 2026-08-08). Vectorized via
+    # _grouped_lag1_autocorrelation directly on numpy arrays rather than a
+    # Python-level loop over a pandas groupby.
+    rho_ripple, rho_ripple_std = (
+        _grouped_lag1_autocorrelation(
+            successful["episode_id"].to_numpy(),
+            successful["actual_landing_time"].to_numpy(),
+            successful["rta_error_cps"].to_numpy(),
+        )
+        if not successful.empty
+        else (float("nan"), float("nan"))
+    )
 
     # --- Stall metrics (pre-Step-10 audit §1.3) -- mirrors
     # CPSMetricsReporter.compute_aggregate_metrics's split.
@@ -199,32 +281,56 @@ def recompute_metrics(
         stall_recovery_rate = (
             n_stall_recovered / n_stall_detected if n_stall_detected > 0 else float("nan")
         )
+        episode_ids_arr = aircraft_df["episode_id"].to_numpy()
+        stall_arr = stall_detected_col.to_numpy(dtype=float)
+        success_arr = success_col.to_numpy(dtype=float)
+        stall_mask = stall_detected_col.to_numpy(dtype=bool)
+        _, stall_rate_std = _episode_ratio_mean_std(episode_ids_arr, stall_arr)
+        _, stall_recovered_std = _episode_ratio_mean_std(episode_ids_arr, stall_arr * success_arr)
+        _, stall_unrecovered_std = _episode_ratio_mean_std(
+            episode_ids_arr, stall_arr * (1.0 - success_arr)
+        )
+        _, stall_recovery_rate_std = _episode_ratio_mean_std(episode_ids_arr, success_arr, stall_mask)
     else:
         stall_rate = stall_recovered = stall_unrecovered = stall_recovery_rate = float("nan")
+        stall_rate_std = stall_recovered_std = stall_unrecovered_std = stall_recovery_rate_std = float("nan")
+
+    def _std_or_nan(x: float) -> Any:
+        return round(x, 4) if not np.isnan(x) else "nan"
 
     return {
         "n_episodes": int(aircraft_df["episode_id"].nunique()),
         "n_aircraft": n_aircraft,
         "success_rate": round(success_rate, 4),
         "gamma": round(gamma, 4),
+        "gamma_std": _std_or_nan(gamma_std),
         "gamma_r": {rwy: round(v, 4) for rwy, v in gamma_r.items()},
         "c_sep": round(c_sep_from_pairs, 4) if not np.isnan(c_sep_from_pairs) else "nan",
+        "c_sep_std": _std_or_nan(c_sep_std),
         "c_sep_from_landings_crosscheck": (
             round(float(c_sep_from_landings), 4) if not np.isnan(c_sep_from_landings) else "nan"
         ),
         "delta_epsilon_vs_static": (
             round(delta_epsilon_vs_static, 4) if not np.isnan(delta_epsilon_vs_static) else "nan"
         ),
+        "delta_epsilon_vs_static_std": _std_or_nan(delta_epsilon_vs_static_std),
         "delta_epsilon_vs_uncoordinated": (
             round(delta_epsilon_vs_uncoordinated, 4)
             if not np.isnan(delta_epsilon_vs_uncoordinated) else "nan"
         ),
+        "delta_epsilon_vs_uncoordinated_std": _std_or_nan(delta_epsilon_vs_uncoordinated_std),
         "r_rec": round(r_rec, 4) if not np.isnan(r_rec) else "nan",
+        "r_rec_std": _std_or_nan(r_rec_std),
         "rho_ripple": round(rho_ripple, 4) if not np.isnan(rho_ripple) else "nan",
+        "rho_ripple_std": _std_or_nan(rho_ripple_std),
         "stall_unrecovered": round(stall_unrecovered, 4) if not np.isnan(stall_unrecovered) else "nan",
+        "stall_unrecovered_std": _std_or_nan(stall_unrecovered_std),
         "stall_recovery_rate": round(stall_recovery_rate, 4) if not np.isnan(stall_recovery_rate) else "nan",
+        "stall_recovery_rate_std": _std_or_nan(stall_recovery_rate_std),
         "stall_recovered": round(stall_recovered, 4) if not np.isnan(stall_recovered) else "nan",
+        "stall_recovered_std": _std_or_nan(stall_recovered_std),
         "stall_rate": round(stall_rate, 4) if not np.isnan(stall_rate) else "nan",  # diagnostic only
+        "stall_rate_std": _std_or_nan(stall_rate_std),
     }
 
 
