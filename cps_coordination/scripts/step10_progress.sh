@@ -125,7 +125,7 @@ save_root, episodes, log_path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 
 # --- parse the log for the live (pre-close) progress signal ---
 combo_start_re = re.compile(
-    r"^--- combo k_cps=(\d+), mode=(\w+), fairness_weight=([\d.]+)( done)? -> (\S+) ---$"
+    r"^--- combo k_cps=(\d+), mode=(\w+)( done)? -> (\S+) ---$"
 )
 progress_re = re.compile(r"^\s*\[(\d+)/(\d+)\] episodes logged$")
 
@@ -138,8 +138,8 @@ if log_path and os.path.exists(log_path):
         for line in fh:
             m = combo_start_re.match(line.rstrip("\n"))
             if m:
-                k_cps, mode, fw, done = m.group(1), m.group(2), float(m.group(3)), m.group(4)
-                key = f"k{k_cps}_{mode}_fw{fw:g}"
+                k_cps, mode, done = m.group(1), m.group(2), m.group(3)
+                key = f"k{k_cps}_{mode}"
                 if done:
                     log_done.add(key)
                     current_combo = None
@@ -151,7 +151,11 @@ if log_path and os.path.exists(log_path):
                 log_progress[current_combo] = int(m.group(1))
 
 # --- enumerate combos: union of on-disk dirs and anything seen in the log ---
-combo_dirs = {os.path.basename(d): d for d in glob.glob(os.path.join(save_root, "k*_fw*"))}
+combo_dirs = {
+    os.path.basename(d): d
+    for pattern in ("k*_static", "k*_dynamic")
+    for d in glob.glob(os.path.join(save_root, pattern))
+}
 combo_keys = set(combo_dirs) | set(log_progress) | log_done
 
 if not combo_keys:
@@ -161,7 +165,7 @@ if not combo_keys:
 
 
 def sort_key(key):
-    m = re.match(r"^k(\d+)_(static|dynamic)_fw", key)
+    m = re.match(r"^k(\d+)_(static|dynamic)$", key)
     if not m:
         return (2, 0, key)
     return (0 if m.group(2) == "static" else 1, int(m.group(1)), key)

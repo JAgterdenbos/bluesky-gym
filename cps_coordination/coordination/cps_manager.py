@@ -44,7 +44,7 @@ from typing import Dict, List, Literal, Optional, Tuple, get_args, TYPE_CHECKING
 
 import numpy as np
 
-from bluesky_gym.envs.pathplanning_goal_env import MAX_DISTANCE
+from bluesky_gym.envs.pathplanning_goal_env import ACTION_TIME, MAX_DISTANCE
 
 if TYPE_CHECKING:
     from cps_coordination.coordination.eta_surrogate import ETASurrogate
@@ -153,16 +153,6 @@ class CPSManager:
         ``stall_detected`` telemetry is available either way -- set this to
         False to reproduce the pre-mitigation behaviour exactly, e.g. for a
         before/after ablation comparison.
-    fairness_weight : float
-        Weight (w2) on the slack-protection term in
-        :meth:`_apply_k_cps_constraint`'s cost rule. ``0.0`` (default)
-        reproduces exact FCFS ordering -- provably total-delay-optimal
-        under wake-homogeneity (§2.2), so this is a safe, opt-in
-        generalisation. ``> 0.0`` biases the k-CPS window's greedy
-        selection to prioritise aircraft with less remaining slack (and
-        any already-``is_stalled``-flagged aircraft) for earlier, lower-
-        imposed-delay scheduling positions, at the cost of imposing more
-        delay on higher-slack aircraft instead.
     enable_cross_cycle_runway_seeding : bool
         If True (default), :meth:`_tta_for` seeds a runway's "previous
         scheduled aircraft" from ``self._runway_last_committed`` (persisted
@@ -204,18 +194,104 @@ class CPSManager:
     STALL_WINDOW_S = 1800.0
     STALL_PROGRESS_EPS_KM = 5.0
 
-    # Fairness-weighted k-CPS selection (_apply_k_cps_constraint, §2.3 of the
-    # pre-Step-10 audit): reference scale (seconds) for slack_penalty --
-    # matches CPSEnvKwargsConfig's own documented ~20-minute path-stretching
-    # delay-absorption capacity for the frozen worker (see
-    # experiments/config.py's reduced_wake_separation docstring), so an
-    # aircraft's slack_penalty saturates to 0 once it has at least that much
-    # margin before its own predicted arrival, and grows as margin shrinks
-    # below it. STALL_SLACK_PENALTY_BOOST_S adds a fixed extra boost for any
-    # aircraft already flagged is_stalled, on top of its margin-derived
-    # penalty (see _slack_penalty).
-    SLACK_REFERENCE_S = 1200.0
-    STALL_SLACK_PENALTY_BOOST_S = 1200.0
+    # Probation (non-sticky re-check) for a newly-flagged aircraft: rather
+    # than finalizing a stall the instant STALL_WINDOW_S elapses, give the
+    # aircraft one more RECOVERY_WINDOW_S to prove the flag was premature --
+    # if its distance beats the at-flag value by RECOVERY_PROGRESS_EPS_KM
+    # within that window, un-flag and resume normal tracking instead of
+    # finalizing. Added after the capacity-sweep investigation
+    # (.claude/plans/stall_rate_investigation.md, 2026-08-12) found the
+    # original sticky rule flags aircraft ~140-150km from their IAF that go
+    # on to make real further progress ~99-100% of the time -- STALL_WINDOW_S
+    # was calibrated against episode length, not per-flight length (a typical
+    # flight is only 23-31 steps / 46-62 minutes, so a fixed 30-minute
+    # no-improvement window is on the order of an entire flight, not a small
+    # sub-window of a long one), and every simple recalibration of the window
+    # alone (schedule-relative, fixed-larger, own-flight-relative,
+    # velocity-based) topped out around 0.42 precision without giving up most
+    # of the recall a real detector needs. An offline multi-candidate replay
+    # against real trajectories showed this probation shape hits >=0.85
+    # precision at RECOVERY_WINDOW_S=ACTION_TIME (one control cycle) and
+    # RECOVERY_PROGRESS_EPS_KM=STALL_PROGRESS_EPS_KM, cutting false-positive
+    # freezes ~10x versus the sticky rule at comparable recall -- see that
+    # plan doc's Phase 4 comparison table for the full parameter sweep this
+    # was chosen from. False positives matter beyond mislabeling: a flagged
+    # aircraft is excluded from _replan's runway timeline for the rest of its
+    # flight (see _replan's `active` filter), which also removes it from
+    # separation-compliance accounting for other aircraft sharing its runway.
+    RECOVERY_WINDOW_S = ACTION_TIME
+    RECOVERY_PROGRESS_EPS_KM = STALL_PROGRESS_EPS_KM
+    # Once an aircraft has needed probation once (shown genuinely ambiguous
+    # behaviour), it's on a shorter leash for the rest of the flight: a
+    # second no-improvement stretch only needs to reach REFLAG_WINDOW_S
+    # (not a fresh STALL_WINDOW_S) before probation re-triggers. Chosen
+    # empirically alongside the two constants above (the same sweep's
+    # dominant variant): 300s beat both a full-length and a same-length
+    # (900s) re-arm window on every metric (precision, recall, and FP count)
+    # simultaneously.
+    REFLAG_WINDOW_S = 300.0
+
+    # _assign_runways_dynamic's argmin-predicted-ETA rule had no guard
+    # against reassigning an aircraft that is already close to IAF-crossing
+    # on its current runway -- the frozen worker policy is only trained up
+    # to the IAF (ETASurrogate.predict_eta predicts time-to-IAF-crossing,
+    # not time-to-touchdown), so a reassignment issued this close to the
+    # IAF leaves it no remaining control cycles in which to actually
+    # redirect toward a different IAF/runway. Confirmed empirically (see
+    # .claude/plans/max_concurrent_aircraft_capacity_sweep.md's capacity
+    # sweep investigation, 2026-08-12): this produced two distinct
+    # "wrong_runway" death populations -- one where the aircraft, unable to
+    # converge on its new target, eventually triggered stall detection
+    # (~16,000s dwell, frozen after STALL_WINDOW_S of no progress), and a
+    # second, smaller population with *normal* (non-stalled) flight
+    # durations that simply crossed their original runway's sink because
+    # the reassignment came too late to act on.
+    #
+    # An aircraft within FINAL_APPROACH_LOCK_S of its current-runway ETA is
+    # now excluded from reassignment entirely (forced to keep its current
+    # runway). This is a control-cadence margin, NOT a schedule-slack
+    # concept -- deliberately NOT set to the frozen worker's ~20-minute
+    # (1200s) delay-absorption capacity, which would lock out 25-40% of a
+    # typical ~3,000-4,700s flight (median
+    # true per-aircraft dwell measured in the same investigation) and
+    # neuter dynamic reassignment almost entirely. Set to 2 x ACTION_TIME
+    # instead: the minimum margin guaranteeing at least one full env.step
+    # cycle for a newly-assigned target to actually influence the frozen
+    # worker's action before IAF-crossing would otherwise occur, plus one
+    # cycle of buffer for the fleet snapshot/replan cadence (delta_t_plan
+    # is itself typically configured equal to ACTION_TIME, e.g. both 120s
+    # in cps_scale_10k.yaml).
+    FINAL_APPROACH_LOCK_S = 2.0 * ACTION_TIME
+
+    # _assign_runways_dynamic's argmin-predicted-ETA rule also had no
+    # hysteresis: on every replanning cycle it re-picks the pure argmin
+    # over eligible runways, so two runways with near-tied predicted ETA
+    # cause the choice to flip back and forth purely on ETA-prediction
+    # noise, cycle to cycle. Confirmed empirically (see
+    # .claude/plans/max_concurrent_aircraft_capacity_sweep.md, 2026-08-12):
+    # ~8,950 actual runway switches over 30 episodes x 50 concurrent
+    # aircraft -- ~6 per aircraft, across only 2 runways -- with a median
+    # predicted-ETA "gain" of just ~112s, spread throughout the flight
+    # rather than concentrated near landing (a distinct, much larger effect
+    # than the rare late-reassignment case FINAL_APPROACH_LOCK_S targets).
+    # A candidate must now beat the current runway's predicted ETA by more
+    # than REASSIGNMENT_HYSTERESIS_S to be worth switching to. Expressed as
+    # an integer multiple of ACTION_TIME (the fixed physical control-step
+    # size), not delta_t_plan (a CPS-specific replanning-cadence config
+    # value that happens to equal ACTION_TIME in cps_scale_10k.yaml but
+    # isn't guaranteed to), so the margin keeps one fixed physical meaning
+    # regardless of how delta_t_plan is configured: a candidate must save
+    # at least this many full control cycles' worth of time to be worth the
+    # disruption of retargeting the frozen worker mid-flight. Aircraft
+    # whose current runway is NOT itself eligible under the k-CPS fairness
+    # window are exempt from this margin -- that is a genuine
+    # fairness-forced move, not a discretionary optimization. Set to
+    # 2 x ACTION_TIME (matching FINAL_APPROACH_LOCK_S's own multiple, so
+    # both margins share one physical reading -- "two control cycles is the
+    # threshold below which a decision isn't worth disrupting the frozen
+    # worker's committed path for"). See the capacity-sweep plan doc for
+    # the 1x-vs-2x empirical comparison this was chosen from.
+    REASSIGNMENT_HYSTERESIS_S = 2.0 * ACTION_TIME
 
     def __init__(
         self,
@@ -227,7 +303,6 @@ class CPSManager:
         available_runways: Optional[List[str]] = None,
         trajectory_buffer: Optional["TrajectoryBuffer"] = None,
         enable_stall_detection: bool = True,
-        fairness_weight: float = 0.0,
         enable_cross_cycle_runway_seeding: bool = True,
     ) -> None:
         if runway_assignment_mode not in self._valid_modes:
@@ -236,12 +311,6 @@ class CPSManager:
                 f"got {runway_assignment_mode!r}"
             )
         self.k_cps = k_cps
-        # w2 in _apply_k_cps_constraint's cost rule (§2.3): 0.0 (default)
-        # short-circuits the k-CPS permutation to exact FCFS -- provably the
-        # total-delay-optimal schedule under today's wake-homogeneity
-        # assumption (§2.2) -- so this is a strict, opt-in generalisation of
-        # the pre-fix no-op behaviour, not a behaviour change at the default.
-        self.fairness_weight = fairness_weight
         # Test C (pre-Step-10 audit §1.2): isolates the surrogate-feature
         # feedback loop (§1.1) from the *second*, structurally distinct
         # compounding channel in _tta_for -- _runway_last_committed persisting
@@ -281,6 +350,14 @@ class CPSManager:
         self._best_distance_km: Dict[str, float] = {}
         self._best_distance_time: Dict[str, float] = {}
         self._stalled_acids: set = set()
+        # Probation state (see RECOVERY_WINDOW_S docstring): acid -> (time,
+        # distance_km) at the moment it crossed the no-improvement window,
+        # for acids currently awaiting a recovery-or-finalize decision.
+        # acid -> the effective no-improvement window to use going forward
+        # (STALL_WINDOW_S until a first probation/recovery, REFLAG_WINDOW_S
+        # after) -- absent means "still on the original STALL_WINDOW_S".
+        self._probation_since: Dict[str, Tuple[float, float]] = {}
+        self._stall_window_override: Dict[str, float] = {}
         # Snapshot of eta/runway_id taken the cycle an acid is first flagged
         # stalled, re-applied every subsequent cycle (see update_fleet) so
         # the frozen target actually stays fixed rather than drifting with
@@ -288,11 +365,6 @@ class CPSManager:
         self._frozen_eta: Dict[str, float] = {}
         self._frozen_runway: Dict[str, str] = {}
         self._frozen_tta: Dict[str, float] = {}
-        # Dense RECAT-EU separation lookup, built lazily and cached -- see
-        # _separation_table(). recat_matrix is fixed after construction, so
-        # this never needs invalidating.
-        self._sep_table: Optional[np.ndarray] = None
-        self._sep_table_cat_index: Optional[Dict[str, int]] = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -391,6 +463,8 @@ class CPSManager:
             self._best_distance_km.pop(acid, None)
             self._best_distance_time.pop(acid, None)
             self._stalled_acids.discard(acid)
+            self._probation_since.pop(acid, None)
+            self._stall_window_override.pop(acid, None)
             self._frozen_eta.pop(acid, None)
             self._frozen_runway.pop(acid, None)
             self._frozen_tta.pop(acid, None)
@@ -435,6 +509,8 @@ class CPSManager:
         self._best_distance_km = {}
         self._best_distance_time = {}
         self._stalled_acids = set()
+        self._probation_since = {}
+        self._stall_window_override = {}
         self._frozen_eta = {}
         self._frozen_runway = {}
         self._frozen_tta = {}
@@ -457,11 +533,25 @@ class CPSManager:
     # ------------------------------------------------------------------ #
 
     def _replan(self, current_time: float) -> None:
-        """Full replanning pass: FCFS → k-CPS permutation → greedy TTAs.
+        """Full replanning pass: FCFS → greedy TTAs.
+
+        Position ordering is exact FCFS (ascending ETA). An earlier
+        fairness-weighted k-CPS reordering step (biasing low-slack aircraft
+        toward earlier positions) was removed after
+        ``.claude/plans/stall_rate_investigation.md`` (2026-08-12) found it
+        never won against plain FCFS at any tested ``fairness_weight > 0``,
+        in either runway-assignment mode, at any congestion level: FCFS is
+        provably total-delay-optimal under wake-homogeneity (§2.2), and any
+        deviation from it, however small, gave that guarantee up for a
+        protection that empirically never landed on the aircraft that
+        needed it (see the plan doc's Phase 5b/5c/5d results). ``k_cps``
+        itself is unrelated to this removed step and still governs
+        :meth:`_assign_runways_dynamic`'s own separate reassignment-
+        eligibility window.
 
         Stalled aircraft (see :meth:`_update_stall_tracking`) are excluded
-        from the k-CPS permutation and greedy scheduling entirely, not just
-        from having their own TTA touched: a frozen-but-never-landing
+        from greedy scheduling entirely, not just from having their own TTA
+        touched: a frozen-but-never-landing
         aircraft that stayed in the sequence would force every *other*,
         still-converging aircraft on the same runway to keep separating
         against it too, jamming the runway around a landing that never
@@ -485,213 +575,15 @@ class CPSManager:
             if self.enable_stall_detection
             else fcfs_order
         )
-        optimised = self._apply_k_cps_constraint(active, current_time)
-        self._greedy_schedule(optimised)
+        self._greedy_schedule(active)
 
     def _fcfs_order(self) -> List[AircraftState]:
         """Sort fleet by ascending absolute ETA → FCFS reference sequence."""
         return sorted(self._fleet, key=lambda a: (a.eta, a.acid))
 
-    def _apply_k_cps_constraint(
-        self, fcfs_order: List[AircraftState], current_time: float = 0.0,
-    ) -> List[AircraftState]:
-        """Return a permutation that satisfies the k-CPS window.
-
-        ``fairness_weight == 0.0`` (default): returns ``fcfs_order``
-        unchanged. §2.1 of the pre-Step-10 audit proves the pre-fix
-        heap-based "earliest ETA in window" selection is *always* a no-op
-        identity permutation on FCFS-sorted input (regardless of ``k_cps``),
-        and §2.2 proves that identity permutation is provably total-delay-
-        optimal under today's wake-homogeneity assumption. Short-circuiting
-        here reproduces that exactly, by construction, rather than relying
-        on the cost rule below to happen to reduce to the same output.
-
-        ``fairness_weight > 0.0``: greedy forward sweep over scheduling
-        positions ``pos = 0..n-1``. At each position, among the eligible
-        window ``{idx ∈ [pos-k, min(pos+k, n-1)] : not yet scheduled}``,
-        selects the candidate minimising
-
-            cost(idx) = imposed_delay(idx) − fairness_weight · slack_penalty(idx)
-
-        where ``imposed_delay(idx)`` is the runway-contention delay this
-        candidate would incur if scheduled at ``pos`` (mirroring
-        :meth:`_greedy_schedule`'s own per-runway ``max(eta, prev_tta+sep)``
-        rule via a virtual, not-yet-committed copy of that tracking state —
-        see :meth:`_tta_for`), and ``slack_penalty(idx)`` (see
-        :meth:`_slack_penalty`) is large for aircraft with little remaining
-        margin before their own predicted arrival (or already flagged
-        ``is_stalled``).
-
-        The slack term is *subtracted*, not added: a myopic per-position
-        argmin that instead ADDS a "badness" score for fragile aircraft
-        would systematically lose them the cheap, low-delay positions early
-        in the sweep (since a low-penalty candidate always looks cheaper at
-        a tied delay) and defer them to the most-delayed leftover slots —
-        exactly backwards from the intent stated in §2.3 ("prefer to impose
-        the runway-contention delay on the aircraft with the most slack to
-        absorb it safely"). Subtracting the (non-negative) slack_penalty
-        makes a fragile candidate's cost *lower*, so it wins the position
-        currently being filled — and since the sweep fills positions in
-        increasing-imposed-delay order, that means fragile aircraft
-        preferentially claim the earliest, cheapest slots instead of being
-        left for the most-delayed ones.
-
-        Complexity: O(n·(2k+1)) — every eligible candidate's cost is
-        evaluated directly each position; no heap, since a non-monotonic
-        cost function can't reuse the sorted-input shortcut the old
-        heap-based approach relied on.
-
-        Parameters
-        ----------
-        fcfs_order : List[AircraftState]
-        current_time : float
-            Current simulation clock (seconds) — used by
-            :meth:`_slack_penalty` to derive each candidate's remaining
-            margin before its own predicted arrival. Unused when
-            ``fairness_weight == 0.0``.
-
-        Returns
-        -------
-        List[AircraftState]
-        """
-        if self.k_cps == 0 or self.fairness_weight <= 0.0:
-            return list(fcfs_order)
-
-        n = len(fcfs_order)
-        k = self.k_cps
-        scheduled_mask = np.zeros(n, dtype=bool)
-        scheduled: List[AircraftState] = []
-
-        # Per-position, the ~2k+1-wide eligible window's candidates are
-        # mutually independent (runway_last/scheduled_mask are both fixed
-        # for the duration of one position's evaluation) -- so each
-        # position's cost(idx) for every candidate is batch-evaluated against
-        # precomputed lookup tables instead of the original per-candidate
-        # _tta_for/_slack_penalty/_get_separation method calls (each of
-        # which re-did a dict-of-dict probe and its own attribute lookups).
-        # The outer `for pos in range(n)` loop itself stays sequential:
-        # runway_last is genuinely mutated after every position commits, so
-        # a later position's candidates can depend on an aircraft chosen
-        # just now.
-        #
-        # Deliberately plain Python lists/floats here, not numpy arrays: at
-        # the real window width (2k+1, ~7 at production k_cps=3) numpy's
-        # fixed per-call dispatch overhead measurably *exceeds* what it
-        # saves versus a tight Python loop over a flat table (confirmed via
-        # cps_coordination/testing/test_vectorization_performance.py's
-        # benchmark -- an array-per-position version of this loop was ~5x
-        # *slower* than the original, unlike Finding 1's eligibility loop
-        # where n*n*r broadcasting is a genuine win). "Vectorized" here means
-        # "lookup tables instead of iterative re-derivation", per the task
-        # spec, not necessarily numpy.
-        sep_table_np, cat_index = self._separation_table()
-        sep_table = sep_table_np.tolist()  # plain nested list: fast scalar indexing
-        n_cats = len(cat_index)
-        etas = [ac.eta for ac in fcfs_order]
-        cat_idx = [cat_index.get(ac.wake_cat, n_cats) for ac in fcfs_order]
-        runway_ids = [ac.runway_id for ac in fcfs_order]
-        acids = [ac.acid for ac in fcfs_order]
-        # Matches _slack_penalty exactly; fcfs_order/current_time/
-        # _stalled_acids are all fixed for the whole call, so this is
-        # computed once rather than once per candidate per position.
-        slack_penalty = [
-            max(0.0, self.SLACK_REFERENCE_S - (etas[i] - current_time))
-            + (self.STALL_SLACK_PENALTY_BOOST_S if acids[i] in self._stalled_acids else 0.0)
-            for i in range(n)
-        ]
-        # runway_last, keyed by runway id -> (tta, cat_idx) of the last
-        # aircraft committed to it this sweep -- avoids re-deriving cat_idx
-        # via a dict lookup on the AircraftState itself each candidate.
-        runway_last_cat: Dict[str, Tuple[float, int]] = {}
-
-        for pos in range(n):
-            window_lo = max(0, pos - k)
-            window_hi = min(pos + k, n - 1)
-            idxs = [i for i in range(window_lo, window_hi + 1) if not scheduled_mask[i]]
-            if not idxs:
-                # An earlier position can pull an index out of a *later*
-                # position's own window before that position is reached
-                # (the window shifts every step, it isn't reserved) -- rare,
-                # but the old heap-based code had the identical fallback for
-                # the identical reason: fall back to any remaining
-                # unscheduled index. n - pos unscheduled indices always
-                # remain at this point, so this is never itself empty.
-                idxs = [i for i in range(n) if not scheduled_mask[i]]
-
-            best_idx: Optional[int] = None
-            best_cost: Optional[float] = None
-            best_tta: float = 0.0
-            for idx in idxs:
-                rwy = runway_ids[idx]
-                own_eta = etas[idx]
-                own_cat = cat_idx[idx]
-
-                prev = runway_last_cat.get(rwy)
-                if prev is None and self.enable_cross_cycle_runway_seeding:
-                    committed = self._runway_last_committed.get(rwy)
-                    if committed is not None:
-                        c_tta, c_wake_cat, c_acid = committed
-                        if c_acid != acids[idx]:
-                            prev = (c_tta, cat_index.get(c_wake_cat, n_cats))
-
-                if prev is None:
-                    tta_if_here = own_eta
-                else:
-                    prev_tta, prev_cat = prev
-                    sep = sep_table[prev_cat][own_cat]
-                    tta_if_here = own_eta if prev_tta + sep < own_eta else prev_tta + sep
-
-                imposed_delay = tta_if_here - own_eta
-                if imposed_delay < 0.0:
-                    imposed_delay = 0.0
-                cost = imposed_delay - self.fairness_weight * slack_penalty[idx]
-                if best_cost is None or cost < best_cost:
-                    best_idx, best_cost, best_tta = idx, cost, tta_if_here
-
-            chosen = fcfs_order[best_idx]  # type: ignore[index]
-            scheduled_mask[best_idx] = True
-            scheduled.append(chosen)
-            # Commit the virtual TTA now so later positions on the same
-            # runway see it via `runway_last_cat`, exactly mirroring
-            # _greedy_schedule's own incremental state. _greedy_schedule
-            # re-derives (and overwrites) the identical value when it
-            # processes `scheduled` afterward, since it walks the same
-            # order through the same _tta_for rule from the same starting
-            # state (self._runway_last_committed, untouched until then).
-            chosen.tta = best_tta
-            runway_last_cat[chosen.runway_id] = (best_tta, cat_idx[best_idx])
-
-        return scheduled
-
-    def _slack_penalty(self, ac: AircraftState, current_time: float) -> float:
-        """Non-negative "fragility" score for the k-CPS fairness cost rule.
-
-        Monotonically decreasing in the aircraft's own remaining margin
-        (``eta - current_time``, a lighter-weight stand-in for the
-        surrogate's ``naive_eta_remaining`` feature that avoids threading
-        IAF-reference access into the k-CPS selection path for what is an
-        ablation knob — both represent the same physical quantity, remaining
-        time before this aircraft's own earliest feasible arrival): saturates
-        to 0 once margin reaches ``SLACK_REFERENCE_S`` (the frozen worker's
-        documented ~20-minute delay-absorption capacity), and grows linearly
-        as margin shrinks below it. Any aircraft already flagged
-        ``is_stalled`` gets a fixed additional boost, so the k-CPS layer
-        actively avoids compounding a fragile aircraft's delay (§2.3).
-        """
-        margin = ac.eta - current_time
-        penalty = max(0.0, self.SLACK_REFERENCE_S - margin)
-        if ac.acid in self._stalled_acids:
-            penalty += self.STALL_SLACK_PENALTY_BOOST_S
-        return penalty
-
     def _tta_for(self, ac: AircraftState, runway_last: Dict[str, AircraftState]) -> float:
         """Compute what ``ac.tta`` would be if scheduled next on its own
         runway, given a per-runway "last scheduled aircraft" tracker.
-
-        Shared by :meth:`_greedy_schedule` (the real, committing pass) and
-        :meth:`_apply_k_cps_constraint` (a virtual, non-committing pass that
-        evaluates candidates before an order is finalised) so the two can
-        never disagree — see :meth:`_apply_k_cps_constraint`'s docstring.
 
         That seeded value (from ``self._runway_last_committed``, persisted
         across replanning cycles) is only a genuine "previous, already-
@@ -734,9 +626,8 @@ class CPSManager:
           TTA_i = max(ETA_i, TTA_{prev_on_same_runway} + ΔT_sep(prev, i))
 
         Each runway is tracked independently — see :meth:`_tta_for` for the
-        per-aircraft rule (shared with :meth:`_apply_k_cps_constraint`'s
-        virtual evaluation pass) and the cross-cycle seeding/self-match
-        notes. Once every aircraft in *sequence* has been assigned a tta,
+        per-aircraft rule and the cross-cycle seeding/self-match notes. Once
+        every aircraft in *sequence* has been assigned a tta,
         the final per-runway state is committed to
         ``self._runway_last_committed`` for the next replanning cycle.
 
@@ -762,38 +653,6 @@ class CPSManager:
         return float(
             self.recat_matrix.get(leading_cat, {}).get(trailing_cat, 90.0)
         )
-
-    def _separation_table(self) -> Tuple[np.ndarray, Dict[str, int]]:
-        """Dense ``(n_cats+1, n_cats+1)`` RECAT-EU separation lookup.
-
-        Built once (cached in ``self._sep_table``) from ``self.recat_matrix``
-        so :meth:`_apply_k_cps_constraint`'s per-candidate separation lookup
-        becomes a single array index instead of :meth:`_get_separation`'s
-        nested-dict probe. ``n_cats`` is the number of distinct categories
-        appearing anywhere in ``recat_matrix`` (as either a leading or
-        trailing key); every entry defaults to 90.0 and only pairs actually
-        present in ``recat_matrix`` are overwritten, so any category or pair
-        absent from the matrix -- including one that never appears in
-        ``recat_matrix`` at all, routed to the extra fallback row/col at
-        index ``n_cats`` -- resolves to exactly the same 90.0 default
-        :meth:`_get_separation` would return.
-        """
-        if self._sep_table is not None and self._sep_table_cat_index is not None:
-            return self._sep_table, self._sep_table_cat_index
-
-        cats = sorted(
-            {*self.recat_matrix.keys()}
-            | {trail for row in self.recat_matrix.values() for trail in row.keys()}
-        )
-        cat_index = {c: i for i, c in enumerate(cats)}
-        table = np.full((len(cats) + 1, len(cats) + 1), 90.0)
-        for lead, row in self.recat_matrix.items():
-            for trail, sep in row.items():
-                table[cat_index[lead], cat_index[trail]] = float(sep)
-
-        self._sep_table = table
-        self._sep_table_cat_index = cat_index
-        return table, cat_index
 
     # ------------------------------------------------------------------ #
     # Dynamic runway assignment
@@ -830,14 +689,11 @@ class CPSManager:
         on candidate runway r, among the *other* aircraft currently assigned
         to r (their existing, pre-reassignment ``runway_id``). This is a
         per-aircraft approximation rather than a jointly optimal
-        simultaneous reassignment — consistent with
-        :meth:`_apply_k_cps_constraint`'s own greedy, non-exhaustive
-        resolution of the same kind of parallel combinatorial constraint.
+        simultaneous reassignment.
 
         If no candidate runway satisfies the fairness bound (e.g. ``k_cps=0``
         with a busy runway), the aircraft's current runway is kept rather
-        than leaving the assignment undefined — mirroring
-        :meth:`_apply_k_cps_constraint`'s own fallback.
+        than leaving the assignment undefined.
 
         Parameters
         ----------
@@ -886,6 +742,17 @@ class CPSManager:
         sigma_matrix = (less & member[:, None, :]).sum(axis=0)  # (n, r)
 
         eligible = np.abs(sigma_matrix - fcfs_rank[:, None]) <= k  # (n, r)
+
+        # Final-approach lock: an aircraft within FINAL_APPROACH_LOCK_S of
+        # landing on its current runway is excluded from reassignment --
+        # forced back to its current runway regardless of what the fairness
+        # window would otherwise allow (see FINAL_APPROACH_LOCK_S docstring
+        # above).
+        locked = (current_eta - current_time) <= self.FINAL_APPROACH_LOCK_S  # (n,)
+        if locked.any():
+            eligible[locked] = False
+            eligible[locked, current_col[locked]] = True
+
         no_eligible = ~eligible.any(axis=1)
         if no_eligible.any():
             runway_found = np.array(
@@ -899,6 +766,15 @@ class CPSManager:
         # first (lowest-j) occurrence of the minimum on ties.
         masked_eta = np.where(eligible, eta_matrix, np.inf)
         best_rwy_idx = np.argmin(masked_eta, axis=1)
+
+        # Reassignment hysteresis -- see REASSIGNMENT_HYSTERESIS_S's
+        # docstring above for the full rationale and supporting evidence.
+        current_is_eligible = eligible[np.arange(n), current_col]
+        stay_is_close_enough = (
+            eta_matrix[np.arange(n), current_col] - masked_eta[np.arange(n), best_rwy_idx]
+        ) < self.REASSIGNMENT_HYSTERESIS_S
+        keep_current = current_is_eligible & stay_is_close_enough
+        best_rwy_idx = np.where(keep_current, current_col, best_rwy_idx)
 
         for i, ac in enumerate(self._fleet):
             if self.enable_stall_detection and ac.acid in self._stalled_acids:
@@ -917,7 +793,8 @@ class CPSManager:
         current_time: float,
     ) -> None:
         """Flag aircraft that haven't beaten their best-ever distance to the
-        IAF in the last ``STALL_WINDOW_S`` seconds.
+        IAF in the last ``STALL_WINDOW_S`` (or ``REFLAG_WINDOW_S``, see
+        below) seconds -- subject to a probation re-check before finalizing.
 
         Uses each aircraft's own current ``(x, y)`` state and its assigned
         runway's IAF reference point -- a physical quantity, independent of
@@ -937,8 +814,20 @@ class CPSManager:
         luck, but can't sustain "no new best" for the full window the way
         genuine non-convergence does.
 
-        Once flagged, an acid stays in ``_stalled_acids`` for the rest of
-        the episode (see :meth:`is_stalled`).
+        Probation: crossing the window no longer finalizes a stall
+        immediately. The acid instead enters ``_probation_since`` for up to
+        ``RECOVERY_WINDOW_S`` -- if its distance beats the at-flag value by
+        ``RECOVERY_PROGRESS_EPS_KM`` within that window, it's released back
+        to normal tracking (with its required window shortened to
+        ``REFLAG_WINDOW_S`` from then on, since it's already shown once that
+        it needed the benefit of the doubt); otherwise it's finalized exactly
+        as before. See ``RECOVERY_WINDOW_S``'s class docstring for why (found
+        empirically: the sticky version flags aircraft that go on to make
+        real further progress ~99-100% of the time).
+
+        Once *finalized*, an acid stays in ``_stalled_acids`` for the rest of
+        the episode (see :meth:`is_stalled`) -- probation only defers that
+        decision by up to ``RECOVERY_WINDOW_S``, it doesn't remove it.
         """
         if surrogate is None or not surrogate._iaf_ref or not self._fleet:
             return
@@ -951,21 +840,43 @@ class CPSManager:
             iaf_x, iaf_y, _ = iaf
             dist_km = math.hypot(iaf_x - ac.state[0], iaf_y - ac.state[1]) * MAX_DISTANCE
 
+            probation = self._probation_since.get(ac.acid)
+            if probation is not None:
+                flagged_at_time, flagged_at_dist = probation
+                if dist_km < flagged_at_dist - self.RECOVERY_PROGRESS_EPS_KM:
+                    # Recovered: release from probation, resume normal
+                    # tracking with a shortened window from here on.
+                    del self._probation_since[ac.acid]
+                    self._stall_window_override[ac.acid] = self.REFLAG_WINDOW_S
+                    self._best_distance_km[ac.acid] = dist_km
+                    self._best_distance_time[ac.acid] = current_time
+                    continue
+                if current_time - flagged_at_time >= self.RECOVERY_WINDOW_S:
+                    self._finalize_stall(ac)
+                continue
+
             best = self._best_distance_km.get(ac.acid)
             if best is None or dist_km < best - self.STALL_PROGRESS_EPS_KM:
                 self._best_distance_km[ac.acid] = dist_km
                 self._best_distance_time[ac.acid] = current_time
                 continue
 
+            window = self._stall_window_override.get(ac.acid, self.STALL_WINDOW_S)
             stagnant_for = current_time - self._best_distance_time.get(ac.acid, current_time)
-            if stagnant_for >= self.STALL_WINDOW_S:
-                self._stalled_acids.add(ac.acid)
-                # Snapshot the current eta/runway/tta as the frozen target --
-                # re-applied every subsequent cycle in update_fleet. tta
-                # falls back to eta if not yet finite (no committed TTA yet).
-                self._frozen_eta[ac.acid] = ac.eta
-                self._frozen_runway[ac.acid] = ac.runway_id
-                self._frozen_tta[ac.acid] = ac.tta if math.isfinite(ac.tta) else ac.eta
+            if stagnant_for >= window:
+                self._probation_since[ac.acid] = (current_time, dist_km)
+
+    def _finalize_stall(self, ac: AircraftState) -> None:
+        """Commit a stall past probation: flag ``ac`` and snapshot its
+        eta/runway/tta as the frozen target, re-applied every subsequent
+        cycle in :meth:`update_fleet`. tta falls back to eta if not yet
+        finite (no committed TTA yet).
+        """
+        self._stalled_acids.add(ac.acid)
+        self._probation_since.pop(ac.acid, None)
+        self._frozen_eta[ac.acid] = ac.eta
+        self._frozen_runway[ac.acid] = ac.runway_id
+        self._frozen_tta[ac.acid] = ac.tta if math.isfinite(ac.tta) else ac.eta
 
     # ------------------------------------------------------------------ #
     # ETA refresh + change-detection

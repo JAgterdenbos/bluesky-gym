@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # cps_coordination/scripts/regenerate_step10_sanity_sweep.sh
 # --------------------------------------------------------------
-# Documents (does NOT execute automatically) how to regenerate the M=100,
-# 8-combo "step 10 sanity sweep" analyzed by
+# Documents (does NOT execute automatically) how to regenerate the M=100
+# "step 10 sanity sweep" analyzed by
 # cps_coordination/scripts/step10_deep_analysis.py and
 # .claude/plans/step10_deep_analysis_findings.md.
+#
+# The original historical data (cps_coordination/data/step10_sanity_sweep/)
+# was an 8-combo grid (k_cps x mode x fairness_weight in {0.0,0.3}).
+# fairness_weight was removed from the codebase 2026-08-12 (see
+# .claude/plans/stall_rate_investigation.md) after being found to never win
+# against plain FCFS -- any FRESH regeneration via this script now produces
+# only the 4 (k_cps, mode) combos, since there is no fairness_weight
+# dimension left to sweep.
 #
 # WARNING: this takes roughly 1.5-2 HOURS to run end-to-end (8 combos x 100
 # episodes x 3 passes [cps/static/solo] x 10 arrivals/episode, all through a
@@ -43,7 +51,6 @@ uv run python cps_coordination/scripts/run_batch_eval.py \
     --episodes 100 \
     --k-cps-sweep 0 3 \
     --mode-sweep static dynamic \
-    --fairness-weight-sweep 0.0 0.3 \
     --max-concurrent-aircraft 5 \
     --total-arrivals-per-episode 10 \
     --spawn-window-s 0.0 \
@@ -51,5 +58,5 @@ uv run python cps_coordination/scripts/run_batch_eval.py \
     --save-path-root "$SAVE_ROOT" \
     --seed-base 0
 
-echo "Done -> $SAVE_ROOT/k<k_cps>_<mode>_fw<fairness_weight>/"
+echo "Done -> $SAVE_ROOT/k<k_cps>_<mode>/"
 echo "Then: uv run python cps_coordination/scripts/step10_deep_analysis.py --sweep-root $SAVE_ROOT"

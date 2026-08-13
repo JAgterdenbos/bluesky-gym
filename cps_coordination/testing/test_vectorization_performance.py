@@ -2,24 +2,27 @@
 Vectorization correctness + performance gate for
 ``cps_coordination/coordination/cps_manager.py``.
 
-Covers the two hot per-decision-step loops identified in
+Covers the hot per-decision-step loop identified in
 ``.claude/plans/phase3_cps_coordination_plan.md``'s "Vectorization &
 Optimization" section:
 
   1. ``CPSManager._assign_runways_dynamic``'s eligibility/rank loop
      (previously a triple-nested pure-Python loop over aircraft x runway x
      aircraft, now a broadcast over ``(n, n, r)`` boolean arrays).
-  2. ``CPSManager._apply_k_cps_constraint``'s per-position candidate window
-     (previously one ``_tta_for``/``_slack_penalty`` Python call per
-     candidate, now a vectorized batch per position; the outer per-position
-     loop stays sequential -- ``runway_last`` is genuinely mutated between
-     positions).
 
-Each loop is checked against a standalone "legacy" reference (a literal
-transcription of the pre-vectorization code) on the same synthetic fixture
-(n=10 aircraft, r=12 runways, k_cps=3), asserting the vectorized rewrite is
-a bit-identical restatement, not an approximation. A capped repeated-call
+The loop is checked against a standalone "legacy" reference (a literal
+transcription of the pre-vectorization code) on a synthetic fixture (n=10
+aircraft, r=12 runways, k_cps=3), asserting the vectorized rewrite is a
+bit-identical restatement, not an approximation. A capped repeated-call
 benchmark then confirms the rewrite is actually faster, not just equivalent.
+
+A second such gate used to cover ``CPSManager._apply_k_cps_constraint``'s
+per-position candidate window (Finding 3 of the same audit). That method
+was removed entirely 2026-08-12 (see
+``.claude/plans/stall_rate_investigation.md``) after being found to never
+win against plain FCFS at any tested ``fairness_weight > 0`` -- there is no
+longer a vectorized/legacy pair to compare, so that gate was removed along
+with it rather than left benchmarking dead code.
 
 Run: python cps_coordination/testing/test_vectorization_performance.py
 """
@@ -99,9 +102,15 @@ def _make_dynamic_fixture(seed: int = 0):
 
 
 def _legacy_assign_runways_dynamic(
-    fleet: List[AircraftState], eta_matrix: np.ndarray, runways: List[str], k: int
+    fleet: List[AircraftState], eta_matrix: np.ndarray, runways: List[str], k: int,
+    current_time: float, final_approach_lock_s: float, reassignment_hysteresis_s: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Literal transcription of the pre-vectorization triple-nested loop."""
+    """Literal transcription of the pre-vectorization triple-nested loop,
+    plus the final-approach lock and reassignment hysteresis added to the
+    real method after the original vectorization (see
+    FINAL_APPROACH_LOCK_S/REASSIGNMENT_HYSTERESIS_S's docstrings in
+    cps_manager.py) -- kept in sync here so this stays a genuine parity
+    check rather than silently drifting into testing a stale reference."""
     n = len(fleet)
     rwy_index = {r: j for j, r in enumerate(runways)}
     current_col = np.array([rwy_index.get(ac.runway_id, 0) for ac in fleet])
@@ -120,21 +129,39 @@ def _legacy_assign_runways_dynamic(
             sigma_r = sum(1 for e in other_etas if e < eta_matrix[i, j])
             if abs(sigma_r - int(fcfs_rank[i])) <= k:
                 eligible.append(j)
+
+        # Final-approach lock: force back to the current runway regardless
+        # of what the fairness window would otherwise allow.
+        if current_eta[i] - current_time <= final_approach_lock_s:
+            eligible = [int(current_col[i])]
+
         if not eligible:
             eligible = [rwy_index.get(ac.runway_id, int(np.argmin(eta_matrix[i])))]
-        best_rwy_idx[i] = min(eligible, key=lambda j: eta_matrix[i, j])
+        candidate = min(eligible, key=lambda j: eta_matrix[i, j])
+
+        # Reassignment hysteresis: only switch away from a (window-)eligible
+        # current runway if the candidate beats it by more than the margin.
+        if int(current_col[i]) in eligible:
+            gain = eta_matrix[i, current_col[i]] - eta_matrix[i, candidate]
+            if gain < reassignment_hysteresis_s:
+                candidate = int(current_col[i])
+
+        best_rwy_idx[i] = candidate
     return best_rwy_idx, fcfs_rank
 
 
 def check_assign_runways_dynamic_parity() -> bool:
     ok = True
     fleet, eta_matrix, runways = _make_dynamic_fixture()
+    manager = _make_manager(runway_assignment_mode="dynamic")
 
     legacy_best_rwy_idx, legacy_fcfs_rank = _legacy_assign_runways_dynamic(
-        fleet, eta_matrix, runways, K_CPS
+        fleet, eta_matrix, runways, K_CPS,
+        current_time=0.0,
+        final_approach_lock_s=manager.FINAL_APPROACH_LOCK_S,
+        reassignment_hysteresis_s=manager.REASSIGNMENT_HYSTERESIS_S,
     )
 
-    manager = _make_manager(runway_assignment_mode="dynamic")
     manager._fleet = copy.deepcopy(fleet)
     manager._fleet_index = {ac.acid: i for i, ac in enumerate(manager._fleet)}
     manager._assign_runways_dynamic(_StubSurrogate(eta_matrix), current_time=0.0, lag_features=None)
@@ -166,14 +193,19 @@ def check_assign_runways_dynamic_parity() -> bool:
 def benchmark_assign_runways_dynamic() -> bool:
     fleet, eta_matrix, runways = _make_dynamic_fixture()
     surrogate = _StubSurrogate(eta_matrix)
+    manager = _make_manager(runway_assignment_mode="dynamic")
 
     legacy_fleets = [copy.deepcopy(fleet) for _ in range(N_BENCHMARK_REPS)]
     t0 = time.perf_counter()
     for f in legacy_fleets:
-        _legacy_assign_runways_dynamic(f, eta_matrix, runways, K_CPS)
+        _legacy_assign_runways_dynamic(
+            f, eta_matrix, runways, K_CPS,
+            current_time=0.0,
+            final_approach_lock_s=manager.FINAL_APPROACH_LOCK_S,
+            reassignment_hysteresis_s=manager.REASSIGNMENT_HYSTERESIS_S,
+        )
     legacy_elapsed = time.perf_counter() - t0
 
-    manager = _make_manager(runway_assignment_mode="dynamic")
     vec_fleets = [copy.deepcopy(fleet) for _ in range(N_BENCHMARK_REPS)]
     t0 = time.perf_counter()
     for f in vec_fleets:
@@ -193,149 +225,7 @@ def benchmark_assign_runways_dynamic() -> bool:
     return ok
 
 
-# ------------------------------------------------------------------ #
-# Finding 3: _apply_k_cps_constraint
-# ------------------------------------------------------------------ #
-
-
-def _make_k_cps_fixture(seed: int = 1):
-    rng = np.random.default_rng(seed)
-    runways = ALL_RUNWAYS[:3]  # force real contention within a small n=10 fleet
-    wake_cats = list(_RECAT_MATRIX.keys())
-    etas = sorted(rng.uniform(1000.0, 6000.0, size=N_AIRCRAFT))
-    fcfs_order = [
-        AircraftState(
-            acid=f"AC{i:03d}",
-            state=np.zeros(5),
-            runway_id=runways[i % len(runways)],
-            eta=float(etas[i]),
-            wake_cat=str(rng.choice(wake_cats)),
-            spawn_time=0.0,
-        )
-        for i in range(N_AIRCRAFT)
-    ]
-    # Cross-cycle committed state: one genuine "different aircraft departed
-    # last cycle" seed (has_prev branch), one exact self-match (the aircraft
-    # sees its own prior commit -- must NOT self-separate), one runway with
-    # no committed entry at all (no-prev branch).
-    runway_last_committed = {
-        runways[0]: (900.0, "D", "GHOST-PREV"),
-        runways[1]: (950.0, "E", fcfs_order[1].acid),
-    }
-    return fcfs_order, runways, runway_last_committed
-
-
-def _legacy_apply_k_cps_constraint(
-    manager: CPSManager, fcfs_order: List[AircraftState], current_time: float
-) -> List[AircraftState]:
-    """Literal transcription of the pre-vectorization outer/inner loop,
-    still calling the (unchanged) real ``_tta_for``/``_slack_penalty``."""
-    if manager.k_cps == 0 or manager.fairness_weight <= 0.0:
-        return list(fcfs_order)
-
-    n = len(fcfs_order)
-    k = manager.k_cps
-    scheduled_mask = [False] * n
-    scheduled: List[AircraftState] = []
-    runway_last: Dict[str, AircraftState] = {}
-
-    for pos in range(n):
-        window_lo = max(0, pos - k)
-        window_hi = min(pos + k, n - 1)
-        eligible = [i for i in range(window_lo, window_hi + 1) if not scheduled_mask[i]]
-        if not eligible:
-            eligible = [i for i in range(n) if not scheduled_mask[i]]
-
-        best_idx = best_cost = None
-        best_tta = 0.0
-        for idx in eligible:
-            ac = fcfs_order[idx]
-            tta_if_here = manager._tta_for(ac, runway_last)
-            imposed_delay = max(0.0, tta_if_here - ac.eta)
-            cost = imposed_delay - manager.fairness_weight * manager._slack_penalty(ac, current_time)
-            if best_cost is None or cost < best_cost:
-                best_idx, best_cost, best_tta = idx, cost, tta_if_here
-
-        chosen = fcfs_order[best_idx]  # type: ignore[index]
-        scheduled_mask[best_idx] = True
-        scheduled.append(chosen)
-        chosen.tta = best_tta
-        runway_last[chosen.runway_id] = chosen
-
-    return scheduled
-
-
-def check_apply_k_cps_constraint_parity() -> bool:
-    ok = True
-    fcfs_order, _runways, runway_last_committed = _make_k_cps_fixture()
-    current_time = 1000.0
-
-    legacy_manager = _make_manager(fairness_weight=0.5)
-    legacy_manager._runway_last_committed = dict(runway_last_committed)
-    legacy_order = copy.deepcopy(fcfs_order)
-    legacy_scheduled = _legacy_apply_k_cps_constraint(legacy_manager, legacy_order, current_time)
-
-    vector_manager = _make_manager(fairness_weight=0.5)
-    vector_manager._runway_last_committed = dict(runway_last_committed)
-    vector_order = copy.deepcopy(fcfs_order)
-    vector_scheduled = vector_manager._apply_k_cps_constraint(vector_order, current_time)
-
-    legacy_acids = [ac.acid for ac in legacy_scheduled]
-    vector_acids = [ac.acid for ac in vector_scheduled]
-    legacy_ttas = np.array([ac.tta for ac in legacy_scheduled])
-    vector_ttas = np.array([ac.tta for ac in vector_scheduled])
-
-    if legacy_acids != vector_acids:
-        print(f"FAIL: scheduled order mismatch\n  legacy={legacy_acids}\n  vector={vector_acids}")
-        ok = False
-    if not np.array_equal(legacy_ttas, vector_ttas):
-        print(f"FAIL: tta mismatch\n  legacy={legacy_ttas}\n  vector={vector_ttas}")
-        ok = False
-
-    if ok:
-        print(
-            f"PASS: _apply_k_cps_constraint vectorized rewrite is bit-identical to "
-            f"legacy on n={N_AIRCRAFT}, k={K_CPS}, fairness_weight=0.5 fixture"
-        )
-    return ok
-
-
-def benchmark_apply_k_cps_constraint() -> bool:
-    fcfs_order, _runways, runway_last_committed = _make_k_cps_fixture()
-    current_time = 1000.0
-
-    legacy_manager = _make_manager(fairness_weight=0.5)
-    legacy_orders = [copy.deepcopy(fcfs_order) for _ in range(N_BENCHMARK_REPS)]
-    t0 = time.perf_counter()
-    for order in legacy_orders:
-        legacy_manager._runway_last_committed = dict(runway_last_committed)
-        _legacy_apply_k_cps_constraint(legacy_manager, order, current_time)
-    legacy_elapsed = time.perf_counter() - t0
-
-    vector_manager = _make_manager(fairness_weight=0.5)
-    vector_orders = [copy.deepcopy(fcfs_order) for _ in range(N_BENCHMARK_REPS)]
-    t0 = time.perf_counter()
-    for order in vector_orders:
-        vector_manager._runway_last_committed = dict(runway_last_committed)
-        vector_manager._apply_k_cps_constraint(order, current_time)
-    vector_elapsed = time.perf_counter() - t0
-
-    speedup = legacy_elapsed / vector_elapsed if vector_elapsed > 0 else float("inf")
-    print(
-        f"_apply_k_cps_constraint x{N_BENCHMARK_REPS}: "
-        f"legacy={legacy_elapsed*1e3:.2f}ms  vectorized={vector_elapsed*1e3:.2f}ms  "
-        f"speedup={speedup:.2f}x"
-    )
-    ok = vector_elapsed < legacy_elapsed
-    print("PASS" if ok else "FAIL", ": vectorized rewrite is faster than legacy")
-    return ok
-
-
 if __name__ == "__main__":
     passed_parity_1 = check_assign_runways_dynamic_parity()
-    passed_parity_3 = check_apply_k_cps_constraint_parity()
     passed_perf_1 = benchmark_assign_runways_dynamic()
-    passed_perf_3 = benchmark_apply_k_cps_constraint()
-    raise SystemExit(
-        0 if (passed_parity_1 and passed_parity_3 and passed_perf_1 and passed_perf_3) else 1
-    )
+    raise SystemExit(0 if (passed_parity_1 and passed_perf_1) else 1)

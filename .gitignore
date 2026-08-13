@@ -5,6 +5,9 @@ TODO.txt
 images/
 logs/
 models/
+!cps_coordination/models/
+cps_coordination/models/*
+!cps_coordination/models/MODEL_PROVENANCE.md
 dist/
 *.lock
 /experiments/results

@@ -2,14 +2,20 @@
 cps_coordination/scripts/summarize_batch_sweep.py
 ----------------------------------------------------
 Tabulate ``cps_metrics_offline.recompute_metrics`` across every combo
-directory produced by ``run_batch_eval.py``'s sweep (``k{k_cps}_{mode}_
-fw{fairness_weight}/``) -- the "load and compare across combos" step
-exit criterion #6 in ``.claude/plans/phase3_cps_coordination_plan.md``
-needs, without re-running anything.
+directory produced by ``run_batch_eval.py``'s sweep (``k{k_cps}_{mode}/``)
+-- the "load and compare across combos" step exit criterion #6 in
+``.claude/plans/phase3_cps_coordination_plan.md`` needs, without re-running
+anything.
 
 Not a new metrics pipeline -- purely a thin wrapper that discovers combo
 directories under a sweep root and calls the existing offline recompute
 once per directory.
+
+The combo-directory naming used to include a ``_fw{fairness_weight}``
+suffix; ``fairness_weight`` was removed from the codebase 2026-08-12 (see
+``.claude/plans/stall_rate_investigation.md``). The regex below still
+accepts the old suffix (optional) so this script keeps working against
+every already-collected sweep from before the removal, not just new ones.
 
 Run: python cps_coordination/scripts/summarize_batch_sweep.py --sweep-root <path>
 """
@@ -30,7 +36,7 @@ from cps_coordination.scripts.cps_metrics_offline import (
     recompute_metrics,
 )
 
-_COMBO_RE = re.compile(r"^k(?P<k_cps>\d+)_(?P<mode>static|dynamic)_fw(?P<fw>[\d.]+)$")
+_COMBO_RE = re.compile(r"^k(?P<k_cps>\d+)_(?P<mode>static|dynamic)(?:_fw(?P<fw>[\d.]+))?$")
 
 
 def discover_combos(sweep_root: str) -> List[str]:
@@ -53,10 +59,11 @@ def summarize(sweep_root: str, sep_tolerance_s: float, rta_tolerance_s: float) -
             aircraft_df, separation_df, recat_matrix,
             sep_tolerance_s=sep_tolerance_s, rta_tolerance_s=rta_tolerance_s,
         )
+        fw = m.group("fw")
         rows.append({
             "k_cps": int(m.group("k_cps")),
             "mode": m.group("mode"),
-            "fairness_weight": float(m.group("fw")),
+            "fairness_weight": float(fw) if fw is not None else None,  # None: post-removal combo dir
             "n_episodes": metrics.get("n_episodes"),
             "n_aircraft": metrics.get("n_aircraft"),
             "success_rate": metrics.get("success_rate"),
@@ -75,12 +82,17 @@ def summarize(sweep_root: str, sep_tolerance_s: float, rta_tolerance_s: float) -
 
 
 def check_fairness_weight_nonvacuous(sweep_root: str) -> None:
-    """Confirm fairness_weight actually reorders aircraft at fixed (k_cps,
-    mode) when k_cps > 0 -- the concrete bar exit criterion #6 sets. At
-    k_cps == 0, `_apply_k_cps_constraint` short-circuits to plain FCFS
-    regardless of fairness_weight (by design, see cps_manager.py) so
-    byte-identical rows there are the *expected*, correct result, not a
-    false negative.
+    """Legacy check, relevant only for sweep roots collected before
+    fairness_weight's removal (2026-08-12, see
+    .claude/plans/stall_rate_investigation.md) that still have multiple
+    `_fw{value}` combo directories for the same (k_cps, mode) pair.
+    Confirmed fairness_weight actually reordered aircraft at fixed (k_cps,
+    mode) when k_cps > 0 -- the concrete bar exit criterion #6 set. At
+    k_cps == 0, the old `_apply_k_cps_constraint` short-circuited to plain
+    FCFS regardless of fairness_weight, so byte-identical rows there were
+    the *expected*, correct result, not a false negative. A no-op (prints
+    nothing) against any post-removal sweep root, since there is only ever
+    one directory per (k_cps, mode) there.
     """
     combos = discover_combos(sweep_root)
     by_k_mode: Dict[tuple, List[str]] = {}

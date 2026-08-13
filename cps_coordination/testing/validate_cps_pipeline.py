@@ -49,7 +49,7 @@ import bluesky as bs
 import numpy as np
 import pandas as pd
 
-from bluesky_gym.envs.pathplanning_goal_env import MAX_TIME
+from bluesky_gym.envs.pathplanning_goal_env import MAX_DISTANCE, MAX_TIME
 from bluesky_gym.experiment.config import ExperimentConfig, SessionConfig
 from cps_coordination.coordination.cps_manager import AircraftState, CPSManager
 from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
@@ -746,29 +746,31 @@ def check_step9_surrogate_exercised() -> bool:
     return ok
 
 
-def check_step4b_k_cps_reorders() -> bool:
-    """Investigation Vector 2 (pre-Step-10 audit, §2.4): synthetic,
-    non-BlueSky regression guard for ``_apply_k_cps_constraint``'s redesign.
+def check_step4b_fcfs_only_scheduling() -> bool:
+    """Regression guard for the removal of fairness-weighted k-CPS
+    reordering (`.claude/plans/stall_rate_investigation.md`, 2026-08-12):
+    confirms ``_replan`` always schedules aircraft in exact FCFS
+    (ascending-ETA) order -- unconditionally, for any ``k_cps`` -- with no
+    remaining mechanism able to reorder around it.
 
-    §2.1 proved the pre-fix heap-based selection rule is *always* a no-op
-    identity permutation on FCFS-sorted input -- the existing
-    ``check_step4_k_cps_separation`` gate can't distinguish "permutation
-    worked" from "permutation is a no-op" (it only checks a property the
-    greedy scheduler guarantees regardless of input order). This closes
-    that gap with three synthetic-fleet assertions:
-
-      1. ``k_cps == 0`` still degenerates to exact FCFS, regardless of
-         ``fairness_weight`` (the k-window itself is inactive).
-      2. ``fairness_weight == 0.0`` (any ``k_cps``) is byte-identical to
-         FCFS -- the proven-optimal no-op default (§2.1/§2.2).
-      3. ``fairness_weight > 0.0`` with one pre-flagged-stalled aircraft:
-         the stalled aircraft's scheduled position shifts *earlier* than
-         pure FCFS (protected from further imposed delay), and the shift
-         stays within the ``k_cps`` fairness bound.
+    Supersedes ``check_step4b_k_cps_reorders``, which exercised
+    ``_apply_k_cps_constraint``/``fairness_weight`` directly; both were
+    removed after being found to never win against plain FCFS at any
+    tested nonzero weight, in either runway-assignment mode, at any
+    congestion level. The prior test's "fairness_weight=0.0 is
+    byte-identical to FCFS" assertion is now the *only* possible behavior,
+    so this checks it directly against the real ``_replan`` entry point
+    (not a since-deleted method) across a few ``k_cps`` values, on a
+    same-runway fleet built in a deliberately scrambled (non-FCFS) list
+    order, so a hypothetical future reordering regression would have
+    every opportunity to show up.
     """
     recat_matrix = {"C": {"C": 90.0}}
 
     def _fleet(etas: List[float]) -> List[AircraftState]:
+        # Scrambled construction order, distinct from ascending-ETA order,
+        # so this only passes if _replan actually re-derives FCFS order
+        # itself rather than happening to inherit list order for free.
         return [
             AircraftState(
                 acid=f"AC{i:03d}", state=np.zeros(5, dtype=np.float32),
@@ -778,57 +780,144 @@ def check_step4b_k_cps_reorders() -> bool:
         ]
 
     ok = True
-    print("\n--- Step 4b: k-CPS reordering sensitivity (fairness_weight ablation) ---")
+    print("\n--- Step 4b: k-CPS reordering removed -- scheduling is always exact FCFS ---")
 
-    # (1) k_cps == 0 still degenerates to exact FCFS, regardless of fairness_weight.
-    mgr_k0 = CPSManager(k_cps=0, recat_matrix=recat_matrix, fairness_weight=0.5)
-    fcfs = sorted(_fleet([500.0, 105.0, 110.0, 100.0, 510.0]), key=lambda a: (a.eta, a.acid))
-    out_k0 = mgr_k0._apply_k_cps_constraint(fcfs, current_time=0.0)
-    if [a.acid for a in out_k0] != [a.acid for a in fcfs]:
-        print("FAIL: k_cps=0 did not degenerate to exact FCFS")
+    etas = [500.0, 105.0, 110.0, 100.0, 510.0]  # scrambled order by construction
+    expected_acid_order = [a.acid for a in sorted(_fleet(etas), key=lambda a: (a.eta, a.acid))]
+
+    for k_cps in (0, 2, 5):
+        mgr = CPSManager(k_cps=k_cps, recat_matrix=recat_matrix)
+        mgr._fleet = _fleet(etas)
+        mgr._replan(current_time=0.0)
+        scheduled_order = [a.acid for a in sorted(mgr._fleet, key=lambda a: a.tta)]
+        if scheduled_order != expected_acid_order:
+            print(f"FAIL: k_cps={k_cps} scheduling order {scheduled_order} != "
+                  f"expected FCFS order {expected_acid_order}")
+            ok = False
+        else:
+            print(f"PASS: k_cps={k_cps} scheduling order is exact FCFS: {scheduled_order}")
+
+    return ok
+
+
+def check_step4c_stall_probation() -> bool:
+    """Stall-rate investigation (`.claude/plans/stall_rate_investigation.md`,
+    Phase 4d): synthetic, non-BlueSky regression guard for the non-sticky
+    "probation" redesign of ``_update_stall_tracking``. Promoted from
+    ``scratchpad/test_probation_stall_detector.py`` (Phase 1 there found the
+    prior sticky rule flagged ~140-150km-from-IAF aircraft that go on to
+    converge 99-100% of the time; this guards the fix, not just the original
+    finding). Drives ``_update_stall_tracking`` directly against a single
+    synthetic ``AircraftState`` whose distance-to-IAF is mutated in place
+    across cycles, matching how a real position series evolves:
+
+      1. An aircraft whose distance never improves at all is still
+         finalized -- exactly ``STALL_WINDOW_S + RECOVERY_WINDOW_S`` after
+         tracking starts (probation adds one grace cycle, it doesn't disable
+         detection).
+      2. An aircraft that beats its at-flag distance by
+         ``RECOVERY_PROGRESS_EPS_KM`` within ``RECOVERY_WINDOW_S`` is
+         released from probation, never finalized, and put on the shortened
+         ``REFLAG_WINDOW_S`` for any future plateau.
+      3. A second plateau after one recovery re-enters probation after only
+         ``REFLAG_WINDOW_S`` (not a fresh ``STALL_WINDOW_S``).
+    """
+    ACTION_TIME_S = 120.0
+
+    class _FakeSurrogate:
+        """Minimal stand-in exposing only what _update_stall_tracking reads."""
+        def __init__(self):
+            self._iaf_ref = {"27": (0.0, 0.0, 0.0)}
+
+    def _mgr() -> CPSManager:
+        return CPSManager(k_cps=0, recat_matrix={}, runway_assignment_mode="static")
+
+    def _ac(acid: str, dist_km: float) -> AircraftState:
+        # MAX_DISTANCE=300km normalization: x = dist_km/300 (y=0) reproduces
+        # dist_km exactly via hypot(...) * MAX_DISTANCE in the manager.
+        x = dist_km / MAX_DISTANCE
+        return AircraftState(
+            acid=acid, state=np.array([x, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            runway_id="27", eta=1000.0,
+        )
+
+    ok = True
+    print("\n--- Step 4c: stall-detector probation redesign (non-sticky un-flagging) ---")
+
+    # (1) Genuinely stuck: never recovers -> finalized after STALL_WINDOW_S + RECOVERY_WINDOW_S.
+    mgr = _mgr()
+    surrogate = _FakeSurrogate()
+    ac = _ac("AC000", dist_km=100.0)
+    mgr._fleet = [ac]
+    t = 0.0
+    stall_steps = int(mgr.STALL_WINDOW_S // ACTION_TIME_S)
+    recovery_steps = int(mgr.RECOVERY_WINDOW_S // ACTION_TIME_S)
+    finalized_at = None
+    for step in range(stall_steps + recovery_steps + 3):
+        t += ACTION_TIME_S
+        mgr._update_stall_tracking(surrogate, t)
+        if mgr.is_stalled("AC000"):
+            finalized_at = step
+            break
+    expected_step = stall_steps + recovery_steps
+    if finalized_at != expected_step:
+        print(f"FAIL: genuinely stuck aircraft finalized at step {finalized_at}, "
+              f"expected {expected_step} (STALL_WINDOW_S + RECOVERY_WINDOW_S)")
         ok = False
     else:
-        print("PASS: k_cps=0 degenerates to exact FCFS regardless of fairness_weight")
+        print(f"PASS: genuinely stuck aircraft finalized at step {finalized_at}, "
+              f"exactly STALL_WINDOW_S + RECOVERY_WINDOW_S after start")
 
-    # (2) fairness_weight == 0.0 (k_cps=3) is byte-identical to FCFS.
-    mgr_w0 = CPSManager(k_cps=3, recat_matrix=recat_matrix, fairness_weight=0.0)
-    fcfs = sorted(_fleet([500.0, 105.0, 110.0, 100.0, 510.0]), key=lambda a: (a.eta, a.acid))
-    out_w0 = mgr_w0._apply_k_cps_constraint(fcfs, current_time=0.0)
-    if [a.acid for a in out_w0] != [a.acid for a in fcfs]:
-        print("FAIL: fairness_weight=0.0 did not reproduce byte-identical FCFS")
+    # (2) Recovery within RECOVERY_WINDOW_S releases from probation.
+    mgr = _mgr()
+    ac = _ac("AC001", dist_km=100.0)
+    mgr._fleet = [ac]
+    t = 0.0
+    for _ in range(stall_steps + 1):
+        t += ACTION_TIME_S
+        mgr._update_stall_tracking(surrogate, t)
+    if mgr.is_stalled("AC001") or "AC001" not in mgr._probation_since:
+        print("FAIL: aircraft did not enter probation as expected before recovery test")
         ok = False
     else:
-        print("PASS: fairness_weight=0.0 reproduces byte-identical FCFS (k_cps=3)")
+        t += ACTION_TIME_S
+        ac.state[0] = (100.0 - mgr.RECOVERY_PROGRESS_EPS_KM - 1.0) / MAX_DISTANCE
+        mgr._update_stall_tracking(surrogate, t)
+        if mgr.is_stalled("AC001"):
+            print("FAIL: recovered aircraft was wrongly finalized")
+            ok = False
+        elif "AC001" in mgr._probation_since:
+            print("FAIL: recovered aircraft did not leave probation")
+            ok = False
+        elif mgr._stall_window_override.get("AC001") != mgr.REFLAG_WINDOW_S:
+            print("FAIL: recovered aircraft not put on shortened REFLAG_WINDOW_S")
+            ok = False
+        else:
+            print("PASS: recovery within RECOVERY_WINDOW_S releases from probation "
+                  "and shortens the future window to REFLAG_WINDOW_S")
 
-    # (3) fairness_weight > 0.0 protects a pre-flagged-stalled aircraft:
-    # equal ETAs isolate the fairness term from ETA-driven imposed-delay
-    # differences (all candidates impose identical delay at a given
-    # position, so only the slack-penalty term can break the tie).
-    k = 2
-    mgr_f = CPSManager(k_cps=k, recat_matrix=recat_matrix, fairness_weight=1.0)
-    fleet = _fleet([100.0] * 5)
-    fcfs = sorted(fleet, key=lambda a: (a.eta, a.acid))
-    stalled_acid = fcfs[-1].acid  # last in FCFS order -- worst case under plain FCFS
-    mgr_f._stalled_acids.add(stalled_acid)
-    out_f = mgr_f._apply_k_cps_constraint(fcfs, current_time=0.0)
-
-    fcfs_pos = {a.acid: i for i, a in enumerate(fcfs)}
-    new_pos = {a.acid: i for i, a in enumerate(out_f)}
-    shift = fcfs_pos[stalled_acid] - new_pos[stalled_acid]
-    print(f"stalled acid {stalled_acid}: FCFS position {fcfs_pos[stalled_acid]} -> "
-          f"fairness-weighted position {new_pos[stalled_acid]} (shift={shift}, k_cps={k})")
-
-    if new_pos[stalled_acid] >= fcfs_pos[stalled_acid]:
-        print("FAIL: pre-flagged-stalled aircraft did not move earlier under "
-              "fairness_weight > 0 (expected priority protection from imposed delay)")
-        ok = False
-    elif shift > k:
-        print(f"FAIL: stalled aircraft's position shifted by {shift}, "
-              f"exceeding the k_cps={k} fairness bound")
+    # (3) Second plateau after one recovery re-enters probation after REFLAG_WINDOW_S only.
+    mgr = _mgr()
+    ac = _ac("AC002", dist_km=100.0)
+    mgr._fleet = [ac]
+    t = 0.0
+    for _ in range(stall_steps + 1):
+        t += ACTION_TIME_S
+        mgr._update_stall_tracking(surrogate, t)
+    t += ACTION_TIME_S
+    ac.state[0] = (100.0 - mgr.RECOVERY_PROGRESS_EPS_KM - 1.0) / MAX_DISTANCE
+    mgr._update_stall_tracking(surrogate, t)
+    reflag_steps = int(mgr.REFLAG_WINDOW_S // ACTION_TIME_S) + 1
+    for _ in range(reflag_steps):
+        t += ACTION_TIME_S
+        mgr._update_stall_tracking(surrogate, t)
+    if "AC002" not in mgr._probation_since:
+        print(f"FAIL: second plateau did not re-enter probation within "
+              f"REFLAG_WINDOW_S={mgr.REFLAG_WINDOW_S}s of the recovery")
         ok = False
     else:
-        print(f"PASS: stalled aircraft prioritised {shift} position(s) earlier, "
-              f"within the k_cps={k} bound")
+        print(f"PASS: second plateau re-triggers probation after REFLAG_WINDOW_S="
+              f"{mgr.REFLAG_WINDOW_S}s, not a fresh STALL_WINDOW_S={mgr.STALL_WINDOW_S}s")
 
     return ok
 
@@ -944,14 +1033,16 @@ def check_step10_episode_scoped_c_sep() -> bool:
 if __name__ == "__main__":
     passed_step3 = check_step3_fcfs_static()
     passed_step4 = check_step4_k_cps_separation()
-    passed_step4b = check_step4b_k_cps_reorders()
+    passed_step4b = check_step4b_fcfs_only_scheduling()
+    passed_step4c = check_step4c_stall_probation()
     passed_step5 = check_step5_dynamic_tta()
     passed_step6 = check_step6_dynamic_runway()
     passed_step7 = check_step7_three_pass_baseline()
     passed_step9 = check_step9_surrogate_exercised()
     passed_step10_c_sep = check_step10_episode_scoped_c_sep()
     raise SystemExit(
-        0 if (passed_step3 and passed_step4 and passed_step4b and passed_step5
-              and passed_step6 and passed_step7 and passed_step9 and passed_step10_c_sep)
+        0 if (passed_step3 and passed_step4 and passed_step4b and passed_step4c
+              and passed_step5 and passed_step6 and passed_step7 and passed_step9
+              and passed_step10_c_sep)
         else 1
     )

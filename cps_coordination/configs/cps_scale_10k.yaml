@@ -20,23 +20,24 @@
 # runway_assignment_mode`, this config intentionally leaves those two
 # fields at their CPSModelConfig defaults — run_batch_eval.py sweeps both
 # per the --k-cps-sweep/--mode-sweep CLI flags (k_cps in {0,3} x mode in
-# {static,dynamic}, 4 combinations). `model.fairness_weight` is NOT fixed
-# here, deliberately: the Stage 1/2 calibration sweep (see
-# cps_coordination/scripts/analyze_fairness_weight_offline.py and
-# cps_coordination/data/fairness_weight_calibration_sweep/) found a
-# genuine, well-resolved MODE-SPECIFIC optimum (static≈1.0, dynamic≈0.5,
-# not a single shared value) -- a single scalar field here can't represent
-# that. The actual production launch applies the calibrated per-mode
-# values via run_step10_scale10k.sh's STATIC_FW/DYNAMIC_FW (currently
-# 1.0/0.5), one run_batch_eval.py invocation per mode. `fairness_weight`
-# below stays at the CPSModelConfig dataclass default (0.0, plain FCFS)
-# for any non-sweep, non-launch-script consumer of this YAML.
+# {static,dynamic}, 4 combinations).
+#
+# A `model.fairness_weight` k-CPS slack-protection term used to be
+# calibrated per-mode here (static≈1.0, dynamic≈0.5, via
+# analyze_fairness_weight_offline.py's Stage 1/2 sweep). Removed
+# 2026-08-12: .claude/plans/stall_rate_investigation.md found
+# fairness_weight=0.0 (exact FCFS ordering) matched or beat every tested
+# nonzero value, in both modes, at every congestion level -- the earlier
+# calibration was run in an artificial "ratchet ON" regime just to get any
+# stall signal at all (see that plan doc's "Resolved: why the earlier
+# calibration and this investigation disagree" section), a regime that
+# doesn't reflect real (ratchet-OFF) production behavior. The mechanism
+# itself was removed from CPSManager rather than just defaulted to 0.
 
 model:
-  # CPS coordination hyper-parameters. k_cps / runway_assignment_mode /
-  # fairness_weight are NOT set here - run_batch_eval.py (via
-  # run_step10_scale10k.sh) overrides them per sweep combination, with
-  # fairness_weight applied per-mode (see note above, not a single value).
+  # CPS coordination hyper-parameters. k_cps / runway_assignment_mode are
+  # NOT set here - run_batch_eval.py (via run_step10_scale10k.sh) overrides
+  # them per sweep combination.
   delta_t_plan: 120               # Aligned with ACTION_TIME=120s (avoids the
                                    # CPSModelConfig.validate() cadence-mismatch warning)
   delta_update: 1.0               # Minimum TTA change delta_update to push a worker update (s)
@@ -111,16 +112,20 @@ cps_eval:
                                    # shape as cps_base.yaml. run_batch_eval.py
                                    # uses max_concurrent_aircraft/
                                    # total_arrivals_per_episode below instead.
-  max_concurrent_aircraft: 10     # Maximum simultaneously active aircraft ("slots").
-                                   # Raised from 5 -> 10 (2x) for higher per-episode
-                                   # runway contention/multi-agent interaction density
-                                   # -- see "Density rescale" in
-                                   # step10_execution_and_data_collection_plan.md.
-  total_arrivals_per_episode: 25  # Total arrivals generated per episode (rolling
+  max_concurrent_aircraft: 35     # Maximum simultaneously active aircraft ("slots").
+                                   # Raised from 10 -> 35 (2026-08-13): resolved by the
+                                   # 50-ac/episode capacity sweep (candidate caps
+                                   # {10,20,27,35,42,50,65,80}, pre-registered <10%-of-
+                                   # cumulative-Gamma-range stopping rule) -- see
+                                   # phase3_cps_coordination_plan.md's "Density Rescale
+                                   # to 50 ac/episode" section for the full table/derivation.
+  total_arrivals_per_episode: 50  # Total arrivals generated per episode (rolling
                                    # arrival stream: > max_concurrent_aircraft means
                                    # later arrivals spawn into slots as they free up).
-                                   # Raised from 10 -> 25 (2.5x, ratio to
-                                   # max_concurrent_aircraft goes 2:1 -> 2.5:1).
+                                   # Raised from 25 -> 50 (2x, matching the 4D worker's
+                                   # N=100,000-aircraft results section at M=2,000
+                                   # unchanged) -- see "Density Rescale to 50 ac/episode"
+                                   # in phase3_cps_coordination_plan.md.
   spawn_window_s: 2400.0          # Each arrival's scheduled spawn time is drawn
                                    # i.i.d. Uniform(0, spawn_window_s) at episode
                                    # reset (MultiAgentPathPlanningGoalEnv's

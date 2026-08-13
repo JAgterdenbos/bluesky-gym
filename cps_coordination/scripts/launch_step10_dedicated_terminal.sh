@@ -17,7 +17,7 @@
 # Usage:
 #   ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
 #   RUN_ID=20260615_095840 ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
-#   COMBO="3:dynamic:0.5" ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
+#   COMBO="3:dynamic" ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
 #   RESUME=1 SAVE_ROOT=experiments/cps_eval/scale_10k_20260801_000000 ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
 #
 # Env vars (all optional):
@@ -26,12 +26,10 @@
 #                     experiments/PathPlanningGoalEnv-v0/SAC/models/) if unset.
 #   SAVE_ROOT         Output root. Defaults to a fresh timestamped dir under
 #                     experiments/cps_eval/.
-#   COMBO             "k_cps:mode:fw" to launch a single combo instead of the
-#                     full 4-combo sequential sweep (see
-#                     run_step10_scale10k.sh's header for details).
+#   COMBO             "k_cps:mode" to launch a single combo instead of the
+#                     full 4-combo sweep (see run_step10_scale10k.sh's
+#                     header for details).
 #   RESUME            Set to 1 to resume an interrupted SAVE_ROOT.
-#   STATIC_FW         Calibrated static-mode fairness_weight (default 1.0).
-#   DYNAMIC_FW        Calibrated dynamic-mode fairness_weight (default 0.5).
 #   EXPECTED_RUNWAYS  Runway scope this script asserts cps_scale_10k.yaml
 #                     matches before launching (default "18R 27" -- Groot et
 #                     al.'s dual-runway baseline scope). Update this only if
@@ -83,8 +81,6 @@ LOG="cps_coordination/data/step10_launch_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "$(dirname "$LOG")"
 
 EPISODES="${EPISODES:-2000}"
-STATIC_FW="${STATIC_FW:-1.0}"
-DYNAMIC_FW="${DYNAMIC_FW:-0.5}"
 
 echo "=================================================================="
 echo "Step 10 scale-up launch -- resolved configuration"
@@ -92,7 +88,6 @@ echo "  config             : $CONFIG"
 echo "  runway scope       : $ACTUAL_RUNWAYS"
 echo "  episodes/combo (M) : $EPISODES"
 echo "  worker checkpoint  : experiments/PathPlanningGoalEnv-v0/SAC/models/$RUN_ID/final_model.zip"
-echo "  fairness_weight    : static=$STATIC_FW dynamic=$DYNAMIC_FW"
 echo "  save_root          : $SAVE_ROOT"
 echo "  log                : $LOG"
 echo "  combo              : ${COMBO:-<full 4-combo sequential sweep, ~8.2h>}"
@@ -114,7 +109,7 @@ case "$CONFIRM" in
     *) echo "Aborted."; exit 1 ;;
 esac
 
-export RUN_ID SAVE_ROOT CONFIG STATIC_FW DYNAMIC_FW EPISODES
+export RUN_ID SAVE_ROOT CONFIG EPISODES
 if [ -n "${COMBO:-}" ]; then export COMBO; fi
 if [ -n "${RESUME:-}" ]; then export RESUME; fi
 

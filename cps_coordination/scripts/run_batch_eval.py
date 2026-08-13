@@ -5,15 +5,14 @@ Production batch runner for the M=2,000-episode CPS coordination
 scale-up evaluation (Phase III roadmap Step 10). Wraps the same
 CPSCoordinationExperiment / CPSManager / MultiAgentPathPlanningGoalEnv
 machinery ``run_cps_eval.py`` already exercises for a single
-(k_cps, mode, fairness_weight) run, adding:
+(k_cps, mode) run, adding:
 
-  - a parameter sweep across ``k_cps``, ``runway_assignment_mode``, and
-    ``fairness_weight`` (default: 0/1/3 x static/dynamic x [0.0], 6
-    combinations), reusing one shared
-    env/model/surrogate/recat-matrix across the whole sweep (only cheap
-    objects -- CPSManager pairs and Parquet collectors -- are rebuilt per
-    combination) since BlueSky init + frozen-SAC load are the expensive
-    parts and this matters at 6 x M=2,000 scale;
+  - a parameter sweep across ``k_cps`` and ``runway_assignment_mode``
+    (default: [0,1,3] x [static,dynamic], 6 combinations), reusing one
+    shared env/model/surrogate/recat-matrix across the whole sweep (only
+    cheap objects -- CPSManager pairs and Parquet collectors -- are
+    rebuilt per combination) since BlueSky init + frozen-SAC load are the
+    expensive parts and this matters at 6 x M=2,000 scale;
   - SIGINT/SIGTERM handling that flushes and closes the in-flight combo's
     Parquet streams cleanly before exiting, rather than corrupting a
     partial chunk;
@@ -21,6 +20,14 @@ machinery ``run_cps_eval.py`` already exercises for a single
     ``max_concurrent_aircraft``) with time-windowed spawning
     (``spawn_window_s``), read from the ``cps_eval:`` section of the
     ``--config`` YAML (see ``cps_coordination/configs/cps_scale_10k.yaml``).
+
+A ``fairness_weight`` sweep dimension (k-CPS slack-protection cost term)
+used to be swept here too. Removed 2026-08-12 after
+``.claude/plans/stall_rate_investigation.md`` found ``fairness_weight=0.0``
+(exact FCFS ordering) matched or beat every tested nonzero value, in both
+runway-assignment modes, at every congestion level -- the mechanism itself
+was removed from ``CPSManager`` rather than just defaulted to 0, since it
+never won.
 
 Usage
 -----
@@ -33,7 +40,6 @@ Usage
   python cps_coordination/scripts/run_batch_eval.py \\
       --run-id 20260301_120000 --episodes 10 \\
       --k-cps-sweep 0 3 --mode-sweep static dynamic \\
-      --fairness-weight-sweep 0.0 0.3 \\
       --save-path-root /tmp/cps_batch_smoke
 """
 
@@ -103,7 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
             "Batch CPS coordination evaluation: sweep k_cps x "
-            "runway_assignment_mode x fairness_weight, three-pass (CPS + static + solo) "
+            "runway_assignment_mode, three-pass (CPS + static + solo) "
             "per episode, streaming telemetry to Parquet. Production driver "
             "for the M=2,000 scale-up (Phase III roadmap Step 10)."
         ),
@@ -121,9 +127,6 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="k_cps values to sweep.")
     p.add_argument("--mode-sweep", type=str, nargs="+", default=["static", "dynamic"],
                    choices=["static", "dynamic"], help="runway_assignment_mode values to sweep.")
-    p.add_argument("--fairness-weight-sweep", type=float, nargs="+",
-                   default=model_d.get("fairness_weight_sweep", [0.0]),
-                   help="k-CPS slack-protection weight values to sweep (0.0 = FCFS, ablation).")
     p.add_argument("--disable-cross-cycle-runway-seeding", action="store_true", default=False,
                    help="Test C: never seed a runway's greedy-schedule state from "
                         "prior replanning cycles (isolates the surrogate-feature loop).")
@@ -255,7 +258,6 @@ def _new_manager(
     delta_t_plan: int,
     delta_update: float,
     available_runways: Optional[List[str]],
-    fairness_weight: float,
     enable_cross_cycle_runway_seeding: bool,
 ) -> CPSManager:
     return CPSManager(
@@ -268,7 +270,6 @@ def _new_manager(
         # See coordination_baseline.py::evaluate()'s _new_cps_manager for why
         # this is required (unwired -> zeroed lag features -> degraded ETA).
         trajectory_buffer=TrajectoryBuffer(),
-        fairness_weight=fairness_weight,
         enable_cross_cycle_runway_seeding=enable_cross_cycle_runway_seeding,
     )
 
@@ -319,7 +320,7 @@ def run_sweep(args: argparse.Namespace) -> None:
     available_runways = list(args.runways or ALL_RUNWAYS)
 
     enable_cross_cycle_runway_seeding = not args.disable_cross_cycle_runway_seeding
-    combos = list(itertools.product(args.k_cps_sweep, args.mode_sweep, args.fairness_weight_sweep))
+    combos = list(itertools.product(args.k_cps_sweep, args.mode_sweep))
     print(
         f"\nCPS batch evaluation -> {args.save_path_root}"
         f"\n  combos={combos}"
@@ -329,25 +330,25 @@ def run_sweep(args: argparse.Namespace) -> None:
     )
 
     try:
-        for k_cps, mode, fairness_weight in combos:
+        for k_cps, mode in combos:
             if _stop_requested:
                 print("[run_batch_eval] stop requested before starting next combo - exiting sweep.")
                 break
 
-            save_path = os.path.join(args.save_path_root, f"k{k_cps}_{mode}_fw{fairness_weight:g}")
+            save_path = os.path.join(args.save_path_root, f"k{k_cps}_{mode}")
 
             start_ep_idx = 0
             resuming = False
             if args.resume:
                 start_ep_idx = _resolve_resume_start(save_path, args.episode_id_offset)
                 if start_ep_idx >= args.episodes:
-                    print(f"\n--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} "
+                    print(f"\n--- combo k_cps={k_cps}, mode={mode} "
                           f"-> {save_path}: already complete ({start_ep_idx}/{args.episodes} episodes "
                           f"durably written), skipping ---")
                     continue
                 if start_ep_idx > 0:
                     resuming = True
-                    print(f"\n--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} "
+                    print(f"\n--- combo k_cps={k_cps}, mode={mode} "
                           f"-> {save_path}: resuming at episode {start_ep_idx}/{args.episodes} "
                           f"({start_ep_idx} already durably written) ---")
 
@@ -361,18 +362,18 @@ def run_sweep(args: argparse.Namespace) -> None:
 
             cps_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                         args.delta_update, available_runways,
-                                        fairness_weight, enable_cross_cycle_runway_seeding)
+                                        enable_cross_cycle_runway_seeding)
             static_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                            args.delta_update, available_runways,
-                                           fairness_weight, enable_cross_cycle_runway_seeding)
+                                           enable_cross_cycle_runway_seeding)
             solo_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                          args.delta_update, available_runways,
-                                         fairness_weight, enable_cross_cycle_runway_seeding)
+                                         enable_cross_cycle_runway_seeding)
             aircraft_collector, separation_collector = build_collectors(
                 collector_path, chunk_size=args.chunk_size, fresh_start=collector_fresh_start,
             )
 
-            print(f"\n--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} -> {save_path} ---")
+            print(f"\n--- combo k_cps={k_cps}, mode={mode} -> {save_path} ---")
             try:
                 for ep_idx in range(start_ep_idx, args.episodes):
                     if _stop_requested:
@@ -412,7 +413,6 @@ def run_sweep(args: argparse.Namespace) -> None:
                     _log_episode(
                         aircraft_collector, separation_collector, episode_id, ep_records,
                         k_cps=k_cps, mode=mode, recat_matrix=recat_matrix,
-                        fairness_weight=fairness_weight,
                     )
 
                     if (ep_idx + 1) % args.log_every == 0 or ep_idx == args.episodes - 1:
@@ -422,11 +422,11 @@ def run_sweep(args: argparse.Namespace) -> None:
                 separation_collector.close()
                 if resuming:
                     _merge_resume_delta(save_path, collector_path)
-                print(f"--- combo k_cps={k_cps}, mode={mode}, fairness_weight={fairness_weight:g} done -> {save_path} ---")
+                print(f"--- combo k_cps={k_cps}, mode={mode} done -> {save_path} ---")
     finally:
         env.close()
 
-    print(f"\nDone. Telemetry written under {args.save_path_root}/k<k_cps>_<mode>_fw<fairness_weight>/")
+    print(f"\nDone. Telemetry written under {args.save_path_root}/k<k_cps>_<mode>/")
 
 
 def main() -> None:

@@ -452,7 +452,6 @@ class CPSCoordinationExperiment(BaseExperiment):
                 # what was silently degrading ETA accuracy well outside RTA_TOLERANCE.
                 trajectory_buffer=TrajectoryBuffer(),
                 enable_stall_detection=mcfg.enable_stall_detection,
-                fairness_weight=mcfg.fairness_weight,
                 enable_cross_cycle_runway_seeding=mcfg.enable_cross_cycle_runway_seeding,
             )
 

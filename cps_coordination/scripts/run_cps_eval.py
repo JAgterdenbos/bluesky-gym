@@ -66,8 +66,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--episodes", type=int, default=100, help="Number of episodes (M).")
     p.add_argument("--n-aircraft", type=int, default=5, help="Aircraft per episode (N_a).")
     p.add_argument("--k-cps", type=int, default=3)
-    p.add_argument("--fairness-weight", type=float, default=0.0,
-                   help="k-CPS slack-protection weight (0.0 = FCFS, ablation).")
     p.add_argument("--freeze-remaining-time-budget", action="store_true", default=False,
                    help="Test A (TTA feedback-loop falsification): freeze "
                         "remaining_time_budget at its first-committed value per acid.")
@@ -108,7 +106,6 @@ def _log_episode(
     k_cps: int,
     mode: str,
     recat_matrix: Dict[str, Dict[str, float]],
-    fairness_weight: float,
 ) -> None:
     """Append one episode's joined two-pass records to both telemetry streams."""
     for rec in records:
@@ -121,7 +118,6 @@ def _log_episode(
                 wake_cat=rec.wake_cat,
                 k_cps=k_cps,
                 runway_assignment_mode=mode,
-                fairness_weight=fairness_weight,
                 assigned_tta=rec.assigned_tta,
                 actual_landing_time=rec.actual_landing_time,
                 rta_error_cps=rec.rta_error_cps,
@@ -173,7 +169,6 @@ def main() -> None:
             delta_t_plan=args.delta_t_plan,
             delta_update=args.delta_update,
             eta_surrogate_path=args.eta_surrogate_path,
-            fairness_weight=args.fairness_weight,
             freeze_remaining_time_budget=args.freeze_remaining_time_budget,
             remaining_time_budget_cap_s=args.remaining_time_budget_cap_s,
             enable_cross_cycle_runway_seeding=not args.disable_cross_cycle_runway_seeding,
@@ -214,7 +209,6 @@ def main() -> None:
             # See coordination_baseline.py::evaluate()'s _new_cps_manager for why
             # this is required (unwired -> zeroed lag features -> degraded ETA).
             trajectory_buffer=TrajectoryBuffer(),
-            fairness_weight=args.fairness_weight,
             enable_cross_cycle_runway_seeding=not args.disable_cross_cycle_runway_seeding,
         )
 
@@ -261,7 +255,6 @@ def main() -> None:
             _log_episode(
                 aircraft_collector, separation_collector, ep_idx, ep_records,
                 k_cps=args.k_cps, mode=args.mode, recat_matrix=recat_matrix,
-                fairness_weight=args.fairness_weight,
             )
 
             if (ep_idx + 1) % args.log_every == 0 or ep_idx == args.episodes - 1:

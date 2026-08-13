@@ -27,11 +27,10 @@
 #
 # At the NEW density (max_concurrent_aircraft=10, total_arrivals_per_episode=25,
 # spawn_window_s=2400, cps_scale_10k.yaml) and M=2,000/4-combo grid,
-# MEASURED via this exact script at a capped M=30 (mode-specific
-# fairness_weight included): k3_static 117s, k3_dynamic 105s at M=30
-# (~3.5-3.9s/episode/combo) -> ~2.1h/combo, ~8.2h sequential for all 4
-# combos -- well under the original ~4.6h/combo/~18.3h estimate (see
-# task-optimize-fairness-fizzy-moth.md and step10_execution_and_data_
+# MEASURED via this exact script at a capped M=30: k3_static 117s,
+# k3_dynamic 105s at M=30 (~3.5-3.9s/episode/combo) -> ~2.1h/combo, ~8.2h
+# sequential for all 4 combos -- well under the original ~4.6h/combo/~18.3h
+# estimate (see task-optimize-fairness-fizzy-moth.md and step10_execution_and_data_
 # collection_plan.md's "Wall-clock cost" section for the full derivation
 # and the verification data at cps_coordination/data/
 # step10_verification_new_density_final/). If your cluster can run more
@@ -41,28 +40,25 @@
 # additional processes too. Real runtime will vary with cluster hardware;
 # this is a same-machine extrapolation, not a promise.
 #
-# VALIDATED GRID -- this script pins k_cps/mode/fairness_weight explicitly
-# rather than relying on run_batch_eval.py's own bare CLI defaults
-# (k_cps=[0,1,3] x mode x fairness_weight=[0.0], 6 combos). k_cps in
-# {0,3} x mode in {static,dynamic} (4 combos) was validated throughout the
-# k-CPS-fix/ratchet investigation (originally alongside fairness_weight in
-# {0.0,0.3}, 8 combos -- see phase3_cps_coordination_plan.md).
-# fairness_weight is now FIXED (not swept) via a local Stage 1/2 calibration
-# sweep -- see cps_coordination/scripts/analyze_fairness_weight_offline.py
-# and task-optimize-fairness-fizzy-moth.md. Launching with the script's bare
+# VALIDATED GRID -- this script pins k_cps/mode explicitly rather than
+# relying on run_batch_eval.py's own bare CLI defaults (k_cps=[0,1,3] x
+# mode, 6 combos). k_cps in {0,3} x mode in {static,dynamic} (4 combos)
+# was validated throughout the k-CPS-fix/ratchet investigation (see
+# phase3_cps_coordination_plan.md). Launching with the script's bare
 # defaults would silently evaluate an untested grid.
 #
-# fairness_weight IS MODE-SPECIFIC, not one global value: the calibration
-# sweep (k_cps=3, ratchet ON to get a real contention signal -- the
-# production ratchet-OFF default drives stalling to ~0%, leaving nothing
-# for fairness_weight to protect against, so it had to be calibrated in a
-# separate diagnostic regime) found a genuine, well-resolved 2x split
-# between modes: dynamic mode peaks at fw=0.5 (success_rate 0.576 vs. 0.450
-# at fw=0), static mode peaks at fw=1.0 (success_rate 0.716 vs. 0.729 at
-# fw=0, stall_recovery_rate 0.564 vs. 0.504 -- success dips slightly,
-# stall-recovery improves substantially). No shared value serves both
-# modes well (fw=0.75, the naive compromise, is actually a local dip for
-# dynamic mode). STATIC_FW/DYNAMIC_FW below apply this per mode.
+# FAIRNESS_WEIGHT REMOVED (2026-08-12) -- a k-CPS slack-protection cost
+# term used to be calibrated per-mode here (static fw=1.0, dynamic fw=0.5,
+# via a local Stage 1/2 sweep). .claude/plans/stall_rate_investigation.md
+# found fairness_weight=0.0 (exact FCFS ordering) matched or beat every
+# tested nonzero value, in both modes, at every congestion level -- the
+# earlier calibration was run in an artificial "ratchet ON" regime just to
+# get any stall signal at all (real, ratchet-OFF production traffic barely
+# stalls at the launch density, giving the calibration nothing genuine to
+# tune against). The mechanism itself was removed from CPSManager, so both
+# modes now run one shared, unconditional FCFS ordering -- the STATIC_FW/
+# DYNAMIC_FW split (and the two-separate-run_batch_eval.py-calls structure
+# that only existed to apply it) is gone; one call now sweeps both modes.
 #
 # RATCHET DEFAULT -- --disable-cross-cycle-runway-seeding is passed below.
 # This is the production default per the pre-registered Vector-1 GO decision
@@ -91,30 +87,29 @@
 # so concurrent shards must never target the same file); once all N shards
 # for a combo finish, merge them with:
 #   uv run python cps_coordination/scripts/merge_shards.py \
-#       --save-root "$SAVE_ROOT" --combo "k3_dynamic_fw0.3" --shards 4
+#       --save-root "$SAVE_ROOT" --combo "k3_dynamic" --shards 4
 # which verifies there are no colliding episode_ids across shards before
-# writing the merged, final-looking SAVE_ROOT/k3_dynamic_fw0.3/ directory.
+# writing the merged, final-looking SAVE_ROOT/k3_dynamic/ directory.
 #
-# Usage (COMBO's fw component below must match STATIC_FW/DYNAMIC_FW for
-# that combo's mode -- see those variables below)
+# Usage
 # -----
-#   # Full 4-combo sweep, sequential (~8.2h measured, only if your cluster truly
-#   # runs this as one long single job -- runs TWO run_batch_eval.py
-#   # invocations, one per mode with its own calibrated fairness_weight):
+#   # Full 4-combo sweep, one run_batch_eval.py invocation sweeping both
+#   # k_cps and mode together (~8.2h measured; only if your cluster truly
+#   # runs this as one long single job):
 #   RUN_ID=20260615_095840 ./cps_coordination/scripts/run_step10_scale10k.sh
 #
 #   # One combo per job (recommended for real cluster use -- launch 4 of
-#   # these, one per k_cps/mode combination, with the fw matching that
-#   # mode's calibrated value, however your scheduler fans out jobs):
-#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" ./cps_coordination/scripts/run_step10_scale10k.sh
-#   RUN_ID=20260615_095840 COMBO="3:static:1.0" ./cps_coordination/scripts/run_step10_scale10k.sh
+#   # these, one per k_cps/mode combination, however your scheduler fans
+#   # out jobs):
+#   RUN_ID=20260615_095840 COMBO="3:dynamic" ./cps_coordination/scripts/run_step10_scale10k.sh
+#   RUN_ID=20260615_095840 COMBO="3:static" ./cps_coordination/scripts/run_step10_scale10k.sh
 #
 #   # One combo, sharded across 4 more processes (needs 4 separate
 #   # invocations, SHARD_INDEX=0..3, then merge_shards.py afterward):
-#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" SHARDS=4 SHARD_INDEX=0 ./cps_coordination/scripts/run_step10_scale10k.sh
+#   RUN_ID=20260615_095840 COMBO="3:dynamic" SHARDS=4 SHARD_INDEX=0 ./cps_coordination/scripts/run_step10_scale10k.sh
 #
-#   # Resume a combo (or full sequential sweep) that was interrupted:
-#   RUN_ID=20260615_095840 COMBO="3:dynamic:0.5" RESUME=1 SAVE_ROOT=experiments/cps_eval/scale_10k_20260801_000000 ./cps_coordination/scripts/run_step10_scale10k.sh
+#   # Resume a combo (or full sweep) that was interrupted:
+#   RUN_ID=20260615_095840 COMBO="3:dynamic" RESUME=1 SAVE_ROOT=experiments/cps_eval/scale_10k_20260801_000000 ./cps_coordination/scripts/run_step10_scale10k.sh
 
 set -euo pipefail
 
@@ -125,7 +120,7 @@ set -euo pipefail
 # foreground child running (so a stray Ctrl-C/kill -INT wouldn't stop this
 # script at all, only whatever it happened to be running at the time).
 # Backgrounding each run_batch_eval.py invocation (`&` + explicit
-# `wait "$CHILD_PID"`, see run_one_mode() and the COMBO branch below) makes
+# `wait "$CHILD_PID"`, see the full-grid and COMBO branches below) makes
 # the wait interruptible, so a single kill -INT/-TERM sent to *this script's
 # own PID* (what launch_step10_dedicated_terminal.sh reports and $! captures)
 # reliably: forwards the signal to the actual worker -- which has its own
@@ -158,11 +153,6 @@ SAVE_ROOT="${SAVE_ROOT:-experiments/cps_eval/scale_10k_$(date +%Y%m%d_%H%M%S)}"
 RESUME="${RESUME:-}"
 SHARDS="${SHARDS:-1}"
 SHARD_INDEX="${SHARD_INDEX:-0}"
-
-# --- calibrated, mode-specific fairness_weight (see header + task-optimize-
-# fairness-fizzy-moth.md for the Stage 1/2 sweep this came from) ---
-STATIC_FW="${STATIC_FW:-1.0}"
-DYNAMIC_FW="${DYNAMIC_FW:-0.5}"
 
 # --- sharding: split this combo's EPISODES across SHARDS processes ---
 RUN_EPISODES="$EPISODES"
@@ -199,47 +189,20 @@ if [ -n "$RESUME" ]; then
     RESUME_ARGS=(--resume)
 fi
 
-# One (k_cps-pair, mode) invocation of run_batch_eval.py -- fairness_weight
-# is mode-specific, so each mode gets its own call rather than one call
-# sweeping both modes with a single fw value.
-run_one_mode() {
-    local mode="$1" fw="$2"
-    uv run python cps_coordination/scripts/run_batch_eval.py \
-        --run-id "$RUN_ID" \
-        --config "$CONFIG" \
-        --episodes "$RUN_EPISODES" \
-        --k-cps-sweep 0 3 \
-        --mode-sweep "$mode" \
-        --fairness-weight-sweep "$fw" \
-        --disable-cross-cycle-runway-seeding \
-        --eta-surrogate-path "$ETA_SURROGATE_PATH" \
-        --save-path-root "$SAVE_ROOT" \
-        --seed-base "$RUN_SEED_BASE" \
-        --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
-        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" &
-    CHILD_PID=$!
-    wait "$CHILD_PID"
-    CHILD_PID=""
-}
-
 # --- combo selection ---
-# COMBO unset (default): full validated 4-combo grid, two sequential
-# run_batch_eval.py invocations (one per mode, each with its calibrated fw).
-# COMBO="k_cps:mode:fw" (e.g. "3:dynamic:0.5"): restrict to exactly that one
+# COMBO unset (default): full validated 4-combo grid, one run_batch_eval.py
+# invocation sweeping both k_cps and mode together.
+# COMBO="k_cps:mode" (e.g. "3:dynamic"): restrict to exactly that one
 # combo -- run this script once per combo, in parallel, across cluster jobs.
-# fw here should match STATIC_FW/DYNAMIC_FW for that combo's mode -- the
-# script doesn't enforce this (COMBO is meant to let you override), but a
-# mismatch silently deploys an uncalibrated value for that combo.
 if [ -n "${COMBO:-}" ]; then
-    IFS=':' read -r K_CPS MODE FW <<< "$COMBO"
-    echo "Single-combo mode: k_cps=$K_CPS mode=$MODE fairness_weight=$FW"
+    IFS=':' read -r K_CPS MODE <<< "$COMBO"
+    echo "Single-combo mode: k_cps=$K_CPS mode=$MODE"
     uv run python cps_coordination/scripts/run_batch_eval.py \
         --run-id "$RUN_ID" \
         --config "$CONFIG" \
         --episodes "$RUN_EPISODES" \
         --k-cps-sweep "$K_CPS" \
         --mode-sweep "$MODE" \
-        --fairness-weight-sweep "$FW" \
         --disable-cross-cycle-runway-seeding \
         --eta-surrogate-path "$ETA_SURROGATE_PATH" \
         --save-path-root "$SAVE_ROOT" \
@@ -249,23 +212,36 @@ if [ -n "${COMBO:-}" ]; then
     CHILD_PID=$!
     wait "$CHILD_PID"
     CHILD_PID=""
-    echo "Done -> $SAVE_ROOT/k${K_CPS}_${MODE}_fw${FW}/"
+    echo "Done -> $SAVE_ROOT/k${K_CPS}_${MODE}/"
     if [ "$SHARDS" -gt 1 ]; then
         echo "This was shard $SHARD_INDEX/$SHARDS -- once all $SHARDS shards finish, merge with:"
-        echo "  uv run python cps_coordination/scripts/merge_shards.py --save-root <root_without_shard_suffix> --combo k${K_CPS}_${MODE}_fw${FW} --shards $SHARDS"
+        echo "  uv run python cps_coordination/scripts/merge_shards.py --save-root <root_without_shard_suffix> --combo k${K_CPS}_${MODE} --shards $SHARDS"
     fi
 else
     if [ "$SHARDS" -gt 1 ]; then
         echo "SHARDS>1 requires COMBO=... (one job = one (combo, shard) pair -- sharding the full sequential grid in one process defeats the point)." >&2
         exit 1
     fi
-    echo "Full 4-combo sequential mode -- static fw=$STATIC_FW, dynamic fw=$DYNAMIC_FW."
+    echo "Full 4-combo mode -- one run_batch_eval.py invocation sweeping k_cps x mode."
     echo "Expect ~8.2h (measured) wall-clock total (see script header)."
-    echo "Ctrl-C now if you meant to parallelize via COMBO=\"k_cps:mode:fw\" instead."
+    echo "Ctrl-C now if you meant to parallelize via COMBO=\"k_cps:mode\" instead."
     sleep 5
-    run_one_mode static "$STATIC_FW"
-    run_one_mode dynamic "$DYNAMIC_FW"
-    echo "Done -> $SAVE_ROOT/k{0,3}_static_fw${STATIC_FW}/ and $SAVE_ROOT/k{0,3}_dynamic_fw${DYNAMIC_FW}/"
+    uv run python cps_coordination/scripts/run_batch_eval.py \
+        --run-id "$RUN_ID" \
+        --config "$CONFIG" \
+        --episodes "$RUN_EPISODES" \
+        --k-cps-sweep 0 3 \
+        --mode-sweep static dynamic \
+        --disable-cross-cycle-runway-seeding \
+        --eta-surrogate-path "$ETA_SURROGATE_PATH" \
+        --save-path-root "$SAVE_ROOT" \
+        --seed-base "$RUN_SEED_BASE" \
+        --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
+        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" &
+    CHILD_PID=$!
+    wait "$CHILD_PID"
+    CHILD_PID=""
+    echo "Done -> $SAVE_ROOT/k{0,3}_{static,dynamic}/"
 fi
 
 echo "Then: uv run python cps_coordination/scripts/step10_deep_analysis.py --sweep-root $SAVE_ROOT"
