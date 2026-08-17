@@ -293,6 +293,30 @@ class CPSManager:
     # the 1x-vs-2x empirical comparison this was chosen from.
     REASSIGNMENT_HYSTERESIS_S = 2.0 * ACTION_TIME
 
+    # _assign_runways_dynamic's cost function (see docstring) had no
+    # load-balancing term: the argmin over eligible runways optimized raw
+    # single-aircraft predicted ETA in isolation, with sigma_matrix/
+    # eligible acting only as a fairness-position bound, never an occupancy
+    # penalty. Confirmed at M=2,000 production scale (Vector 9,
+    # .claude/plans/phase3_cps_coordination_plan.md) to concentrate 90-94%
+    # of dynamic-mode stalling on one runway (18R) at k1/k3, vs its
+    # ~44-48% baseline traffic share -- static mode splits 50/50 at every
+    # k, so this is algorithmic, not geometric. A mean-centered,
+    # self-excluding occupancy-count penalty was implemented and swept at
+    # diagnostic scale (.claude/plans/cps_runway_load_balancing_fix.md) and
+    # found to make the choice-split *worse*, not better, at every tested
+    # weight in the production-shaped harness -- removed entirely rather
+    # than kept "just in case" (same precedent as fairness_weight's
+    # removal). A queueing-delay-based replacement term
+    # (QUEUE_DELAY_WEIGHT_S/queue_delay_weight_s/queue_delay_penalty) was
+    # also implemented, swept, and removed 2026-08-15 for the same reason:
+    # a real split improvement, but a mechanistically-confirmed oscillation
+    # cost (magnitude mismatch with REASSIGNMENT_HYSTERESIS_S) that a
+    # bounded variant couldn't separate from the win either. See
+    # .claude/plans/cps_runway_queue_delay_fix.md for the full investigation,
+    # including a more promising but still-unimplemented candidate (a fixed
+    # raw-ETA-advantage offset, paused pending root-cause investigation).
+
     def __init__(
         self,
         k_cps: int,
@@ -304,6 +328,7 @@ class CPSManager:
         trajectory_buffer: Optional["TrajectoryBuffer"] = None,
         enable_stall_detection: bool = True,
         enable_cross_cycle_runway_seeding: bool = True,
+        log_reassignment_events: bool = False,
     ) -> None:
         if runway_assignment_mode not in self._valid_modes:
             raise ValueError(
@@ -365,10 +390,28 @@ class CPSManager:
         self._frozen_eta: Dict[str, float] = {}
         self._frozen_runway: Dict[str, str] = {}
         self._frozen_tta: Dict[str, float] = {}
+        # Diagnostic-only (Vector 9, .claude/plans/phase3_cps_coordination_plan.md):
+        # per-decision-cycle record of _assign_runways_dynamic's eligibility/
+        # choice for every aircraft, appended only when log_reassignment_events
+        # is True (default off -- zero overhead/behavior change for every
+        # existing caller). Drained via drain_reassignment_log().
+        self.log_reassignment_events = log_reassignment_events
+        self._reassignment_events: List[dict] = []
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
+
+    def drain_reassignment_log(self) -> List[dict]:
+        """Return and clear all reassignment-event records logged so far.
+
+        Only populated when ``log_reassignment_events=True`` was passed to
+        the constructor. Callers should drain once per episode (this manager
+        has no episode concept of its own) and tag the returned rows with
+        their own episode_id/k_cps/mode before writing to telemetry.
+        """
+        events, self._reassignment_events = self._reassignment_events, []
+        return events
 
     def update_fleet(
         self,
@@ -704,23 +747,52 @@ class CPSManager:
         if surrogate is None or not self.available_runways or not self._fleet:
             return
 
-        states = np.stack([ac.state for ac in self._fleet])  # (n, 5)
+        # Stalled aircraft are frozen (see is_stalled/"don't chase a moving
+        # target" below) and must never have their runway/eta overwritten --
+        # but leaving them in this method's own eta_matrix/sigma_matrix
+        # computation is also wrong even though their *own* assignment ends
+        # up protected: a stalled aircraft that keeps being re-evaluated
+        # every tick (a) pollutes reassignment-event telemetry for as long
+        # as it remains airborne (which can be hours past its own
+        # STALL_WINDOW_S, since nothing here stops it from continuing to
+        # appear), and (b) keeps counting as a `member` occupying its runway
+        # in sigma_matrix's congestion-rank computation, distorting the
+        # fairness eligibility every *other*, still-progressing aircraft is
+        # evaluated against. Excluding stalled acids from this method's
+        # fleet view entirely (not just the final write-back) fixes both.
+        if self.enable_stall_detection and self._stalled_acids:
+            active_indices = [
+                i for i, ac in enumerate(self._fleet)
+                if ac.acid not in self._stalled_acids
+            ]
+            active_fleet = [self._fleet[i] for i in active_indices]
+            # lag_features rows are in self._fleet's order (computed by the
+            # caller, update_fleet, before this method runs) -- must be
+            # subset with the same indices to stay aligned with active_fleet.
+            if lag_features is not None:
+                lag_features = lag_features[active_indices]
+        else:
+            active_fleet = self._fleet
+        if not active_fleet:
+            return
+
+        states = np.stack([ac.state for ac in active_fleet])  # (n, 5)
         target_time_budget = states[:, 4] if states.shape[1] > 4 else None
         eta_matrix = surrogate.predict_eta_fleet_all_runways(
             states, self.available_runways, current_time, lag_features,
             target_time_budget=target_time_budget,
         )  # (n, r)
 
-        n = len(self._fleet)
+        n = len(active_fleet)
         k = self.k_cps
         rwy_index = {r: j for j, r in enumerate(self.available_runways)}
         current_col = np.array(
-            [rwy_index.get(ac.runway_id, 0) for ac in self._fleet]
+            [rwy_index.get(ac.runway_id, 0) for ac in active_fleet]
         )
         current_eta = eta_matrix[np.arange(n), current_col]
         # sigma_i^FCFS: 0-indexed rank by ascending ETA-on-current-runway.
         fcfs_rank = np.argsort(np.argsort(current_eta))
-        for i, ac in enumerate(self._fleet):
+        for i, ac in enumerate(active_fleet):
             ac.fcfs_rank = int(fcfs_rank[i])
 
         # Vectorized eligibility/rank computation -- a literal, order-
@@ -756,7 +828,7 @@ class CPSManager:
         no_eligible = ~eligible.any(axis=1)
         if no_eligible.any():
             runway_found = np.array(
-                [ac.runway_id in rwy_index for ac in self._fleet]
+                [ac.runway_id in rwy_index for ac in active_fleet]
             )
             argmin_eta = np.argmin(eta_matrix, axis=1)
             fallback_col = np.where(runway_found, current_col, argmin_eta)
@@ -776,9 +848,43 @@ class CPSManager:
         keep_current = current_is_eligible & stay_is_close_enough
         best_rwy_idx = np.where(keep_current, current_col, best_rwy_idx)
 
-        for i, ac in enumerate(self._fleet):
-            if self.enable_stall_detection and ac.acid in self._stalled_acids:
-                continue  # frozen: don't chase a moving target (see is_stalled)
+        if self.log_reassignment_events:
+            for i, ac in enumerate(active_fleet):
+                c = int(current_col[i])
+                j = int(best_rwy_idx[i])
+                self._reassignment_events.append({
+                    "current_time": float(current_time),
+                    "acid": ac.acid,
+                    "current_runway": self.available_runways[c],
+                    "fcfs_rank": int(fcfs_rank[i]),
+                    "sigma_current": int(sigma_matrix[i, c]),
+                    "eligible_runways": ",".join(
+                        self.available_runways[jj] for jj in range(n_rwy) if eligible[i, jj]
+                    ),
+                    "chosen_runway": self.available_runways[j],
+                    "switched": bool(j != c),
+                    "eta_gap_s": float(current_eta[i] - eta_matrix[i, j]),
+                    # Always False now: stalled acids are excluded from
+                    # active_fleet above, so they never reach this loop.
+                    # Column kept for telemetry schema stability.
+                    "stalled_excluded": False,
+                    "sigma_per_runway": ",".join(
+                        f"{self.available_runways[jj]}:{int(sigma_matrix[i, jj])}"
+                        for jj in range(n_rwy)
+                    ),
+                    "eta_per_runway": ",".join(
+                        f"{self.available_runways[jj]}:{eta_matrix[i, jj]:.1f}"
+                        for jj in range(n_rwy)
+                    ),
+                    "x": float(states[i, 0]),
+                    "y": float(states[i, 1]),
+                })
+
+        # Stalled acids are already excluded from active_fleet above (see
+        # comment near its construction), so every remaining aircraft here
+        # is safe to write back -- no "don't chase a moving target" check
+        # needed at this point, unlike before that exclusion existed.
+        for i, ac in enumerate(active_fleet):
             j = int(best_rwy_idx[i])
             ac.runway_id = self.available_runways[j]
             ac.eta = float(eta_matrix[i, j])

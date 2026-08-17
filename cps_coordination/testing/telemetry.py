@@ -59,8 +59,36 @@ SEPARATION_COLUMNS: List[str] = [
     "required_sep_s",
 ]
 
+# Diagnostic-only stream (Vector 9, phase3_cps_coordination_plan.md): one row
+# per aircraft per _assign_runways_dynamic decision cycle, sourced from
+# CPSManager.drain_reassignment_log() (only non-empty when the manager was
+# built with log_reassignment_events=True). Not part of the standard
+# cps_eval_aircraft/cps_eval_separation pair -- opt-in, separate file, much
+# higher row count (one row per aircraft per decision cycle, not per
+# aircraft per episode).
+REASSIGNMENT_COLUMNS: List[str] = [
+    "episode_id",
+    "k_cps",
+    "runway_assignment_mode",
+    "current_time",
+    "acid",
+    "current_runway",
+    "fcfs_rank",
+    "sigma_current",
+    "eligible_runways",
+    "chosen_runway",
+    "switched",
+    "eta_gap_s",
+    "stalled_excluded",
+    "sigma_per_runway",
+    "eta_per_runway",
+    "x",
+    "y",
+]
+
 AIRCRAFT_FILENAME = "cps_eval_aircraft.parquet"
 SEPARATION_FILENAME = "cps_eval_separation.parquet"
+REASSIGNMENT_FILENAME = "cps_eval_reassignment.parquet"
 
 
 @dataclass
@@ -105,6 +133,37 @@ class SeparationTelemetryRow:
         return {name: getattr(self, name) for name in SEPARATION_COLUMNS}
 
 
+@dataclass
+class ReassignmentTelemetryRow:
+    """One aircraft's _assign_runways_dynamic decision, one cycle, one row.
+
+    See ``REASSIGNMENT_COLUMNS``. Diagnostic-only (Vector 9) -- callers must
+    explicitly opt in (``CPSManager(log_reassignment_events=True)`` +
+    ``build_reassignment_collector``); nothing writes this by default.
+    """
+
+    episode_id: int
+    k_cps: int
+    runway_assignment_mode: str
+    current_time: float
+    acid: str
+    current_runway: str
+    fcfs_rank: int
+    sigma_current: int
+    eligible_runways: str
+    chosen_runway: str
+    switched: bool
+    eta_gap_s: float
+    stalled_excluded: bool
+    sigma_per_runway: str = ""
+    eta_per_runway: str = ""
+    x: float = 0.0
+    y: float = 0.0
+
+    def as_dict(self) -> dict:
+        return {name: getattr(self, name) for name in REASSIGNMENT_COLUMNS}
+
+
 def build_collectors(
     save_path: str,
     chunk_size: int = 25,
@@ -144,3 +203,23 @@ def build_collectors(
         is_verbose=True,
     )
     return aircraft_collector, separation_collector
+
+
+def build_reassignment_collector(
+    save_path: str,
+    chunk_size: int = 25,
+    fresh_start: bool = True,
+) -> BaseDataCollector:
+    """Return a collector writing to ``<save_path>/cps_eval_reassignment.parquet``.
+
+    Separate from ``build_collectors`` since this stream is opt-in
+    (diagnostic-only, Vector 9) and callers that don't enable
+    ``log_reassignment_events`` shouldn't pay for an unused file/collector.
+    """
+    os.makedirs(save_path, exist_ok=True)
+    return get_collector(
+        os.path.join(save_path, REASSIGNMENT_FILENAME),
+        chunk_size,
+        fresh_start=fresh_start,
+        is_verbose=True,
+    )

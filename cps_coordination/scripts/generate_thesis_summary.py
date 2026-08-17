@@ -15,15 +15,13 @@ Reuses `generate_paper_report.load_combo_metrics` (which itself reuses
 discovery or metric computation -- a narrative layer, not a new data path.
 
 Parameterized by `--sweep-root` so the same script runs against the
-current 25-ac dataset now and the future 50-ac dataset later; running it
-now doubles as an early dry run of the narrative logic before it matters
-for the final numbers.
+whichever sweep root you point it at.
 
 Usage
 -----
   python cps_coordination/scripts/generate_thesis_summary.py \\
-      --sweep-root experiments/cps_eval/scale_10k_20260807_123741 \\
-      --out cps_coordination/figures/thesis_summary_20260811.md
+      --sweep-root <production_sweep_root> \\
+      --out cps_coordination/figures/thesis_summary_<date>.md
 
 Runtime: seconds (pure Parquet + pandas/numpy, no BlueSky/SB3 import).
 """

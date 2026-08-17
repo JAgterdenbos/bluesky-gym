@@ -168,7 +168,7 @@ def workstream1_sanity(all_data: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]], r
         m = _COMBO_RE.match(name)
         rec = {
             "combo": name, "k_cps": int(m.group("k_cps")), "mode": m.group("mode"),
-            "fw": float(m.group("fw")),
+            "fw": float(m.group("fw")) if m.group("fw") is not None else None,
             "n_rows": len(df),
             "n_nan_rta_cps": int(df["rta_error_cps"].isna().sum()),
             "n_inf_any": int(np.isinf(
@@ -524,14 +524,18 @@ def workstream3_stalling(
     # for either mode there) -- so this picks whatever single k3 combo is
     # present per mode instead of assuming "fw0", preferring fw=0.0 when
     # multiple fw values for the same mode are present (old-layout baseline).
+    def _fw_or_none(n: str) -> float | None:
+        fw = _COMBO_RE.match(n).group("fw")
+        return float(fw) if fw is not None else None
+
     def _pick_k3_combo(mode: str) -> str | None:
         candidates = sorted(
             (n for n in all_data if (m := _COMBO_RE.match(n)) and m.group("k_cps") == "3" and m.group("mode") == mode),
-            key=lambda n: float(_COMBO_RE.match(n).group("fw")),
+            key=lambda n: (_fw_or_none(n) is None, _fw_or_none(n) or 0.0),
         )
         if not candidates:
             return None
-        zero_fw = [n for n in candidates if float(_COMBO_RE.match(n).group("fw")) == 0.0]
+        zero_fw = [n for n in candidates if _fw_or_none(n) == 0.0]
         return zero_fw[0] if zero_fw else candidates[0]
 
     mode_to_combo = {m: _pick_k3_combo(m) for m in ("dynamic", "static")}

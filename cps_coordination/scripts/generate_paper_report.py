@@ -172,7 +172,8 @@ def load_combo_metrics(
         )
         metrics["k_cps"] = int(m.group("k_cps"))
         metrics["mode"] = m.group("mode")
-        metrics["fairness_weight"] = float(m.group("fw"))
+        fw = m.group("fw")
+        metrics["fairness_weight"] = float(fw) if fw is not None else None
         metrics["combo"] = os.path.basename(combo_dir)
         rows.append(metrics)
     return sorted(rows, key=lambda r: (r["k_cps"], r["mode"]))
@@ -563,10 +564,12 @@ def main() -> None:
     combo_rows = load_combo_metrics(args.sweep_root, args.sep_tolerance_s, args.rta_tolerance_s)
     print(f"Loaded {len(combo_rows)} combos from {args.sweep_root}: "
           f"{[r['combo'] for r in combo_rows]}")
-    if len(combo_rows) != 4:
+    if len(combo_rows) not in (4, 6):
         print(f"WARNING: expected 4 combos (k_cps in {{0,3}} x mode in "
-              f"{{static,dynamic}}), found {len(combo_rows)}. Proceeding anyway "
-              f"but this sweep-root may not be the intended shape.")
+              f"{{static,dynamic}}, the old 25-ac grid) or 6 combos (k_cps in "
+              f"{{0,1,3}} x mode in {{static,dynamic}}, the 50-ac grid), found "
+              f"{len(combo_rows)}. Proceeding anyway but this sweep-root may not "
+              f"be the intended shape.")
 
     (out_dir / "tab_throughput_results.tex").write_text(build_throughput_table(combo_rows))
     print(f"Wrote -> {out_dir / 'tab_throughput_results.tex'}")

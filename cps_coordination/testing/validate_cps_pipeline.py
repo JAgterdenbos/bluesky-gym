@@ -1042,7 +1042,7 @@ if __name__ == "__main__":
     passed_step10_c_sep = check_step10_episode_scoped_c_sep()
     raise SystemExit(
         0 if (passed_step3 and passed_step4 and passed_step4b and passed_step4c
-              and passed_step5 and passed_step6 and passed_step7 and passed_step9
-              and passed_step10_c_sep)
+              and passed_step5 and passed_step6 and passed_step7
+              and passed_step9 and passed_step10_c_sep)
         else 1
     )

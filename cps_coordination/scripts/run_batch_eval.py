@@ -62,8 +62,8 @@ from cps_coordination.coordination.cps_manager import CPSManager
 from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
 from cps_coordination.experiments.config import CPSEnvConfig, CPSEnvKwargsConfig, CPSModelConfig
 from cps_coordination.experiments.coordination_baseline import CPSCoordinationExperiment
-from cps_coordination.scripts.run_cps_eval import _log_episode
-from cps_coordination.testing.telemetry import build_collectors
+from cps_coordination.scripts.run_cps_eval import _log_episode, _log_reassignment_events
+from cps_coordination.testing.telemetry import build_collectors, build_reassignment_collector
 
 _DEFAULT_CONFIG = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "configs", "cps_scale_10k.yaml")
@@ -183,6 +183,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         "per combo (always appends once a resume point > 0 is found).")
     p.add_argument("--log-every", type=int, default=100,
                    help="Print progress every N episodes.")
+    p.add_argument("--log-reassignment-events", action="store_true", default=False,
+                   help="Diagnostic-only (Vector 9, phase3_cps_coordination_plan.md): log "
+                        "every _assign_runways_dynamic decision (per aircraft, per decision "
+                        "cycle) to cps_eval_reassignment.parquet per combo, for the 'cps' "
+                        "pass only. Off by default -- much higher row count than the standard "
+                        "telemetry. No effect in static mode or for k_cps combos that never "
+                        "call _assign_runways_dynamic.")
     return p
 
 
@@ -236,7 +243,9 @@ def _merge_resume_delta(save_path: str, delta_path: str) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    for filename in ("cps_eval_aircraft.parquet", "cps_eval_separation.parquet"):
+    for filename in (
+        "cps_eval_aircraft.parquet", "cps_eval_separation.parquet", "cps_eval_reassignment.parquet",
+    ):
         old_path = os.path.join(save_path, filename)
         new_path = os.path.join(delta_path, filename)
         if not os.path.exists(new_path):
@@ -259,6 +268,7 @@ def _new_manager(
     delta_update: float,
     available_runways: Optional[List[str]],
     enable_cross_cycle_runway_seeding: bool,
+    log_reassignment: bool = False,
 ) -> CPSManager:
     return CPSManager(
         k_cps=k_cps,
@@ -271,6 +281,7 @@ def _new_manager(
         # this is required (unwired -> zeroed lag features -> degraded ETA).
         trajectory_buffer=TrajectoryBuffer(),
         enable_cross_cycle_runway_seeding=enable_cross_cycle_runway_seeding,
+        log_reassignment_events=log_reassignment,
     )
 
 
@@ -362,7 +373,8 @@ def run_sweep(args: argparse.Namespace) -> None:
 
             cps_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                         args.delta_update, available_runways,
-                                        enable_cross_cycle_runway_seeding)
+                                        enable_cross_cycle_runway_seeding,
+                                        log_reassignment=args.log_reassignment_events)
             static_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                            args.delta_update, available_runways,
                                            enable_cross_cycle_runway_seeding)
@@ -371,6 +383,13 @@ def run_sweep(args: argparse.Namespace) -> None:
                                          enable_cross_cycle_runway_seeding)
             aircraft_collector, separation_collector = build_collectors(
                 collector_path, chunk_size=args.chunk_size, fresh_start=collector_fresh_start,
+            )
+            reassignment_collector = (
+                build_reassignment_collector(
+                    collector_path, chunk_size=args.chunk_size, fresh_start=collector_fresh_start,
+                )
+                if args.log_reassignment_events
+                else None
             )
 
             print(f"\n--- combo k_cps={k_cps}, mode={mode} -> {save_path} ---")
@@ -393,6 +412,11 @@ def run_sweep(args: argparse.Namespace) -> None:
                         deterministic=True, ep_idx=episode_id, seed=ep_seed, tta_mode="cps",
                         track_trajectory=True,
                     )
+                    if reassignment_collector is not None:
+                        _log_reassignment_events(
+                            reassignment_collector, episode_id, cps_manager.drain_reassignment_log(),
+                            k_cps=k_cps, mode=mode,
+                        )
                     cps_manager.reset()
 
                     static_records = experiment._run_episode(
@@ -420,6 +444,8 @@ def run_sweep(args: argparse.Namespace) -> None:
             finally:
                 aircraft_collector.close()
                 separation_collector.close()
+                if reassignment_collector is not None:
+                    reassignment_collector.close()
                 if resuming:
                     _merge_resume_delta(save_path, collector_path)
                 print(f"--- combo k_cps={k_cps}, mode={mode} done -> {save_path} ---")

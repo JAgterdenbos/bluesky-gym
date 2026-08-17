@@ -76,7 +76,7 @@ drivers, offline analysis, paper-reporting) lives in `scripts/`, below.
 - **`validate_cps_pipeline.py`** — exercises the real `CPSCoordinationExperiment` evaluation pipeline end-to-end with an actual frozen SAC worker: confirms TTA injection changes worker behaviour vs. an uncoordinated control run (k=0 FCFS), and that every consecutive landing pair on a forced-shared runway respects RECAT-EU separation (k>0, `N_a > 2`).
 - **`validate_surrogate.py`** — held-out CV + end-to-end condition-3 gate for `ETASurrogate` (imports the training/analysis pipeline from `scripts/`).
 - **`smoke_test_step10.py`** — capped local sanity check of `scripts/run_batch_eval.py`'s real sweep machinery before a full/cluster run.
-- **`telemetry.py`** — shared Parquet telemetry collector, used by both validation gates and the `scripts/` production pipeline.
+- **`telemetry.py`** — shared Parquet telemetry collector, used by both validation gates and the `scripts/` production pipeline. Two streams are always written (`cps_eval_aircraft.parquet`, `cps_eval_separation.parquet`); a third, opt-in diagnostic stream (`cps_eval_reassignment.parquet`) exists but is off by default — see "Reassignment-event diagnostic telemetry" below.
 
 ## `scripts/` — production pipelines, offline analysis, paper reporting
 
@@ -87,17 +87,19 @@ drivers, offline analysis, paper-reporting) lives in `scripts/`, below.
 
 The production evaluation flow for the Phase III Step 10 scale-up (rolling arrival stream, `configs/cps_scale_10k.yaml`) lives in `scripts/`, layered on top of the validation gates in `testing/`:
 
-- **`run_batch_eval.py`** — production batch driver: sweeps `k_cps` × `runway_assignment_mode` × `fairness_weight`, streaming telemetry to Parquet via `testing/telemetry.py`.
+- **`run_batch_eval.py`** — production batch driver: sweeps `k_cps` × `runway_assignment_mode`, streaming telemetry to Parquet via `testing/telemetry.py`. (`fairness_weight` was a third sweep dimension here historically — removed 2026-08-12, see below.)
 - **`run_cps_eval.py`** — single-combo (non-sweep) evaluation driver; `run_batch_eval.py` reuses its `_log_episode`.
-- **`run_step10_scale10k.sh`** — the actual launch script wrapping `run_batch_eval.py` with the current production combo grid and per-mode `fairness_weight` values.
+- **`run_step10_scale10k.sh`** — the actual launch script wrapping `run_batch_eval.py` with the current production combo grid.
 - **`regenerate_step10_sanity_sweep.sh`** — regenerates the M=100 sanity-sweep dataset used to validate exit criterion #6.
 - **`merge_shards.py`** — merges sharded (`SHARDS`/`SHARD_INDEX`-split) Parquet output back into the unsharded per-combo layout.
-- **`cps_metrics_offline.py`** → **`summarize_batch_sweep.py`** → **`step10_deep_analysis.py`** → **`analyze_fairness_weight_offline.py`** — a layered offline-metrics pipeline: base per-combo metric recomputation, sweep-wide tabulation, deep collision/stall/tortuosity diagnostics, and the `fairness_weight` calibration analysis, each building on the one before it rather than duplicating it.
+- **`cps_metrics_offline.py`** → **`summarize_batch_sweep.py`** → **`step10_deep_analysis.py`** — a layered offline-metrics pipeline: base per-combo metric recomputation, sweep-wide tabulation, and deep collision/stall/tortuosity diagnostics, each building on the one before it rather than duplicating it. (`analyze_fairness_weight_offline.py` analyzed the now-removed `fairness_weight` calibration — kept for history, not part of the live pipeline.)
+
+**`fairness_weight` no longer exists** (removed from `CPSManager` 2026-08-12 — a stress-tested investigation found plain FCFS, `fairness_weight=0.0`, matched or beat every calibrated nonzero value at every congestion level, in both modes; see `.claude/plans/phase3_cps_coordination_plan.md`'s "Superseded" note). `k_cps`/`runway_assignment_mode` are the only sweep dimensions now — `COMBO` takes `"k_cps:mode"` only, and `STATIC_FW`/`DYNAMIC_FW` env vars do nothing (some text below predates the removal and is stale on this point).
 - **`generate_paper_report.py`** — single consolidated script producing every LaTeX table/figure the Phase III thesis chapter needs, wrapping (not reimplementing) the four scripts above; output lands in `cps_coordination/figures/paper_report/`. See `.claude/plans/phase3_cps_coordination_plan.md` for the session that built it.
 
 ### Running Step 10 in a dedicated terminal (macOS)
 
-`run_step10_scale10k.sh` is sized for a cluster/runner, not a quick local check — the full 4-combo grid at M=2,000 measures ~8.2h wall-clock sequentially (~2.1h/combo). Three scripts wrap it for unattended local use, each doing one job:
+`run_step10_scale10k.sh` is sized for a cluster/runner, not a quick local check — the full 6-combo grid (k_cps in {0,1,3} x mode in {static,dynamic}) at M=2,000, 50-ac/cap=35 density, measures ~13.3h wall-clock sequentially (~2.22h/combo). Three scripts wrap it for unattended local use, each doing one job:
 
 | Script | Purpose |
 |---|---|
@@ -115,7 +117,7 @@ Run it from the repo root (it also `cd`s there itself, so it works from anywhere
 
 1. Auto-resolves the frozen worker `run_id` (latest run with a `final_model.zip`) unless `RUN_ID` is set.
 2. Asserts `cps_scale_10k.yaml`'s runway scope still resolves to `18R 27` and **aborts instead of launching** if it doesn't — `run_step10_scale10k.sh` never passes `--runways` itself, it relies entirely on that YAML field, so this catches a silent drift back to all-12-runways before an 8-hour run rather than after.
-3. Prints the full resolved config (runway scope, episodes/combo, worker checkpoint path, per-mode `fairness_weight`, save root) for you to review.
+3. Prints the full resolved config (runway scope, episodes/combo, worker checkpoint path, save root) for you to review.
 4. Runs the capped M=10 smoke test (skip with `SKIP_SMOKE=1` — not recommended except when resuming a `SAVE_ROOT` already smoke-tested this session).
 5. Asks for a `y/N` confirmation.
 6. Launches with `PYTHONUNBUFFERED=1` (Python block-buffers stdout when it's not a TTY, i.e. redirected to a file — without this, progress prints wouldn't reach the log until an internal buffer happened to fill), wrapped in `nohup caffeinate -i ... &` + `disown` so it survives closing the Terminal window and blocks idle sleep, logging to a timestamped file under `cps_coordination/data/`.
@@ -128,9 +130,25 @@ Stop cleanly (resumable):  ./cps_coordination/scripts/step10_stop.sh <save_root>
 Resume later:              RESUME=1 SAVE_ROOT=<save_root> ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
 ```
 
-Useful env var overrides (see the script header for the full list): `RUN_ID`, `SAVE_ROOT`, `COMBO="k_cps:mode:fw"` (single combo instead of the full sweep — e.g. `COMBO="3:dynamic:0.5"`), `RESUME=1`, `STATIC_FW`/`DYNAMIC_FW`.
+Useful env var overrides (see the script header for the full list): `RUN_ID`, `SAVE_ROOT`, `COMBO="k_cps:mode"` (single combo instead of the full sweep — e.g. `COMBO="3:dynamic"`), `RESUME=1`, `LOG_REASSIGNMENT_EVENTS=1` (diagnostic-only, see below — off by default).
 
 `caffeinate -i` only blocks *idle* sleep, not a manually closed laptop lid, so keep the machine plugged in with the lid open (or set `caffeinate -s` yourself if unsure about your sleep-on-lid-close setting).
+
+#### Reassignment-event diagnostic telemetry (opt-in, off by default)
+
+Added while investigating a runway-load-balancing anomaly (see `.claude/plans/phase3_cps_coordination_plan.md`'s Vector 9): dynamic-mode stalling turned out non-monotonic in `k_cps` and heavily concentrated on one runway, and the standard telemetry (final per-aircraft outcome only) couldn't show *why* — it has no record of what `_assign_runways_dynamic` actually considered and chose at each decision cycle.
+
+Setting `CPSManager(log_reassignment_events=True)` makes `_assign_runways_dynamic` log one row per aircraft per decision cycle (fields: `current_time`, `acid`, `current_runway`, `fcfs_rank`, `sigma_current`, `eligible_runways`, `chosen_runway`, `switched`, `eta_gap_s`, `stalled_excluded`) to a fourth Parquet stream, `cps_eval_reassignment.parquet`, written alongside the standard two. It's opt-in end to end and defaults to off everywhere, so it changes nothing about a normal run unless explicitly enabled:
+
+- `run_cps_eval.py --log-reassignment-events` (single-combo driver)
+- `run_batch_eval.py --log-reassignment-events` (sweep driver — logs only the `cps` pass's manager, not the `static`/`solo` passes, and only produces rows in dynamic-mode combos since `_assign_runways_dynamic` is never called in static mode)
+- `LOG_REASSIGNMENT_EVENTS=1` env var, through `run_step10_scale10k.sh` and `launch_step10_dedicated_terminal.sh` — e.g.:
+  ```bash
+  RUN_ID=20260615_095840 EPISODES=30 COMBO="1:dynamic" LOG_REASSIGNMENT_EVENTS=1 \
+      ./cps_coordination/scripts/launch_step10_dedicated_terminal.sh
+  ```
+
+**Row count is much higher than the standard telemetry** — roughly one row per aircraft per `ACTION_TIME`-length decision cycle per episode (tens of rows/episode/aircraft, not one), so enabling this for the *full* M=2,000/6-combo grid would produce tens of millions of rows and add real wall-clock/storage cost on top of an already ~13h run. **Use it for scoped, capped diagnostic runs** (small `EPISODES`, `COMBO` set to one or a few combos) — e.g. `scratchpad/reassignment_diagnostic/k{0,1,3}_dynamic/` (M=30 each) is the diagnostic dataset the Vector 9 investigation was based on, with `scratchpad/analyze_reassignment.py` as a starting point for further analysis. Do not enable this on a full production launch without a specific reason and an explicit go-ahead — it was never meant to be routine telemetry, and per this repo's own rule, nobody should be relaunching the full M=2,000 grid casually regardless.
 
 #### Checking progress
 

@@ -25,27 +25,30 @@
 # extrapolating to ~6.1h/combo, ~2.0 days for 8 combos at the OLD M=10,000/
 # 8-combo grid.
 #
-# At the NEW density (max_concurrent_aircraft=10, total_arrivals_per_episode=25,
-# spawn_window_s=2400, cps_scale_10k.yaml) and M=2,000/4-combo grid,
-# MEASURED via this exact script at a capped M=30: k3_static 117s,
-# k3_dynamic 105s at M=30 (~3.5-3.9s/episode/combo) -> ~2.1h/combo, ~8.2h
-# sequential for all 4 combos -- well under the original ~4.6h/combo/~18.3h
-# estimate (see task-optimize-fairness-fizzy-moth.md and step10_execution_and_data_
-# collection_plan.md's "Wall-clock cost" section for the full derivation
-# and the verification data at cps_coordination/data/
-# step10_verification_new_density_final/). If your cluster can run more
-# than one process concurrently,
-# launch one job per combo instead (see COMBO mode below). If it has MORE
-# than 4 workers, SHARDS (below) can split a single combo's episodes across
-# additional processes too. Real runtime will vary with cluster hardware;
-# this is a same-machine extrapolation, not a promise.
+# DENSITY RESCALE (2026-08-13) -- max_concurrent_aircraft 10->35,
+# total_arrivals_per_episode 25->50 (cps_scale_10k.yaml), resolved by an
+# 8-candidate-cap capacity sweep (see phase3_cps_coordination_plan.md's
+# "Density Rescale to 50 ac/episode" section). MEASURED fresh at this exact
+# config via this exact script (capped M=10/M=30, single combo, no other
+# load): ~7.1s fixed startup overhead + ~3.99s/episode marginal cost ->
+# ~2.22h/combo at the real M=2,000 -> ~13.3h sequential for all 6 combos.
+# This superseded an earlier ~2.1h/combo/~8.2h/4-combo figure measured at
+# the OLD 25-ac/cap=10 density -- not a linear extrapolation, remeasured
+# from scratch because both the arrivals increase and the new cap change
+# per-episode cost nonlinearly. If your cluster can run more than one
+# process concurrently, launch one job per combo instead (see COMBO mode
+# below). If it has MORE than 6 workers, SHARDS (below) can split a single
+# combo's episodes across additional processes too. Real runtime will vary
+# with cluster hardware; this is a same-machine extrapolation, not a promise.
 #
 # VALIDATED GRID -- this script pins k_cps/mode explicitly rather than
 # relying on run_batch_eval.py's own bare CLI defaults (k_cps=[0,1,3] x
-# mode, 6 combos). k_cps in {0,3} x mode in {static,dynamic} (4 combos)
-# was validated throughout the k-CPS-fix/ratchet investigation (see
-# phase3_cps_coordination_plan.md). Launching with the script's bare
-# defaults would silently evaluate an untested grid.
+# mode, 6 combos -- which happen to now be identical to what's pinned
+# below). k_cps in {0,1,3} x mode in {static,dynamic} (6 combos) is the
+# validated production grid as of 2026-08-13 -- k=1 was added alongside the
+# density rescale above (previously k_cps in {0,3} only, 4 combos, with no
+# documented rationale for excluding k=1; see phase3_cps_coordination_plan.md's
+# "Density Rescale to 50 ac/episode" section, "k=1 added to this run only").
 #
 # FAIRNESS_WEIGHT REMOVED (2026-08-12) -- a k-CPS slack-protection cost
 # term used to be calibrated per-mode here (static fw=1.0, dynamic fw=0.5,
@@ -189,8 +192,18 @@ if [ -n "$RESUME" ]; then
     RESUME_ARGS=(--resume)
 fi
 
+# Diagnostic-only (Vector 9, phase3_cps_coordination_plan.md): opt-in, off by
+# default. Adds a much-higher-row-count cps_eval_reassignment.parquet per
+# combo -- only meant for scoped diagnostic-scale runs (small EPISODES/COMBO),
+# not routine production launches.
+LOG_REASSIGNMENT_EVENTS="${LOG_REASSIGNMENT_EVENTS:-}"
+REASSIGNMENT_ARGS=()
+if [ -n "$LOG_REASSIGNMENT_EVENTS" ]; then
+    REASSIGNMENT_ARGS=(--log-reassignment-events)
+fi
+
 # --- combo selection ---
-# COMBO unset (default): full validated 4-combo grid, one run_batch_eval.py
+# COMBO unset (default): full validated 6-combo grid, one run_batch_eval.py
 # invocation sweeping both k_cps and mode together.
 # COMBO="k_cps:mode" (e.g. "3:dynamic"): restrict to exactly that one
 # combo -- run this script once per combo, in parallel, across cluster jobs.
@@ -208,7 +221,8 @@ if [ -n "${COMBO:-}" ]; then
         --save-path-root "$SAVE_ROOT" \
         --seed-base "$RUN_SEED_BASE" \
         --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
-        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" &
+        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" \
+        "${REASSIGNMENT_ARGS[@]+"${REASSIGNMENT_ARGS[@]}"}" &
     CHILD_PID=$!
     wait "$CHILD_PID"
     CHILD_PID=""
@@ -222,26 +236,27 @@ else
         echo "SHARDS>1 requires COMBO=... (one job = one (combo, shard) pair -- sharding the full sequential grid in one process defeats the point)." >&2
         exit 1
     fi
-    echo "Full 4-combo mode -- one run_batch_eval.py invocation sweeping k_cps x mode."
-    echo "Expect ~8.2h (measured) wall-clock total (see script header)."
+    echo "Full 6-combo mode -- one run_batch_eval.py invocation sweeping k_cps x mode."
+    echo "Expect ~13.3h (measured at the 50-ac/cap=35 density, ~2.22h/combo x 6) wall-clock total (see script header)."
     echo "Ctrl-C now if you meant to parallelize via COMBO=\"k_cps:mode\" instead."
     sleep 5
     uv run python cps_coordination/scripts/run_batch_eval.py \
         --run-id "$RUN_ID" \
         --config "$CONFIG" \
         --episodes "$RUN_EPISODES" \
-        --k-cps-sweep 0 3 \
+        --k-cps-sweep 0 1 3 \
         --mode-sweep static dynamic \
         --disable-cross-cycle-runway-seeding \
         --eta-surrogate-path "$ETA_SURROGATE_PATH" \
         --save-path-root "$SAVE_ROOT" \
         --seed-base "$RUN_SEED_BASE" \
         --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
-        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" &
+        "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" \
+        "${REASSIGNMENT_ARGS[@]+"${REASSIGNMENT_ARGS[@]}"}" &
     CHILD_PID=$!
     wait "$CHILD_PID"
     CHILD_PID=""
-    echo "Done -> $SAVE_ROOT/k{0,3}_{static,dynamic}/"
+    echo "Done -> $SAVE_ROOT/k{0,1,3}_{static,dynamic}/"
 fi
 
 echo "Then: uv run python cps_coordination/scripts/step10_deep_analysis.py --sweep-root $SAVE_ROOT"

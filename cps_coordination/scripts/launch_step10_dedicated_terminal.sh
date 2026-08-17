@@ -27,7 +27,7 @@
 #   SAVE_ROOT         Output root. Defaults to a fresh timestamped dir under
 #                     experiments/cps_eval/.
 #   COMBO             "k_cps:mode" to launch a single combo instead of the
-#                     full 4-combo sweep (see run_step10_scale10k.sh's
+#                     full 6-combo sweep (see run_step10_scale10k.sh's
 #                     header for details).
 #   RESUME            Set to 1 to resume an interrupted SAVE_ROOT.
 #   EXPECTED_RUNWAYS  Runway scope this script asserts cps_scale_10k.yaml
@@ -37,6 +37,16 @@
 #   SKIP_SMOKE        Set to 1 to skip the pre-launch M=10 smoke test. Not
 #                     recommended -- only for a SAVE_ROOT you've already
 #                     smoke-tested this session (e.g. a RESUME).
+#   LOG_REASSIGNMENT_EVENTS  Diagnostic-only (Vector 9,
+#                     phase3_cps_coordination_plan.md): set to 1 to also
+#                     write cps_eval_reassignment.parquet per combo (one row
+#                     per aircraft per decision cycle -- much higher row
+#                     count than the standard telemetry). Off by default.
+#                     Meant for small scoped diagnostic runs (low EPISODES
+#                     and/or COMBO set), not routine full-grid launches --
+#                     see cps_coordination/README.md's "Reassignment-event
+#                     diagnostic telemetry" section before enabling this on
+#                     a full-scale run.
 
 set -euo pipefail
 
@@ -90,8 +100,9 @@ echo "  episodes/combo (M) : $EPISODES"
 echo "  worker checkpoint  : experiments/PathPlanningGoalEnv-v0/SAC/models/$RUN_ID/final_model.zip"
 echo "  save_root          : $SAVE_ROOT"
 echo "  log                : $LOG"
-echo "  combo              : ${COMBO:-<full 4-combo sequential sweep, ~8.2h>}"
+echo "  combo              : ${COMBO:-<full 6-combo sequential sweep, ~13.3h>}"
 echo "  resume             : ${RESUME:-0}"
+echo "  log_reassignment_events : ${LOG_REASSIGNMENT_EVENTS:-0} (diagnostic-only, much higher row count -- see README)"
 echo "=================================================================="
 
 if [ "${SKIP_SMOKE:-0}" != "1" ]; then
@@ -112,6 +123,7 @@ esac
 export RUN_ID SAVE_ROOT CONFIG EPISODES
 if [ -n "${COMBO:-}" ]; then export COMBO; fi
 if [ -n "${RESUME:-}" ]; then export RESUME; fi
+if [ -n "${LOG_REASSIGNMENT_EVENTS:-}" ]; then export LOG_REASSIGNMENT_EVENTS; fi
 
 # Python block-buffers stdout when it's not a TTY (i.e. redirected to a
 # file, as below) -- without this, run_batch_eval.py's progress prints sit

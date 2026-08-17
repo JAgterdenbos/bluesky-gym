@@ -95,9 +95,9 @@ def load_and_tag_combos(sweep_roots: List[str]) -> pd.DataFrame:
             seen[name] = root
 
             m = _COMBO_RE.match(name)
-            if m is None:
+            if m is None or m.group("fw") is None:
                 print(f"  WARNING: '{name}' does not match the k<k_cps>_<mode>_fw<fw> "
-                      "naming convention -- skipped.")
+                      "naming convention (no fairness_weight axis) -- skipped.")
                 continue
 
             k_cps = int(m.group("k_cps"))

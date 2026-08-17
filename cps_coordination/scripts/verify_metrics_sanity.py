@@ -36,8 +36,8 @@ Two checks per combo
 Usage
 -----
   python cps_coordination/scripts/verify_metrics_sanity.py \\
-      --sweep-root experiments/cps_eval/scale_10k_20260807_123741 \\
-      --total-arrivals-per-episode 25 --spawn-window-s 2400.0
+      --sweep-root <production_sweep_root> \\
+      --total-arrivals-per-episode 50 --spawn-window-s 2400.0
 
 Runtime: seconds (pure Parquet + pandas/numpy, no BlueSky/SB3 import) --
 same offline-analysis pattern as `cps_metrics_offline.py`.
@@ -124,8 +124,11 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--sweep-root", type=str, required=True,
                    help="Directory containing k<K>_<mode>_fw<FW>/ combo subdirectories.")
-    p.add_argument("--total-arrivals-per-episode", type=float, default=25.0,
-                   help="cps_scale_10k.yaml's total_arrivals_per_episode (spawn schedule numerator).")
+    p.add_argument("--total-arrivals-per-episode", type=float, required=True,
+                   help="cps_scale_10k.yaml's total_arrivals_per_episode (spawn schedule "
+                        "numerator) -- required, not defaulted: a silent wrong default here "
+                        "would corrupt the spawn-rate-vs-measured-rate arithmetic this script "
+                        "exists to check, exactly the class of mistake it's meant to catch.")
     p.add_argument("--spawn-window-s", type=float, default=2400.0,
                    help="cps_scale_10k.yaml's spawn_window_s (spawn schedule denominator).")
     p.add_argument("--sep-tolerance-s", type=float, default=5.0)

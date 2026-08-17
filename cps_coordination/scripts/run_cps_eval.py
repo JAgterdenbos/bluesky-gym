@@ -47,8 +47,10 @@ from cps_coordination.experiments.coordination_baseline import (
 )
 from cps_coordination.testing.telemetry import (
     AircraftTelemetryRow,
+    ReassignmentTelemetryRow,
     SeparationTelemetryRow,
     build_collectors,
+    build_reassignment_collector,
 )
 
 
@@ -95,6 +97,14 @@ def _parse_args() -> argparse.Namespace:
                    help="Append to existing Parquet files instead of overwriting.")
     p.add_argument("--log-every", type=int, default=10,
                    help="Print progress every N episodes.")
+    p.add_argument("--log-reassignment-events", action="store_true", default=False,
+                   help="Diagnostic-only (Vector 9, phase3_cps_coordination_plan.md): "
+                        "log every _assign_runways_dynamic decision (per aircraft, per "
+                        "decision cycle) to cps_eval_reassignment.parquet, for the 'cps' "
+                        "pass only. Off by default -- much higher row count than the "
+                        "standard telemetry (one row per aircraft per decision cycle, "
+                        "not per episode). No effect in static mode (the manager this "
+                        "flag attaches to never calls _assign_runways_dynamic there).")
     return p.parse_args()
 
 
@@ -159,6 +169,27 @@ def _log_episode(
     separation_collector.finalise_episode(success=True)
 
 
+def _log_reassignment_events(
+    collector,
+    ep_idx: int,
+    events: List[dict],
+    k_cps: int,
+    mode: str,
+) -> None:
+    """Diagnostic-only (Vector 9): append one episode's drained reassignment
+    log to the reassignment telemetry stream."""
+    for ev in events:
+        collector.collect_step(
+            **ReassignmentTelemetryRow(
+                episode_id=ep_idx,
+                k_cps=k_cps,
+                runway_assignment_mode=mode,
+                **ev,
+            ).as_dict()
+        )
+    collector.finalise_episode(success=True)
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -198,7 +229,7 @@ def main() -> None:
     # dynamic mode doesn't silently degrade to static behaviour by default.
     available_runways = list(args.runways or ALL_RUNWAYS)
 
-    def _new_manager() -> CPSManager:
+    def _new_manager(log_reassignment: bool = False) -> CPSManager:
         return CPSManager(
             k_cps=args.k_cps,
             recat_matrix=recat_matrix,
@@ -210,14 +241,25 @@ def main() -> None:
             # this is required (unwired -> zeroed lag features -> degraded ETA).
             trajectory_buffer=TrajectoryBuffer(),
             enable_cross_cycle_runway_seeding=not args.disable_cross_cycle_runway_seeding,
+            log_reassignment_events=log_reassignment,
         )
 
-    cps_manager = _new_manager()
+    # Reassignment logging only attaches to the 'cps' pass's manager --
+    # that's the pass whose stall_detected/runway_id feed the headline
+    # telemetry; static_manager/solo_manager don't need it.
+    cps_manager = _new_manager(log_reassignment=args.log_reassignment_events)
     static_manager = _new_manager()
     solo_manager = _new_manager()
 
     aircraft_collector, separation_collector = build_collectors(
         args.save_path, chunk_size=args.chunk_size, fresh_start=not args.no_fresh_start,
+    )
+    reassignment_collector = (
+        build_reassignment_collector(
+            args.save_path, chunk_size=args.chunk_size, fresh_start=not args.no_fresh_start,
+        )
+        if args.log_reassignment_events
+        else None
     )
 
     print(
@@ -235,6 +277,11 @@ def main() -> None:
                 deterministic=True, ep_idx=ep_idx, seed=ep_seed, tta_mode="cps",
                 track_trajectory=True,
             )
+            if reassignment_collector is not None:
+                _log_reassignment_events(
+                    reassignment_collector, ep_idx, cps_manager.drain_reassignment_log(),
+                    k_cps=args.k_cps, mode=args.mode,
+                )
             cps_manager.reset()
 
             static_records = experiment._run_episode(
@@ -262,10 +309,13 @@ def main() -> None:
     finally:
         aircraft_collector.close()
         separation_collector.close()
+        if reassignment_collector is not None:
+            reassignment_collector.close()
         env.close()
 
+    extra = ", cps_eval_reassignment.parquet" if args.log_reassignment_events else ""
     print(f"\nDone. Telemetry written to {args.save_path}/"
-          f"{{cps_eval_aircraft.parquet, cps_eval_separation.parquet}}")
+          f"{{cps_eval_aircraft.parquet, cps_eval_separation.parquet{extra}}}")
 
 
 if __name__ == "__main__":
