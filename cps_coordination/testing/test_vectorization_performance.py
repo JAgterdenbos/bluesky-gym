@@ -9,20 +9,31 @@ Optimization" section:
   1. ``CPSManager._assign_runways_dynamic``'s eligibility/rank loop
      (previously a triple-nested pure-Python loop over aircraft x runway x
      aircraft, now a broadcast over ``(n, n, r)`` boolean arrays).
+  2. ``CPSManager._apply_k_cps_constraint``'s O(n) sortedness short-circuit
+     (see below).
 
-The loop is checked against a standalone "legacy" reference (a literal
-transcription of the pre-vectorization code) on a synthetic fixture (n=10
-aircraft, r=12 runways, k_cps=3), asserting the vectorized rewrite is a
-bit-identical restatement, not an approximation. A capped repeated-call
+Finding 1's loop is checked against a standalone "legacy" reference (a
+literal transcription of the pre-vectorization code) on a synthetic fixture
+(n=10 aircraft, r=12 runways, k_cps=3), asserting the vectorized rewrite is
+a bit-identical restatement, not an approximation. A capped repeated-call
 benchmark then confirms the rewrite is actually faster, not just equivalent.
 
-A second such gate used to cover ``CPSManager._apply_k_cps_constraint``'s
-per-position candidate window (Finding 3 of the same audit). That method
-was removed entirely 2026-08-12 (see
+A gate used to cover a *different*, since-removed fairness-weighted version
+of ``_apply_k_cps_constraint`` (Finding 3 of the original audit). That
+method was removed entirely 2026-08-12 (see
 ``.claude/plans/stall_rate_investigation.md``) after being found to never
-win against plain FCFS at any tested ``fairness_weight > 0`` -- there is no
-longer a vectorized/legacy pair to compare, so that gate was removed along
-with it rather than left benchmarking dead code.
+win against plain FCFS at any tested ``fairness_weight > 0``. A fairness-
+free reintroduction of the *method itself* (not that removed version)
+followed on 2026-08-18 (see
+``.claude/plans/cps_static_mode_k_cps_design.md``) using an
+earliest-ETA-in-window selection rule instead, which is a no-op on the
+method's always-pre-sorted real input. Finding 2 below covers the resulting
+O(n) short-circuit added on top of that (skip the O(n·(2k+1)) sweep
+entirely when the input is already sorted) -- a numpy-vectorized rewrite of
+the sweep itself was also benchmarked and found 6-10x *slower* than the
+plain Python loop at production window widths (same conclusion as the
+original, now-removed fairness-weighted sweep's own vectorization
+attempt), so that path was not pursued further.
 
 Run: python cps_coordination/testing/test_vectorization_performance.py
 """
@@ -92,7 +103,7 @@ def _make_dynamic_fixture(seed: int = 0):
             state=np.zeros(5),
             runway_id=runways[i % len(runways)],
             eta=0.0,
-            wake_cat="C",
+            wake_cat="D",
             spawn_time=0.0,
         )
         for i in range(N_AIRCRAFT)
@@ -225,7 +236,107 @@ def benchmark_assign_runways_dynamic() -> bool:
     return ok
 
 
+# ------------------------------------------------------------------ #
+# Finding 2: _apply_k_cps_constraint's O(n) sortedness short-circuit
+# ------------------------------------------------------------------ #
+
+K_CPS_BENCH_N = 50   # matches cps_scale_10k.yaml's max_concurrent_aircraft
+K_CPS_BENCH_K = 3    # matches the production k_cps sweep's largest value
+
+
+def _make_k_cps_fixture(n: int, seed: int) -> List[AircraftState]:
+    """Already ascending-(eta, acid)-sorted, matching the real call site's
+    invariant (:meth:`CPSManager._replan` always passes ``_fcfs_order()``'s
+    -- optionally stall-filtered, order-preserving -- output)."""
+    rng = np.random.default_rng(seed)
+    etas = np.sort(rng.uniform(0.0, 3000.0, size=n))
+    return [
+        AircraftState(
+            acid=f"AC{i:04d}", state=np.zeros(5), runway_id="27",
+            eta=float(etas[i]), wake_cat="D",
+        )
+        for i in range(n)
+    ]
+
+
+def _legacy_apply_k_cps_constraint_full_sweep(
+    fcfs_order: List[AircraftState], k: int,
+) -> List[AircraftState]:
+    """Literal transcription of the O(n·(2k+1)) sweep without the
+    sortedness short-circuit -- the pre-optimization reference this finding
+    benchmarks against."""
+    if k == 0:
+        return list(fcfs_order)
+    n = len(fcfs_order)
+    scheduled_mask = [False] * n
+    scheduled: List[AircraftState] = []
+    for pos in range(n):
+        window_lo = max(0, pos - k)
+        window_hi = min(pos + k, n - 1)
+        idxs = [i for i in range(window_lo, window_hi + 1) if not scheduled_mask[i]]
+        if not idxs:
+            idxs = [i for i in range(n) if not scheduled_mask[i]]
+        best_idx = idxs[0]
+        for idx in idxs[1:]:
+            ac, best_ac = fcfs_order[idx], fcfs_order[best_idx]
+            if (ac.eta, ac.acid) < (best_ac.eta, best_ac.acid):
+                best_idx = idx
+        scheduled_mask[best_idx] = True
+        scheduled.append(fcfs_order[best_idx])
+    return scheduled
+
+
+def check_apply_k_cps_constraint_parity() -> bool:
+    ok = True
+    manager = _make_manager(runway_assignment_mode="static")
+    for n, k in [(5, 2), (10, 3), (35, 3), (50, 3), (50, 1)]:
+        for seed in range(50):
+            fixture = _make_k_cps_fixture(n, seed)
+            manager.k_cps = k
+            legacy = [ac.acid for ac in _legacy_apply_k_cps_constraint_full_sweep(fixture, k)]
+            actual = [ac.acid for ac in manager._apply_k_cps_constraint(fixture)]
+            if actual != legacy:
+                print(f"FAIL: n={n} k={k} seed={seed}\n  legacy={legacy}\n  actual={actual}")
+                ok = False
+    if ok:
+        print(
+            "PASS: _apply_k_cps_constraint's short-circuit is bit-identical to the full "
+            "sweep across n in {5,10,35,50}, k in {1,2,3}, 50 random seeds each"
+        )
+    return ok
+
+
+def benchmark_apply_k_cps_constraint() -> bool:
+    fixture = _make_k_cps_fixture(K_CPS_BENCH_N, seed=0)
+    manager = _make_manager(runway_assignment_mode="static")
+    manager.k_cps = K_CPS_BENCH_K
+
+    t0 = time.perf_counter()
+    for _ in range(N_BENCHMARK_REPS):
+        _legacy_apply_k_cps_constraint_full_sweep(fixture, K_CPS_BENCH_K)
+    legacy_elapsed = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    for _ in range(N_BENCHMARK_REPS):
+        manager._apply_k_cps_constraint(fixture)
+    shortcircuit_elapsed = time.perf_counter() - t0
+
+    speedup = legacy_elapsed / shortcircuit_elapsed if shortcircuit_elapsed > 0 else float("inf")
+    print(
+        f"_apply_k_cps_constraint x{N_BENCHMARK_REPS} (n={K_CPS_BENCH_N}, k={K_CPS_BENCH_K}): "
+        f"full_sweep={legacy_elapsed*1e3:.2f}ms  short_circuit={shortcircuit_elapsed*1e3:.2f}ms  "
+        f"speedup={speedup:.2f}x"
+    )
+    ok = shortcircuit_elapsed < legacy_elapsed
+    print("PASS" if ok else "FAIL", ": short-circuit is faster than the full sweep")
+    return ok
+
+
 if __name__ == "__main__":
     passed_parity_1 = check_assign_runways_dynamic_parity()
     passed_perf_1 = benchmark_assign_runways_dynamic()
-    raise SystemExit(0 if (passed_parity_1 and passed_perf_1) else 1)
+    passed_parity_2 = check_apply_k_cps_constraint_parity()
+    passed_perf_2 = benchmark_apply_k_cps_constraint()
+    raise SystemExit(
+        0 if (passed_parity_1 and passed_perf_1 and passed_parity_2 and passed_perf_2) else 1
+    )

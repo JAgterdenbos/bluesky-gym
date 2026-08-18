@@ -108,7 +108,7 @@ class AircraftState:
     eta: float
     tta: float = math.inf
     fcfs_rank: int = 0
-    wake_cat: str = "C"
+    wake_cat: str = "D"
     spawn_time: float = 0.0
 
 
@@ -576,21 +576,33 @@ class CPSManager:
     # ------------------------------------------------------------------ #
 
     def _replan(self, current_time: float) -> None:
-        """Full replanning pass: FCFS → greedy TTAs.
+        """Full replanning pass: FCFS → k-CPS reorder → greedy TTAs.
 
-        Position ordering is exact FCFS (ascending ETA). An earlier
-        fairness-weighted k-CPS reordering step (biasing low-slack aircraft
-        toward earlier positions) was removed after
-        ``.claude/plans/stall_rate_investigation.md`` (2026-08-12) found it
-        never won against plain FCFS at any tested ``fairness_weight > 0``,
-        in either runway-assignment mode, at any congestion level: FCFS is
-        provably total-delay-optimal under wake-homogeneity (§2.2), and any
-        deviation from it, however small, gave that guarantee up for a
-        protection that empirically never landed on the aircraft that
-        needed it (see the plan doc's Phase 5b/5c/5d results). ``k_cps``
-        itself is unrelated to this removed step and still governs
-        :meth:`_assign_runways_dynamic`'s own separate reassignment-
-        eligibility window.
+        Both runway-assignment modes now run a k-bounded reorder
+        (:meth:`_apply_k_cps_constraint`) on the FCFS sequence before greedy
+        scheduling: no aircraft may shift more than ``k_cps`` positions from
+        its FCFS rank, and within that window the earliest-ETA candidate is
+        always chosen. This is complementary to, not a replacement for,
+        dynamic mode's own separate ``k_cps``-bounded runway-reassignment
+        eligibility window in :meth:`_assign_runways_dynamic`: that
+        mechanism decides *which runway* an aircraft lands on; this one
+        decides *what order* it lands in among aircraft sharing whichever
+        runway it ends up on.
+
+        An earlier fairness-weighted version of this same reordering step
+        (biasing low-slack aircraft toward earlier positions) was removed
+        after ``.claude/plans/stall_rate_investigation.md`` (2026-08-12)
+        found it never won against plain FCFS at any tested
+        ``fairness_weight > 0``, in either runway-assignment mode, at any
+        congestion level. The fairness-free version reintroduced here
+        (``.claude/plans/cps_static_mode_k_cps_design.md``) is an *exact*
+        identity permutation on FCFS-sorted input, for any ``k_cps`` and any
+        separation matrix (provable by induction, not merely
+        wake-homogeneity-dependent): earliest-ETA-in-window always resolves
+        to the aircraft already at the current position when the input is
+        pre-sorted ascending by ETA. See the plan doc for the full proof and
+        for why an earlier draft's delay-cost-minimizing selection rule was
+        rejected -- it is not equivalent to this one and is not a no-op.
 
         Stalled aircraft (see :meth:`_update_stall_tracking`) are excluded
         from greedy scheduling entirely, not just from having their own TTA
@@ -618,11 +630,95 @@ class CPSManager:
             if self.enable_stall_detection
             else fcfs_order
         )
+        active = self._apply_k_cps_constraint(active)
         self._greedy_schedule(active)
 
     def _fcfs_order(self) -> List[AircraftState]:
         """Sort fleet by ascending absolute ETA → FCFS reference sequence."""
         return sorted(self._fleet, key=lambda a: (a.eta, a.acid))
+
+    def _apply_k_cps_constraint(
+        self, fcfs_order: List[AircraftState],
+    ) -> List[AircraftState]:
+        """k-bounded reorder: no aircraft may shift more than k positions
+        from its FCFS rank (both runway-assignment modes).
+
+        Greedy forward sweep over positions 0..n-1. At each position, among
+        unscheduled candidates in [pos-k, pos+k], selects the one with the
+        earliest ETA (ties broken by acid, matching :meth:`_fcfs_order`'s
+        own tie-break) -- i.e. the literal k-CPS definition from this
+        module's own docstring, not a delay-cost simulation.
+
+        An earlier draft of this method (see
+        .claude/plans/cps_static_mode_k_cps_design.md §2's original text,
+        superseded by this implementation) instead picked the candidate
+        minimizing its own imposed runway-contention delay. That rule is
+        NOT equivalent to earliest-ETA-in-window and is not a no-op: with a
+        wide ETA gap in the window (e.g. etas [100, 105, 110, 500, 510] on
+        one runway, k=2), it lets the far-future aircraft (eta=500) jump
+        into an early slot ahead of the near-term ones purely because doing
+        so costs *that aircraft* zero delay -- pushing the near-term
+        aircraft later and increasing total delay relative to FCFS. That
+        contradicts FCFS's own optimality (classical EDD-optimality: with
+        equal separations, ascending-ETA order minimizes total/maximum
+        delay on a single server) -- the bug was in the greedy heuristic's
+        search, not in that optimality claim.
+
+        Earliest-ETA-in-window has no such failure mode: by induction, on
+        FCFS-sorted input the earliest-ETA candidate among any unscheduled
+        window is always exactly the aircraft at the current position, for
+        any k and any separation matrix (wake-homogeneity not even
+        required) -- so this is an *exact* identity permutation on
+        FCFS-sorted input, not merely an empirically-expected one.
+
+        Performance: the sole call site (:meth:`_replan`) always passes
+        ``fcfs_order`` already ascending-(eta, acid)-sorted, so the
+        induction proof above applies unconditionally there -- an O(n)
+        sortedness check below short-circuits the O(n·(2k+1)) sweep in that
+        case, falling back to the real sweep only if that assumption is
+        ever violated (e.g. a future caller passing unsorted input). This
+        was benchmarked as a ~6x speedup at production scale (n=50, k=3:
+        18.8us -> 3.1us/call) with 800-trial parity verification against
+        the full sweep. A numpy-vectorized rewrite of the sweep itself was
+        also benchmarked and rejected -- 6-10x *slower* than the plain
+        Python loop at this window width (~7 elements at k_cps=3), matching
+        this file's other vectorization finding for the analogous
+        now-removed fairness-weighted sweep: numpy's fixed per-call
+        dispatch overhead dominates at this scale. See
+        cps_coordination/testing/test_vectorization_performance.py.
+        """
+        if self.k_cps == 0:
+            return list(fcfs_order)
+
+        n = len(fcfs_order)
+        if all(
+            (fcfs_order[i].eta, fcfs_order[i].acid)
+            <= (fcfs_order[i + 1].eta, fcfs_order[i + 1].acid)
+            for i in range(n - 1)
+        ):
+            return list(fcfs_order)
+
+        k = self.k_cps
+        scheduled_mask = [False] * n
+        scheduled: List[AircraftState] = []
+
+        for pos in range(n):
+            window_lo = max(0, pos - k)
+            window_hi = min(pos + k, n - 1)
+            idxs = [i for i in range(window_lo, window_hi + 1) if not scheduled_mask[i]]
+            if not idxs:
+                idxs = [i for i in range(n) if not scheduled_mask[i]]
+
+            best_idx = idxs[0]
+            for idx in idxs[1:]:
+                ac, best_ac = fcfs_order[idx], fcfs_order[best_idx]
+                if (ac.eta, ac.acid) < (best_ac.eta, best_ac.acid):
+                    best_idx = idx
+
+            scheduled_mask[best_idx] = True
+            scheduled.append(fcfs_order[best_idx])
+
+        return scheduled
 
     def _tta_for(self, ac: AircraftState, runway_last: Dict[str, AircraftState]) -> float:
         """Compute what ``ac.tta`` would be if scheduled next on its own

@@ -141,7 +141,7 @@ cps_eval:
   ripple_lag: 1                   # Lag for rho_ripple autocorrelation (always 1 per methodology)
   throughput_window_h: 1.0        # Time window (hours) for Gamma / Gamma_r calculation
 
-  # wake_cat is NOT a config field: it is hardcoded to "C" in
+  # wake_cat is NOT a config field: it is hardcoded to "D" in
   # coordination_baseline.py::_build_fleet (uniform-aircraft-type assumption,
   # confirmed intentional for this thesis phase - see project memory). There is
   # nothing to set here; documented for anyone looking for a fixed_wake_cat knob.

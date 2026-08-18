@@ -747,23 +747,27 @@ def check_step9_surrogate_exercised() -> bool:
 
 
 def check_step4b_fcfs_only_scheduling() -> bool:
-    """Regression guard for the removal of fairness-weighted k-CPS
-    reordering (`.claude/plans/stall_rate_investigation.md`, 2026-08-12):
-    confirms ``_replan`` always schedules aircraft in exact FCFS
-    (ascending-ETA) order -- unconditionally, for any ``k_cps`` -- with no
-    remaining mechanism able to reorder around it.
+    """Regression guard confirming the reintroduced, fairness-free k-CPS
+    reorder (`.claude/plans/cps_static_mode_k_cps_design.md`) reduces to
+    exact FCFS (ascending-ETA) scheduling in both runway-assignment modes,
+    under today's wake-category-homogeneous fleet.
 
-    Supersedes ``check_step4b_k_cps_reorders``, which exercised
-    ``_apply_k_cps_constraint``/``fairness_weight`` directly; both were
-    removed after being found to never win against plain FCFS at any
-    tested nonzero weight, in either runway-assignment mode, at any
-    congestion level. The prior test's "fairness_weight=0.0 is
-    byte-identical to FCFS" assertion is now the *only* possible behavior,
-    so this checks it directly against the real ``_replan`` entry point
-    (not a since-deleted method) across a few ``k_cps`` values, on a
-    same-runway fleet built in a deliberately scrambled (non-FCFS) list
-    order, so a hypothetical future reordering regression would have
-    every opportunity to show up.
+    A fairness-weighted version of this same reordering step
+    (`.claude/plans/stall_rate_investigation.md`, 2026-08-12) was found to
+    never win against plain FCFS at any tested nonzero weight, in either
+    runway-assignment mode, at any congestion level, and was removed. The
+    fairness-free reorder reintroduced afterward (`_apply_k_cps_constraint`,
+    now wired unconditionally into `_replan` for both modes) is
+    theoretically expected to be a no-op identity permutation on
+    FCFS-sorted input, since FCFS is provably total-delay-optimal when
+    every aircraft shares the same wake category -- this test is the
+    empirical confirmation of that expectation, not a "mechanism doesn't
+    exist" guard. It checks ``_replan``'s real output (not a since-deleted
+    method) across a few ``k_cps`` values, on a same-runway fleet built in
+    a deliberately scrambled (non-FCFS) list order with clustered ETAs, so
+    a hypothetical future reordering regression would have every
+    opportunity to show up. Both loops together (dynamic default, then
+    explicit static) prove the no-op holds in both modes.
     """
     recat_matrix = {"C": {"C": 90.0}}
 
@@ -780,7 +784,7 @@ def check_step4b_fcfs_only_scheduling() -> bool:
         ]
 
     ok = True
-    print("\n--- Step 4b: k-CPS reordering removed -- scheduling is always exact FCFS ---")
+    print("\n--- Step 4b: fairness-free k-CPS reorder is a no-op under wake-homogeneity ---")
 
     etas = [500.0, 105.0, 110.0, 100.0, 510.0]  # scrambled order by construction
     expected_acid_order = [a.acid for a in sorted(_fleet(etas), key=lambda a: (a.eta, a.acid))]
@@ -791,11 +795,23 @@ def check_step4b_fcfs_only_scheduling() -> bool:
         mgr._replan(current_time=0.0)
         scheduled_order = [a.acid for a in sorted(mgr._fleet, key=lambda a: a.tta)]
         if scheduled_order != expected_acid_order:
-            print(f"FAIL: k_cps={k_cps} scheduling order {scheduled_order} != "
+            print(f"FAIL: dynamic mode, k_cps={k_cps} scheduling order {scheduled_order} != "
                   f"expected FCFS order {expected_acid_order}")
             ok = False
         else:
-            print(f"PASS: k_cps={k_cps} scheduling order is exact FCFS: {scheduled_order}")
+            print(f"PASS: dynamic mode, k_cps={k_cps} scheduling order is exact FCFS: {scheduled_order}")
+
+    for k_cps in (0, 2, 5):
+        mgr = CPSManager(k_cps=k_cps, recat_matrix=recat_matrix, runway_assignment_mode="static")
+        mgr._fleet = _fleet(etas)
+        mgr._replan(current_time=0.0)
+        scheduled_order = [a.acid for a in sorted(mgr._fleet, key=lambda a: a.tta)]
+        if scheduled_order != expected_acid_order:
+            print(f"FAIL: static mode, k_cps={k_cps} scheduling order {scheduled_order} != "
+                  f"expected FCFS order {expected_acid_order}")
+            ok = False
+        else:
+            print(f"PASS: static mode, k_cps={k_cps} scheduling order is exact FCFS: {scheduled_order}")
 
     return ok
 
@@ -961,7 +977,7 @@ def check_step10_episode_scoped_c_sep() -> bool:
 
     def _rec(acid: str, episode_id: int, t: float) -> _EpisodeRecord:
         return _EpisodeRecord(
-            acid=acid, episode_id=episode_id, runway_id="27", wake_cat="C",
+            acid=acid, episode_id=episode_id, runway_id="27", wake_cat="D",
             assigned_tta=t, actual_landing_time=t,
             rta_error_cps=0.0, rta_error_solo=0.0,
             tta_updated_mid_trajectory=False, success=True,

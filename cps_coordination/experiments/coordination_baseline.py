@@ -774,7 +774,7 @@ class CPSCoordinationExperiment(BaseExperiment):
                         acid=acid,
                         episode_id=ep_idx,
                         runway_id=str(info.get("current_runway", "")),
-                        wake_cat="C",
+                        wake_cat="D",
                         assigned_tta=assigned_tta,
                         actual_landing_time=landing_time,
                         rta_error_cps=rta_error_cps,
@@ -891,7 +891,7 @@ class CPSCoordinationExperiment(BaseExperiment):
                     ),
                     runway_id=str(info["current_runway"]),
                     eta=eta,
-                    wake_cat="C",
+                    wake_cat="D",
                     spawn_time=float(info.get("spawn_time", 0.0)),
                 )
             )

@@ -54,7 +54,11 @@ env:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # RECAT-EU time-based separation matrix (seconds)
-# Source: EUROCONTROL RECAT-EU, Doc. 14 — Time-Based Separation (TBS) values.
+# Source: EUROCONTROL RECAT-EU distance-based minima (\cite{eurocontrol_recat_2024}),
+# converted to time via T = D_NM * 1852 / v, v = 125 m/s (the SPEED constant used by
+# pathplanning_goal_env.py / pathplanning_goal_env_heading.py, i.e. the speed the frozen
+# worker policy was trained under). MRS floor of 2.5 NM per ICAO Doc 4444
+# (\cite{icao_doc4444_2007}) applies to C/D/E against each other.
 #
 # Matrix convention:
 #   recat_eu[leading_wake_category][trailing_wake_category] = separation (s)
@@ -63,53 +67,53 @@ env:
 #   A = Super-heavy    (e.g. A380, AN-124)
 #   B = Upper-heavy    (e.g. B747, B777)
 #   C = Lower-heavy    (e.g. B767, A330)
-#   D = Upper-medium   (e.g. B737-900, A321)
-#   E = Lower-medium   (e.g. B737-700, A320)
+#   D = Upper-medium   (e.g. B737-900, A321, A320)
+#   E = Lower-medium   (e.g. B737-700)
 #   F = Light          (e.g. C172, PA28)
 # ──────────────────────────────────────────────────────────────────────────────
 recat_eu:
   A:
-    A: 120
-    B: 100
-    C:  80
-    D: 120
-    E: 140
-    F: 180
+    A:  44.45
+    B:  59.26
+    C:  74.08
+    D:  74.08
+    E:  88.90
+    F: 118.53
   B:
-    A:  80
-    B:  80
-    C:  80
-    D: 100
-    E: 120
-    F: 140
+    A:  37.04
+    B:  44.45
+    C:  59.26
+    D:  59.26
+    E:  74.08
+    F: 103.71
   C:
-    A:  80
-    B:  80
-    C:  80
-    D:  80
-    E: 100
-    F: 120
+    A:  37.04
+    B:  37.04
+    C:  37.04
+    D:  44.45
+    E:  44.45
+    F:  59.26
   D:
-    A:  80
-    B:  80
-    C:  80
-    D:  80
-    E:  80
-    F: 100
+    A:  37.04
+    B:  37.04
+    C:  37.04
+    D:  37.04
+    E:  37.04
+    F:  74.08
   E:
-    A:  80
-    B:  80
-    C:  80
-    D:  80
-    E:  80
-    F:  80
+    A:  37.04
+    B:  37.04
+    C:  37.04
+    D:  37.04
+    E:  37.04
+    F:  59.26
   F:
-    A:  80
-    B:  80
-    C:  80
-    D:  80
-    E:  80
-    F:  80
+    A:  37.04
+    B:  37.04
+    C:  37.04
+    D:  37.04
+    E:  37.04
+    F:  44.45
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CPS evaluation parameters (read by CPSCoordinationExperiment.evaluate())

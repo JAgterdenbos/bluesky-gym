@@ -244,7 +244,7 @@ def _compute_separation_compliance(
         ``(episode_id, acid)`` rather than ``acid`` alone since acids are
         reused across episode slots (same collision shape as the slot-
         recycling bug) — currently harmless since ``wake_cat`` is hardcoded
-        to ``"C"`` everywhere it's constructed, but load-bearing once wake-
+        to ``"D"`` everywhere it's constructed, but load-bearing once wake-
         category diversity is introduced.
     recat_matrix : Dict[str, Dict[str, float]]
         RECAT-EU separation matrix (seconds).
@@ -270,8 +270,8 @@ def _compute_separation_compliance(
             t_prev, acid_prev = sorted_pairs[i - 1]  # type: ignore[misc]
             t_curr, acid_curr = sorted_pairs[i]       # type: ignore[misc]
             gap = t_curr - t_prev
-            lead_cat = wake_cats.get((episode_id, acid_prev), "C")
-            trail_cat = wake_cats.get((episode_id, acid_curr), "C")
+            lead_cat = wake_cats.get((episode_id, acid_prev), "D")
+            trail_cat = wake_cats.get((episode_id, acid_curr), "D")
             required = recat_matrix.get(lead_cat, {}).get(trail_cat, 90.0)
             n_pairs += 1
             if gap >= (required - tolerance_s):
@@ -311,8 +311,8 @@ def _compute_separation_compliance_counts_by_episode(
             t_prev, acid_prev = sorted_pairs[i - 1]  # type: ignore[misc]
             t_curr, acid_curr = sorted_pairs[i]       # type: ignore[misc]
             gap = t_curr - t_prev
-            lead_cat = wake_cats.get((episode_id, acid_prev), "C")
-            trail_cat = wake_cats.get((episode_id, acid_curr), "C")
+            lead_cat = wake_cats.get((episode_id, acid_prev), "D")
+            trail_cat = wake_cats.get((episode_id, acid_curr), "D")
             required = recat_matrix.get(lead_cat, {}).get(trail_cat, 90.0)
             counts[episode_id][1] += 1
             if gap >= (required - tolerance_s):

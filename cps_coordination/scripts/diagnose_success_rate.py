@@ -254,7 +254,7 @@ def _run_episode_verbose(
                     acid=acid,
                     episode_id=0,  # _run_episode_verbose is only ever invoked for ep==0
                     runway_id=str(info.get("current_runway", "")),
-                    wake_cat="C",
+                    wake_cat="D",
                     assigned_tta=assigned_tta,
                     actual_landing_time=landing_time,
                     rta_error_cps=rta_error_cps,

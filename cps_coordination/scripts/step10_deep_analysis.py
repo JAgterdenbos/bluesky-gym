@@ -176,7 +176,7 @@ def workstream1_sanity(all_data: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]], r
                                  "rta_error_static", "rta_error_solo") if c in df.columns]]
                 .astype(float)
             ).sum().sum()),
-            "wake_cat_uniform_C": bool((df["wake_cat"] == "C").all()),
+            "wake_cat_uniform": bool(df["wake_cat"].nunique() == 1),
             "n_runways_used": int(df["runway_id"].nunique()),
             "death_causes": {k: int(v) for k, v in df["death_cause"].fillna("success").value_counts().items()},
             # death_cause is never null (every row is a terminated aircraft) and is
@@ -207,7 +207,7 @@ def workstream1_sanity(all_data: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]], r
 
     out = pd.DataFrame(rows)
     with pd.option_context("display.width", 220, "display.max_columns", None):
-        print(out[["combo", "n_rows", "n_nan_rta_cps", "n_inf_any", "wake_cat_uniform_C",
+        print(out[["combo", "n_rows", "n_nan_rta_cps", "n_inf_any", "wake_cat_uniform",
                     "n_runways_used", "death_cause_success_consistent", "neg_sep_gaps",
                     "flight_id_collision_pct", "success_rate_reported", "success_rate_manual",
                     "c_sep_reported", "c_sep_manual"]].to_string(index=False))
