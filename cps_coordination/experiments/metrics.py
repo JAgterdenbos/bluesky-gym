@@ -325,7 +325,14 @@ def _compute_throughput(
     landing_times: Dict[str, List[Tuple[float, str]]],
     window_h: float = 1.0,
 ) -> Tuple[float, Dict[str, float]]:
-    """Compute total throughput Γ and per-runway throughput Γ_r.
+    """Pooled total/per-runway landings per hour over a single shared window.
+
+    Both callers (``compute_aggregate_metrics`` here and
+    ``cps_metrics_offline.recompute_metrics``) now only use this for
+    ``gamma_r`` (diagnostic, load-balance-figure-only -- see the caller's own
+    "--- Throughput ---" comment for why) and discard the returned ``gamma``:
+    the primary, reported Γ is a genuine per-episode mean computed by the
+    caller instead, not this function's pooled ratio.
 
     Parameters
     ----------
@@ -337,9 +344,11 @@ def _compute_throughput(
     Returns
     -------
     gamma : float
-        Total landings per hour.
+        Total landings per hour, pooled over ``window_h`` -- unused by
+        current callers' primary reported value, kept for parity/debugging.
     gamma_r : Dict[str, float]
-        Per-runway landings per hour.
+        Per-runway landings per hour, pooled over the same shared
+        ``window_h`` -- diagnostic only, see callers.
     """
     total = sum(len(v) for v in landing_times.values())
     gamma = total / window_h
@@ -396,8 +405,19 @@ class CPSMetricsReporter:
 
         Metrics computed
         ----------------
-        gamma           : Total throughput (landings/hour).
-        gamma_r         : Per-runway throughput (landings/hour).
+        gamma           : Total throughput (landings/hour), combined across
+                          runways. A genuine per-episode rate (successful
+                          landings / first-to-last-landing span, that
+                          episode), mean across episodes -- see the
+                          "--- Throughput ---" comment above for why this
+                          definition was chosen over a pooled ratio-of-sums
+                          or a per-runway decomposition.
+        gamma_r         : Per-runway throughput (landings/hour). Diagnostic
+                          only -- a pooled, shared-denominator estimate, NOT
+                          a per-episode mean like gamma above. Safe for the
+                          load-balance figure's *relative* 18R-vs-27 share
+                          (the shared denominator cancels in that ratio),
+                          not safe to report as an absolute per-runway rate.
         c_sep           : Separation compliance fraction.
         delta_epsilon_vs_static : Tracking degradation (Eq. tracking_degradation,
                           RQ2.2's literal metric): mean |RTA_error_CPS| −
@@ -458,15 +478,31 @@ class CPSMetricsReporter:
         episode_ids_all = np.array([rec.episode_id for rec in records])
 
         # --- Throughput ---
-        # Landing COUNTS can be pooled across episodes by runway_id alone --
-        # unlike separation compliance below, a raw count isn't sensitive to
-        # different episodes' clocks being independent. But the elapsed-time
-        # DENOMINATOR is: actual_landing_time resets near zero at every
-        # episode's env.reset(), so a naive max() over all pooled records only
-        # recovers the single largest episode's own span, not the true total
-        # elapsed time across all episodes -- summed below instead (bug found
-        # 2026-08-08; this comment previously incorrectly extended the
-        # pooling argument to the denominator too).
+        # gamma is a genuine per-episode rate, mean/std across episodes --
+        # the same "compute per episode, then aggregate" pattern every other
+        # <metric>_std in this reporter already uses (_episode_ratio_mean_std)
+        # -- NOT a pooled ratio-of-sums. Two other candidates were tried and
+        # rejected first (full investigation: .claude/paper_edits/results.md
+        # item G): (1) the pre-fix behavior, pooling every episode's landings
+        # into one shared cross-runway denominator -- conflates runway
+        # capacity with "how long did this whole M-episode grid take," and
+        # that denominator included each episode's spawn-to-first-landing
+        # transit time, which isn't part of runway throughput; (2)
+        # decomposing per (runway, episode) and summing Gamma_r, matching
+        # eq:throughput_runway's literal Sigma_r Gamma_r structure --
+        # statistically unusable here, since a single runway only gets
+        # ~20-30 successful landings/episode and, under dynamic-mode runway
+        # imbalance, a large fraction of episodes (up to ~35% at k=3) have
+        # <2 landings on one runway, making that runway's per-episode rate
+        # undefined or wildly unstable (episode-level rates up to 720 ac/h
+        # from 2-3 bunched landings; std exceeding the mean) for a large,
+        # non-random subset of episodes. The combined-runway version below
+        # sidesteps both problems: ~50 successful landings/episode is enough
+        # for a stable per-episode span, and it's independently corroborated
+        # by mean flight time (tau) moving in the expected opposite
+        # direction (dynamic mode's tau is higher than static's, converging
+        # toward static as k grows -- the same convergence pattern this
+        # gamma shows).
         landing_times_by_rwy: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
         # Separation compliance must never compare landing times across
         # different episodes' independent simulation clocks -- each episode
@@ -484,26 +520,40 @@ class CPSMetricsReporter:
                     (rec.actual_landing_time, rec.acid)
                 )
 
+        # gamma_r (per-runway): diagnostic only, for the load-balance
+        # figure's relative bar heights -- NOT a robust absolute rate, per
+        # the instability above. Its shared, pooled window_h cancels exactly
+        # in the 18R-vs-27 ratio, so the figure's relative story is
+        # unaffected by this being a weaker estimate than the primary gamma
+        # below.
         episode_success_counts: Dict[int, int] = defaultdict(int)
         episode_max_landing_s: Dict[int, float] = {}
+        episode_min_landing_s: Dict[int, float] = {}
         for rec in records:
             if rec.success:
                 episode_success_counts[rec.episode_id] += 1
-                if rec.actual_landing_time > episode_max_landing_s.get(rec.episode_id, 0.0):
-                    episode_max_landing_s[rec.episode_id] = rec.actual_landing_time
+                t = rec.actual_landing_time
+                if t > episode_max_landing_s.get(rec.episode_id, float("-inf")):
+                    episode_max_landing_s[rec.episode_id] = t
+                if t < episode_min_landing_s.get(rec.episode_id, float("inf")):
+                    episode_min_landing_s[rec.episode_id] = t
         total_time_s = sum(episode_max_landing_s.values()) if episode_max_landing_s else 3600.0
         window_h = max(total_time_s / 3600.0, 1e-6)
-        gamma, gamma_r = _compute_throughput(landing_times_by_rwy, window_h)
+        _, gamma_r = _compute_throughput(landing_times_by_rwy, window_h)
 
-        # gamma_std: dispersion of each episode's OWN landings/hour ratio --
-        # a genuinely different quantity from gamma itself (a pooled
-        # total/total-window ratio, not a mean of per-episode ratios), kept
-        # purely as an episode-to-episode variance diagnostic alongside the
-        # unchanged primary gamma value.
+        # gamma (primary, combined-runway): mean across episodes of that
+        # episode's own (successful landings / first-to-last-landing span)
+        # rate. Episodes with <2 successful landings have no defined span
+        # and are excluded -- essentially never triggers at production scale
+        # (~50 aircraft/episode), guards diagnostic-scale runs with few
+        # aircraft/episode.
         per_episode_gamma = [
-            episode_success_counts[ep] / max(span_s / 3600.0, 1e-6)
-            for ep, span_s in episode_max_landing_s.items()
+            episode_success_counts[ep]
+            / max((episode_max_landing_s[ep] - episode_min_landing_s[ep]) / 3600.0, 1e-6)
+            for ep in episode_success_counts
+            if episode_success_counts[ep] >= 2
         ]
+        gamma = float(np.mean(per_episode_gamma)) if per_episode_gamma else float("nan")
         gamma_std = (
             float(np.std(per_episode_gamma, ddof=1)) if len(per_episode_gamma) >= 2 else float("nan")
         )

@@ -117,11 +117,12 @@ def recompute_metrics(
     success_rate = float(aircraft_df["success"].mean())
 
     successful = aircraft_df[aircraft_df["success"]]
-    # Landing COUNTS can be pooled by runway_id alone -- correct for
-    # throughput's numerator, NOT valid for separation-compliance pairwise
-    # gaps (see landing_times_by_rwy_episode below). The elapsed-time
-    # DENOMINATOR needs its own per-episode handling below (bug found
-    # 2026-08-08; mirrors the fix in experiments/metrics.py).
+    # gamma is a genuine per-episode rate, mean/std across episodes -- NOT a
+    # pooled ratio-of-sums, and NOT a per-runway decomposition. Full
+    # rationale (rejected pooled and per-runway candidates, tau
+    # cross-check) mirrors experiments/metrics.py::compute_aggregate_metrics
+    # -- see that file's "--- Throughput ---" comment, and
+    # .claude/paper_edits/results.md item G for the full investigation.
     landing_times_by_rwy: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
     # Separation compliance must never compare landing times across
     # different episodes' independent simulation clocks -- each episode
@@ -138,32 +139,35 @@ def recompute_metrics(
             (float(row["actual_landing_time"]), row["acid"])
         )
 
-    # Sum each episode's own elapsed span (max successful landing time
-    # within that episode) rather than a pooled max() across all episodes --
-    # actual_landing_time resets near zero at every episode's env.reset(),
-    # so a global max() only recovers the single largest episode's own
-    # duration, not the true total elapsed time across all episodes.
+    # gamma_r (per-runway): diagnostic only, for the load-balance figure's
+    # relative bar heights -- NOT a robust absolute rate (see
+    # experiments/metrics.py). Its shared, pooled window_h cancels exactly
+    # in the 18R-vs-27 ratio, so the figure's relative story is unaffected.
     total_time_s = (
         float(successful.groupby("episode_id")["actual_landing_time"].max().sum())
         if not successful.empty else 3600.0
     )
     window_h = max(total_time_s / 3600.0, 1e-6)
-    gamma, gamma_r = _compute_throughput(landing_times_by_rwy, window_h)
+    _, gamma_r = _compute_throughput(landing_times_by_rwy, window_h)
 
-    # gamma_std: dispersion of each episode's OWN landings/hour ratio --
-    # a genuinely different quantity from gamma itself (a pooled
-    # total/total-window ratio, not a mean of per-episode ratios), kept
-    # purely as an episode-to-episode variance diagnostic.
+    # gamma (primary, combined-runway): mean across episodes of that
+    # episode's own (successful landings / first-to-last-landing span)
+    # rate. Episodes with <2 successful landings have no defined span and
+    # are excluded (essentially never triggers at production scale).
     if not successful.empty:
         episode_counts = successful.groupby("episode_id").size()
-        episode_span_h = (successful.groupby("episode_id")["actual_landing_time"].max() / 3600.0).clip(
-            lower=1e-6
-        )
-        per_episode_gamma = (episode_counts / episode_span_h).to_numpy()
+        landing_g = successful.groupby("episode_id")["actual_landing_time"]
+        episode_span_h = ((landing_g.max() - landing_g.min()) / 3600.0).clip(lower=1e-6)
+        valid_episodes = episode_counts[episode_counts >= 2].index
+        per_episode_gamma = (
+            episode_counts[valid_episodes] / episode_span_h[valid_episodes]
+        ).to_numpy()
+        gamma = float(np.mean(per_episode_gamma)) if len(per_episode_gamma) else float("nan")
         gamma_std = (
             float(np.std(per_episode_gamma, ddof=1)) if len(per_episode_gamma) >= 2 else float("nan")
         )
     else:
+        gamma = float("nan")
         gamma_std = float("nan")
 
     # Keyed by (episode_id, acid), not acid alone -- see
