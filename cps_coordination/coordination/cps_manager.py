@@ -161,6 +161,21 @@ class CPSManager:
         (Test C, pre-Step-10 audit §1.2) to isolate the surrogate-feature
         feedback loop (§1.1) from this second, structurally distinct
         cross-cycle ratcheting channel.
+    reassignment_hysteresis_s : float
+        Margin (seconds) a candidate runway must beat the current runway's
+        predicted ETA by before :meth:`_assign_runways_dynamic` switches to
+        it -- see the ``REASSIGNMENT_HYSTERESIS_S`` class-constant docstring
+        below for the full rationale. Defaults to that class constant
+        (today's exact behaviour, unchanged for every existing caller).
+        Exposed as a constructor param (rather than only the class constant)
+        so ``scripts/run_batch_eval.py``'s ``--reassignment-hysteresis-s``
+        flag can sweep it per the concurrency-cap/reassignment-guard-timing
+        resweep (``.claude/plans/concurrency_cap_and_reassignment_guard_resweep.md``)
+        without mutating shared class state. Must be a non-negative multiple
+        of ``ACTION_TIME / 2`` -- enforced at construction time, since the
+        value's entire physical meaning ("N half-control-cycles' worth of
+        predicted-ETA gain") depends on it, and the resweep grid's 0.5x
+        candidate needs half-cycle granularity.
     """
 
     __name__ = "CPSManager"
@@ -291,6 +306,13 @@ class CPSManager:
     # threshold below which a decision isn't worth disrupting the frozen
     # worker's committed path for"). See the capacity-sweep plan doc for
     # the 1x-vs-2x empirical comparison this was chosen from.
+    #
+    # This class constant is now only the *default* -- see the
+    # `reassignment_hysteresis_s` constructor param below, added for the
+    # first documented sensitivity sweep of this constant
+    # (.claude/plans/concurrency_cap_and_reassignment_guard_resweep.md,
+    # 2026-08-20), which sweeps {0.5,1,2,3} x ACTION_TIME. Any caller not
+    # passing that param gets this exact value, unchanged.
     REASSIGNMENT_HYSTERESIS_S = 2.0 * ACTION_TIME
 
     # _assign_runways_dynamic's cost function (see docstring) had no
@@ -329,12 +351,27 @@ class CPSManager:
         enable_stall_detection: bool = True,
         enable_cross_cycle_runway_seeding: bool = True,
         log_reassignment_events: bool = False,
+        reassignment_hysteresis_s: float = REASSIGNMENT_HYSTERESIS_S,
     ) -> None:
         if runway_assignment_mode not in self._valid_modes:
             raise ValueError(
                 f"runway_assignment_mode must be one of {self._valid_modes!r}, "
                 f"got {runway_assignment_mode!r}"
             )
+        _half_action_time = ACTION_TIME / 2.0
+        if reassignment_hysteresis_s < 0 or (
+            abs(reassignment_hysteresis_s % _half_action_time) > 1e-6
+            and abs(reassignment_hysteresis_s % _half_action_time - _half_action_time) > 1e-6
+        ):
+            raise ValueError(
+                f"reassignment_hysteresis_s must be a non-negative multiple of "
+                f"ACTION_TIME/2 ({_half_action_time}s) -- its physical meaning is 'N "
+                f"half-control-cycles' worth of predicted-ETA gain', and the resweep grid's "
+                f"0.5x candidate (see concurrency_cap_and_reassignment_guard_resweep.md) "
+                f"needs half-cycle granularity, not just whole multiples of ACTION_TIME "
+                f"itself; got {reassignment_hysteresis_s!r}"
+            )
+        self.reassignment_hysteresis_s = reassignment_hysteresis_s
         self.k_cps = k_cps
         # Test C (pre-Step-10 audit §1.2): isolates the surrogate-feature
         # feedback loop (§1.1) from the *second*, structurally distinct
@@ -940,7 +977,7 @@ class CPSManager:
         current_is_eligible = eligible[np.arange(n), current_col]
         stay_is_close_enough = (
             eta_matrix[np.arange(n), current_col] - masked_eta[np.arange(n), best_rwy_idx]
-        ) < self.REASSIGNMENT_HYSTERESIS_S
+        ) < self.reassignment_hysteresis_s
         keep_current = current_is_eligible & stay_is_close_enough
         best_rwy_idx = np.where(keep_current, current_col, best_rwy_idx)
 

@@ -418,6 +418,12 @@ class CPSMetricsReporter:
                           load-balance figure's *relative* 18R-vs-27 share
                           (the shared denominator cancels in that ratio),
                           not safe to report as an absolute per-runway rate.
+        mean_flight_time_s : tau -- mean elapsed sim time from each aircraft's own
+                          spawn to landing/termination, seconds. Added
+                          2026-08-20 for the concurrency-cap/reassignment-
+                          guard-timing resweep's delta_epsilon_vs_static/tau
+                          guardrail pair; NaN for any record predating the
+                          flight_time_s telemetry field.
         c_sep           : Separation compliance fraction.
         delta_epsilon_vs_static : Tracking degradation (Eq. tracking_degradation,
                           RQ2.2's literal metric): mean |RTA_error_CPS| −
@@ -476,6 +482,19 @@ class CPSMetricsReporter:
         n_aircraft = len(records)
         success_rate = sum(r.success for r in records) / n_aircraft
         episode_ids_all = np.array([rec.episode_id for rec in records])
+
+        # tau (mean flight time, seconds) -- see cps_metrics_offline.py's
+        # mirror of this computation for the full rationale
+        # (concurrency_cap_and_reassignment_guard_resweep.md, 2026-08-20).
+        flight_times_all = np.array([rec.flight_time_s for rec in records])
+        flight_time_valid_mask = ~np.isnan(flight_times_all)
+        mean_flight_time_s = (
+            float(np.mean(flight_times_all[flight_time_valid_mask]))
+            if flight_time_valid_mask.any() else float("nan")
+        )
+        _, mean_flight_time_s_std = _episode_ratio_mean_std(
+            episode_ids_all, flight_times_all, flight_time_valid_mask
+        )
 
         # --- Throughput ---
         # gamma is a genuine per-episode rate, mean/std across episodes --
@@ -700,6 +719,10 @@ class CPSMetricsReporter:
             "n_episodes": len(set(r.episode_id for r in records)),
             "n_aircraft": n_aircraft,
             "success_rate": round(success_rate, 4),
+            "mean_flight_time_s": (
+                round(mean_flight_time_s, 2) if not np.isnan(mean_flight_time_s) else "nan"
+            ),
+            "mean_flight_time_s_std": _std_or_nan(mean_flight_time_s_std),
             "gamma": round(gamma, 4),
             "gamma_std": _std_or_nan(gamma_std),
             "gamma_r": {rwy: round(v, 4) for rwy, v in gamma_r.items()},

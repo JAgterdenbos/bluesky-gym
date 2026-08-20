@@ -48,6 +48,7 @@ AIRCRAFT_COLUMNS: List[str] = [
     "death_cause",
     "traj_x",
     "traj_y",
+    "flight_time_s",
 ]
 
 SEPARATION_COLUMNS: List[str] = [
@@ -113,6 +114,7 @@ class AircraftTelemetryRow:
     death_cause: Optional[str] = None
     traj_x: List[float] = field(default_factory=list)
     traj_y: List[float] = field(default_factory=list)
+    flight_time_s: float = float("nan")
 
     def as_dict(self) -> dict:
         return {name: getattr(self, name) for name in AIRCRAFT_COLUMNS}

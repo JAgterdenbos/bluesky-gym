@@ -138,6 +138,15 @@ def _build_parser() -> argparse.ArgumentParser:
                    default=cps_eval_d.get("spawn_window_s", 0.0))
     p.add_argument("--delta-t-plan", type=int, default=model_d.get("delta_t_plan", 120))
     p.add_argument("--delta-update", type=float, default=model_d.get("delta_update", 1.0))
+    p.add_argument("--reassignment-hysteresis-s", type=float,
+                   default=model_d.get("reassignment_hysteresis_s"),
+                   help="Override CPSManager.REASSIGNMENT_HYSTERESIS_S (default 2xACTION_TIME "
+                        "=240s if unset here and not in --config). Must be a non-negative "
+                        "multiple of ACTION_TIME/2 -- see cps_manager.py's constructor "
+                        "docstring. CLI-only, not threaded through CPSModelConfig/cps_base.yaml "
+                        "(see .claude/plans/concurrency_cap_and_reassignment_guard_resweep.md's "
+                        "'Prerequisite' section for why this is deliberately narrow -- only "
+                        "this batch-eval sweep path needs the knob).")
     p.add_argument("--runways", type=str, nargs="*",
                    default=env_kwargs_d.get("runways"),
                    help="Subset of runways to sample from. Defaults to "
@@ -269,6 +278,7 @@ def _new_manager(
     available_runways: Optional[List[str]],
     enable_cross_cycle_runway_seeding: bool,
     log_reassignment: bool = False,
+    reassignment_hysteresis_s: float = CPSManager.REASSIGNMENT_HYSTERESIS_S,
 ) -> CPSManager:
     return CPSManager(
         k_cps=k_cps,
@@ -282,6 +292,7 @@ def _new_manager(
         trajectory_buffer=TrajectoryBuffer(),
         enable_cross_cycle_runway_seeding=enable_cross_cycle_runway_seeding,
         log_reassignment_events=log_reassignment,
+        reassignment_hysteresis_s=reassignment_hysteresis_s,
     )
 
 
@@ -330,12 +341,25 @@ def run_sweep(args: argparse.Namespace) -> None:
     # list.
     available_runways = list(args.runways or ALL_RUNWAYS)
 
+    # --reassignment-hysteresis-s defaults to None (unset) so its own
+    # CLI-vs-config-vs-class-constant precedence is explicit here, mirroring
+    # how CPSManager.__init__ resolves its own default -- never pass None
+    # into the constructor itself (its validation compares the value
+    # numerically and would raise a confusing TypeError on None).
+    reassignment_hysteresis_s = (
+        args.reassignment_hysteresis_s
+        if args.reassignment_hysteresis_s is not None
+        else CPSManager.REASSIGNMENT_HYSTERESIS_S
+    )
+
     enable_cross_cycle_runway_seeding = not args.disable_cross_cycle_runway_seeding
     combos = list(itertools.product(args.k_cps_sweep, args.mode_sweep))
     print(
         f"\nCPS batch evaluation -> {args.save_path_root}"
         f"\n  combos={combos}"
         f"\n  enable_cross_cycle_runway_seeding={enable_cross_cycle_runway_seeding}"
+        f"\n  reassignment_hysteresis_s={reassignment_hysteresis_s} "
+        f"(default={CPSManager.REASSIGNMENT_HYSTERESIS_S})"
         f"\n  episodes/combo={args.episodes}, max_concurrent_aircraft={args.max_concurrent_aircraft}, "
         f"total_arrivals_per_episode={args.total_arrivals_per_episode}, spawn_window_s={args.spawn_window_s}\n"
     )
@@ -374,13 +398,16 @@ def run_sweep(args: argparse.Namespace) -> None:
             cps_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                         args.delta_update, available_runways,
                                         enable_cross_cycle_runway_seeding,
-                                        log_reassignment=args.log_reassignment_events)
+                                        log_reassignment=args.log_reassignment_events,
+                                        reassignment_hysteresis_s=reassignment_hysteresis_s)
             static_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                            args.delta_update, available_runways,
-                                           enable_cross_cycle_runway_seeding)
+                                           enable_cross_cycle_runway_seeding,
+                                           reassignment_hysteresis_s=reassignment_hysteresis_s)
             solo_manager = _new_manager(k_cps, mode, recat_matrix, args.delta_t_plan,
                                          args.delta_update, available_runways,
-                                         enable_cross_cycle_runway_seeding)
+                                         enable_cross_cycle_runway_seeding,
+                                         reassignment_hysteresis_s=reassignment_hysteresis_s)
             aircraft_collector, separation_collector = build_collectors(
                 collector_path, chunk_size=args.chunk_size, fresh_start=collector_fresh_start,
             )

@@ -239,6 +239,21 @@ class _EpisodeRecord:
     death_cause: Optional[str] = None
     traj_x: List[float] = field(default_factory=list)  # populated only when
     traj_y: List[float] = field(default_factory=list)  # _run_episode(track_trajectory=True)
+    flight_time_s: float = float("nan")  # Elapsed sim time from this aircraft's OWN
+                                       # spawn to landing/termination (local clock,
+                                       # unlike actual_landing_time which is on the
+                                       # episode's global clock -- see the spawn_time
+                                       # comment at this record's construction site).
+                                       # tau (mean flight time), added for the
+                                       # concurrency-cap/reassignment-guard-timing
+                                       # resweep's delta_epsilon_vs_static/tau
+                                       # guardrail pair
+                                       # (.claude/plans/concurrency_cap_and_
+                                       # reassignment_guard_resweep.md, 2026-08-20).
+                                       # Default NaN reproduces every existing
+                                       # caller's behaviour (e.g. validate_cps_
+                                       # pipeline.py's check_step10 _rec() helper,
+                                       # which doesn't pass it) unchanged.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -788,6 +803,7 @@ class CPSCoordinationExperiment(BaseExperiment):
                         death_cause=info.get("death_cause"),
                         traj_x=list(traj_x),
                         traj_y=list(traj_y),
+                        flight_time_s=float(info.get("sim_time", sim_time)),
                     ))
 
             sim_time += ACTION_TIME

@@ -116,6 +116,25 @@ def recompute_metrics(
     n_aircraft = len(aircraft_df)
     success_rate = float(aircraft_df["success"].mean())
 
+    # tau (mean flight time, seconds) -- added for the concurrency-cap/
+    # reassignment-guard-timing resweep's delta_epsilon_vs_static/tau
+    # guardrail pair (concurrency_cap_and_reassignment_guard_resweep.md,
+    # 2026-08-20). NaN (pre-addition telemetry with no flight_time_s
+    # column, or every record NaN) propagates cleanly rather than crashing.
+    if "flight_time_s" in aircraft_df:
+        flight_time_valid = aircraft_df["flight_time_s"].dropna()
+        mean_flight_time_s = (
+            float(flight_time_valid.mean()) if len(flight_time_valid) else float("nan")
+        )
+        _, mean_flight_time_s_std = _episode_ratio_mean_std(
+            aircraft_df["episode_id"].to_numpy(),
+            aircraft_df["flight_time_s"].to_numpy(),
+            (~aircraft_df["flight_time_s"].isna()).to_numpy(),
+        )
+    else:
+        mean_flight_time_s = float("nan")
+        mean_flight_time_s_std = float("nan")
+
     successful = aircraft_df[aircraft_df["success"]]
     # gamma is a genuine per-episode rate, mean/std across episodes -- NOT a
     # pooled ratio-of-sums, and NOT a per-runway decomposition. Full
@@ -306,6 +325,10 @@ def recompute_metrics(
         "n_episodes": int(aircraft_df["episode_id"].nunique()),
         "n_aircraft": n_aircraft,
         "success_rate": round(success_rate, 4),
+        "mean_flight_time_s": (
+            round(mean_flight_time_s, 2) if not np.isnan(mean_flight_time_s) else "nan"
+        ),
+        "mean_flight_time_s_std": _std_or_nan(mean_flight_time_s_std),
         "gamma": round(gamma, 4),
         "gamma_std": _std_or_nan(gamma_std),
         "gamma_r": {rwy: round(v, 4) for rwy, v in gamma_r.items()},

@@ -139,6 +139,7 @@ def _log_episode(
                 death_cause=rec.death_cause,
                 traj_x=list(rec.traj_x),
                 traj_y=list(rec.traj_y),
+                flight_time_s=rec.flight_time_s,
             ).as_dict()
         )
     # VerboseDataCollector stores this batch unconditionally and just tags

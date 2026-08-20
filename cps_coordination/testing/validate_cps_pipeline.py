@@ -49,7 +49,7 @@ import bluesky as bs
 import numpy as np
 import pandas as pd
 
-from bluesky_gym.envs.pathplanning_goal_env import MAX_DISTANCE, MAX_TIME
+from bluesky_gym.envs.pathplanning_goal_env import ACTION_TIME, MAX_DISTANCE, MAX_TIME
 from bluesky_gym.experiment.config import ExperimentConfig, SessionConfig
 from cps_coordination.coordination.cps_manager import AircraftState, CPSManager
 from cps_coordination.coordination.trajectory_buffer import TrajectoryBuffer
@@ -1046,6 +1046,107 @@ def check_step10_episode_scoped_c_sep() -> bool:
     return ok
 
 
+def check_step6d_hysteresis_override() -> bool:
+    """Concurrency-cap/reassignment-guard-timing resweep prerequisite
+    (``.claude/plans/concurrency_cap_and_reassignment_guard_resweep.md``):
+    confirm ``CPSManager(reassignment_hysteresis_s=...)`` actually reaches
+    ``_assign_runways_dynamic``'s hysteresis comparison at a non-default
+    value, and that the constructor's validation rejects a value that isn't
+    a multiple of ``ACTION_TIME / 2``.
+
+    Uses the same synthetic-fixture / stub-surrogate approach as
+    ``test_vectorization_performance.py`` (no bluesky sim needed) rather
+    than a nonexistent precedent -- v1 of this plan cited a
+    ``check_step6b_load_balancing()`` gate that the independent review
+    confirmed was never real.
+
+    Fixture: 1 aircraft, 2 runways, currently on runway A. Runway B's
+    predicted ETA beats A's by exactly 300s (the "gain"). At the class
+    default (240s), 300 >= 240, so the aircraft switches to B. At a
+    constructor override of 360s, 300 < 360, so it stays on A -- the two
+    managers must disagree, or the constructor param isn't reaching the
+    comparison.
+    """
+    print("\n--- Step 6d prereq: reassignment_hysteresis_s constructor override ---")
+    ok = True
+
+    default_mgr = CPSManager(
+        k_cps=3, recat_matrix={"D": {"D": 80.0}},
+        runway_assignment_mode="dynamic", available_runways=["A", "B"],
+    )
+    if default_mgr.reassignment_hysteresis_s != CPSManager.REASSIGNMENT_HYSTERESIS_S:
+        print(f"FAIL: default constructor's reassignment_hysteresis_s="
+              f"{default_mgr.reassignment_hysteresis_s} != class constant "
+              f"{CPSManager.REASSIGNMENT_HYSTERESIS_S}")
+        ok = False
+
+    override_s = CPSManager.REASSIGNMENT_HYSTERESIS_S + ACTION_TIME
+    override_mgr = CPSManager(
+        k_cps=3, recat_matrix={"D": {"D": 80.0}},
+        runway_assignment_mode="dynamic", available_runways=["A", "B"],
+        reassignment_hysteresis_s=override_s,
+    )
+    if override_mgr.reassignment_hysteresis_s != override_s:
+        print(f"FAIL: override constructor's reassignment_hysteresis_s="
+              f"{override_mgr.reassignment_hysteresis_s} != requested {override_s}")
+        ok = False
+
+    gain = CPSManager.REASSIGNMENT_HYSTERESIS_S + 60.0  # sits strictly between the two thresholds
+    eta_matrix = np.array([[1000.0, 1000.0 - gain]])  # runway B beats A by exactly `gain`
+
+    class _StubSurrogate:
+        """Returns a fixed (n, r) ETA matrix regardless of input -- isolates
+        the hysteresis comparison from the surrogate call itself, same
+        pattern as test_vectorization_performance.py's stub."""
+
+        def predict_eta_fleet_all_runways(
+            self, states, runways, current_time, lag_features, target_time_budget=None
+        ):
+            return eta_matrix
+
+    surrogate = _StubSurrogate()
+
+    def _pick_runway(mgr: CPSManager) -> str:
+        mgr._fleet = [
+            AircraftState(acid="AC000", state=np.zeros(5), runway_id="A", eta=0.0, wake_cat="D")
+        ]
+        mgr._fleet_index = {"AC000": 0}
+        mgr._assign_runways_dynamic(surrogate, current_time=0.0, lag_features=None)
+        return mgr._fleet[0].runway_id
+
+    default_choice = _pick_runway(default_mgr)
+    override_choice = _pick_runway(override_mgr)
+    print(f"gain={gain}s, default(threshold={CPSManager.REASSIGNMENT_HYSTERESIS_S}s) -> "
+          f"{default_choice!r}, override(threshold={override_s}s) -> {override_choice!r}")
+
+    if default_choice != "B":
+        print(f"FAIL: default manager should switch to B (gain {gain} >= threshold "
+              f"{CPSManager.REASSIGNMENT_HYSTERESIS_S}), stayed on {default_choice!r}")
+        ok = False
+    if override_choice != "A":
+        print(f"FAIL: override manager should stay on A (gain {gain} < threshold "
+              f"{override_s}), switched to {override_choice!r} -- constructor override "
+              f"isn't reaching _assign_runways_dynamic's comparison")
+        ok = False
+
+    try:
+        CPSManager(
+            k_cps=3, recat_matrix={"D": {"D": 80.0}},
+            runway_assignment_mode="dynamic", available_runways=["A", "B"],
+            reassignment_hysteresis_s=100.0,  # not a multiple of ACTION_TIME/2 (=60)
+        )
+        print("FAIL: constructor accepted reassignment_hysteresis_s=100.0, not a multiple "
+              "of ACTION_TIME/2 -- validation didn't fire")
+        ok = False
+    except ValueError:
+        pass
+
+    if ok:
+        print("PASS: reassignment_hysteresis_s constructor override reaches "
+              "_assign_runways_dynamic's comparison, and non-multiple values are rejected")
+    return ok
+
+
 if __name__ == "__main__":
     passed_step3 = check_step3_fcfs_static()
     passed_step4 = check_step4_k_cps_separation()
@@ -1053,12 +1154,13 @@ if __name__ == "__main__":
     passed_step4c = check_step4c_stall_probation()
     passed_step5 = check_step5_dynamic_tta()
     passed_step6 = check_step6_dynamic_runway()
+    passed_step6d = check_step6d_hysteresis_override()
     passed_step7 = check_step7_three_pass_baseline()
     passed_step9 = check_step9_surrogate_exercised()
     passed_step10_c_sep = check_step10_episode_scoped_c_sep()
     raise SystemExit(
         0 if (passed_step3 and passed_step4 and passed_step4b and passed_step4c
-              and passed_step5 and passed_step6 and passed_step7
+              and passed_step5 and passed_step6 and passed_step6d and passed_step7
               and passed_step9 and passed_step10_c_sep)
         else 1
     )
