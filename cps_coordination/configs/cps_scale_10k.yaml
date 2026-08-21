@@ -112,9 +112,32 @@ cps_eval:
                                    # shape as cps_base.yaml. run_batch_eval.py
                                    # uses max_concurrent_aircraft/
                                    # total_arrivals_per_episode below instead.
-  max_concurrent_aircraft: 35     # Maximum simultaneously active aircraft ("slots").
-                                   # Raised from 10 -> 35 (2026-08-13): resolved by the
-                                   # 50-ac/episode capacity sweep (candidate caps
+  max_concurrent_aircraft: 50     # Maximum simultaneously active aircraft ("slots").
+                                   # Raised from 35 -> 50 (2026-08-20): the original
+                                   # 2026-08-13 sweep (below) pre-dated the Gamma redefinition
+                                   # in f20e155 (denominator changed from [0, last_landing] to
+                                   # [first_landing, last_landing]), which changed the curve
+                                   # shape the stopping rule was applied to. A resweep at the
+                                   # same 8 candidate caps x {60,120,240,360}s hysteresis (32
+                                   # cells, M=30) under the corrected Gamma re-resolved the
+                                   # <10%-of-range stopping rule to cap=50, consistently across
+                                   # all 4 hysteresis slices -- 50->65->80 are byte-identical on
+                                   # every metric (real demand never exceeds ~50 concurrent
+                                   # aircraft at total_arrivals_per_episode=50/spawn_window_s=
+                                   # 2400 below, so caps above 50 simply never bind).
+                                   # REASSIGNMENT_HYSTERESIS_S was re-confirmed at its existing
+                                   # 240s default in the same resweep (maximizes Gamma at
+                                   # cap=50, only candidate that doesn't regress mean flight
+                                   # time) -- no config change needed there. Runtime memory
+                                   # (macOS phys_footprint, the metric that tracks actual RAM/
+                                   # OOM risk) is flat at ~580MB across the entire cap range
+                                   # 10-80, so this raise has no memory-footprint cost. See
+                                   # .claude/plans/concurrency_cap_and_reassignment_guard_resweep.md
+                                   # for the full grid/tables and project_hysteresis_cap_resweep
+                                   # memory for execution detail.
+                                   #
+                                   # Original 10 -> 35 raise (2026-08-13, now superseded):
+                                   # resolved by the 50-ac/episode capacity sweep (candidate caps
                                    # {10,20,27,35,42,50,65,80}, pre-registered <10%-of-
                                    # cumulative-Gamma-range stopping rule) -- see
                                    # phase3_cps_coordination_plan.md's "Density Rescale

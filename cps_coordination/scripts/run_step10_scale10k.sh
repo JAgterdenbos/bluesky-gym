@@ -41,6 +41,21 @@
 # combo's episodes across additional processes too. Real runtime will vary
 # with cluster hardware; this is a same-machine extrapolation, not a promise.
 #
+# CAP RESCALE (2026-08-20) -- max_concurrent_aircraft 35->50 (cps_scale_10k.yaml),
+# resolved by the resweep documented at
+# .claude/plans/concurrency_cap_and_reassignment_guard_resweep.md (the
+# 2026-08-13 sweep above pre-dated a Gamma redefinition, f20e155, that changed
+# the curve shape the stopping rule was applied to; the resweep re-ran it under
+# the corrected Gamma and got cap=50, not 35). REASSIGNMENT_HYSTERESIS_S stays
+# at its 240s default -- re-confirmed, not changed. Wall-clock re-MEASURED at
+# cap=50 (single combo, M=10/30/60, linear fit): ~4.4s fixed startup overhead +
+# ~3.64s/episode marginal cost -> ~2.02h/combo at M=2,000 -> ~12.1h sequential
+# for all 6 combos (essentially unchanged from the cap=35 estimate above --
+# per-episode wall time plateaus for cap>=35, see the resweep's memory-vs-cap
+# table). Runtime memory (macOS phys_footprint) is flat ~580MB across the
+# whole cap=10..80 range, so this raise has no RAM cost either (verified on
+# the 8GB-RAM launch machine's own concern, see the plan doc's memory table).
+#
 # VALIDATED GRID -- this script pins k_cps/mode explicitly rather than
 # relying on run_batch_eval.py's own bare CLI defaults (k_cps=[0,1,3] x
 # mode, 6 combos -- which happen to now be identical to what's pinned
@@ -237,7 +252,7 @@ else
         exit 1
     fi
     echo "Full 6-combo mode -- one run_batch_eval.py invocation sweeping k_cps x mode."
-    echo "Expect ~13.3h (measured at the 50-ac/cap=35 density, ~2.22h/combo x 6) wall-clock total (see script header)."
+    echo "Expect ~12.1h (measured at the 50-ac/cap=50 density, ~2.02h/combo x 6) wall-clock total (see script header)."
     echo "Ctrl-C now if you meant to parallelize via COMBO=\"k_cps:mode\" instead."
     sleep 5
     uv run python cps_coordination/scripts/run_batch_eval.py \
