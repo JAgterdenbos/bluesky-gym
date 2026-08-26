@@ -47,6 +47,12 @@
 #                     see cps_coordination/README.md's "Reassignment-event
 #                     diagnostic telemetry" section before enabling this on
 #                     a full-scale run.
+#   WAKE_SEPARATION_SCALE  Flat separation-floor override (Groot et al.
+#                     comparability rerun). Unset by default -- the RECAT-EU
+#                     matrix is used as-is (37.04s D-D floor). Set to a
+#                     multiplier (e.g. 1.349892008639309 for 50.0s) to scale
+#                     every matrix entry consistently for both the scheduler
+#                     and the C_sep metric (CPSModelConfig.wake_separation_scale).
 
 set -euo pipefail
 
@@ -92,6 +98,12 @@ mkdir -p "$(dirname "$LOG")"
 
 EPISODES="${EPISODES:-2000}"
 
+if [ -n "${WAKE_SEPARATION_SCALE:-}" ]; then
+    SEPARATION_FLOOR_DESC="50s (flat, x$WAKE_SEPARATION_SCALE scale)"
+else
+    SEPARATION_FLOOR_DESC="RECAT-EU (37.04s D-D, default)"
+fi
+
 echo "=================================================================="
 echo "Step 10 scale-up launch -- resolved configuration"
 echo "  config             : $CONFIG"
@@ -103,6 +115,7 @@ echo "  log                : $LOG"
 echo "  combo              : ${COMBO:-<full 6-combo sequential sweep, ~13.3h>}"
 echo "  resume             : ${RESUME:-0}"
 echo "  log_reassignment_events : ${LOG_REASSIGNMENT_EVENTS:-0} (diagnostic-only, much higher row count -- see README)"
+echo "  separation floor   : $SEPARATION_FLOOR_DESC"
 echo "=================================================================="
 
 if [ "${SKIP_SMOKE:-0}" != "1" ]; then
@@ -124,6 +137,7 @@ export RUN_ID SAVE_ROOT CONFIG EPISODES
 if [ -n "${COMBO:-}" ]; then export COMBO; fi
 if [ -n "${RESUME:-}" ]; then export RESUME; fi
 if [ -n "${LOG_REASSIGNMENT_EVENTS:-}" ]; then export LOG_REASSIGNMENT_EVENTS; fi
+if [ -n "${WAKE_SEPARATION_SCALE:-}" ]; then export WAKE_SEPARATION_SCALE; fi
 
 # Python block-buffers stdout when it's not a TTY (i.e. redirected to a
 # file, as below) -- without this, run_batch_eval.py's progress prints sit

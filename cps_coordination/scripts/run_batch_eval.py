@@ -199,6 +199,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         "pass only. Off by default -- much higher row count than the standard "
                         "telemetry. No effect in static mode or for k_cps combos that never "
                         "call _assign_runways_dynamic.")
+    p.add_argument("--reduced-wake-separation", action="store_true", default=False,
+                   help="Scale every RECAT-EU matrix entry by --wake-separation-scale before "
+                        "it reaches both the greedy scheduler and the C_sep compliance metric "
+                        "(CPSModelConfig.reduced_wake_separation). Off by default -- the "
+                        "matrix is used as-is (37.04s D-D floor).")
+    p.add_argument("--wake-separation-scale", type=float, default=0.5,
+                   help="Multiplier applied to every RECAT-EU matrix entry when "
+                        "--reduced-wake-separation is set (CPSModelConfig.wake_separation_scale). "
+                        "No effect unless --reduced-wake-separation is also passed.")
     return p
 
 
@@ -305,6 +314,8 @@ def run_sweep(args: argparse.Namespace) -> None:
             delta_t_plan=args.delta_t_plan,
             delta_update=args.delta_update,
             eta_surrogate_path=args.eta_surrogate_path,
+            reduced_wake_separation=args.reduced_wake_separation,
+            wake_separation_scale=args.wake_separation_scale,
         ),
         session=SessionConfig(
             pretrained_run_id=args.run_id,
@@ -361,7 +372,9 @@ def run_sweep(args: argparse.Namespace) -> None:
         f"\n  reassignment_hysteresis_s={reassignment_hysteresis_s} "
         f"(default={CPSManager.REASSIGNMENT_HYSTERESIS_S})"
         f"\n  episodes/combo={args.episodes}, max_concurrent_aircraft={args.max_concurrent_aircraft}, "
-        f"total_arrivals_per_episode={args.total_arrivals_per_episode}, spawn_window_s={args.spawn_window_s}\n"
+        f"total_arrivals_per_episode={args.total_arrivals_per_episode}, spawn_window_s={args.spawn_window_s}"
+        f"\n  wake_separation="
+        f"{'reduced x' + str(args.wake_separation_scale) if args.reduced_wake_separation else 'RECAT-EU (default)'}\n"
     )
 
     try:

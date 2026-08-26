@@ -217,6 +217,16 @@ if [ -n "$LOG_REASSIGNMENT_EVENTS" ]; then
     REASSIGNMENT_ARGS=(--log-reassignment-events)
 fi
 
+# Flat separation-floor override (Groot et al. comparability rerun): unset by
+# default -- the RECAT-EU matrix is used as-is (37.04s D-D floor). Set to a
+# multiplier (e.g. 1.349892008639309 for 50.0s) to scale every matrix entry
+# consistently for both the scheduler and the C_sep metric.
+WAKE_SEPARATION_SCALE="${WAKE_SEPARATION_SCALE:-}"
+SEPARATION_ARGS=()
+if [ -n "$WAKE_SEPARATION_SCALE" ]; then
+    SEPARATION_ARGS=(--reduced-wake-separation --wake-separation-scale "$WAKE_SEPARATION_SCALE")
+fi
+
 # --- combo selection ---
 # COMBO unset (default): full validated 6-combo grid, one run_batch_eval.py
 # invocation sweeping both k_cps and mode together.
@@ -237,7 +247,8 @@ if [ -n "${COMBO:-}" ]; then
         --seed-base "$RUN_SEED_BASE" \
         --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
         "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" \
-        "${REASSIGNMENT_ARGS[@]+"${REASSIGNMENT_ARGS[@]}"}" &
+        "${REASSIGNMENT_ARGS[@]+"${REASSIGNMENT_ARGS[@]}"}" \
+        "${SEPARATION_ARGS[@]+"${SEPARATION_ARGS[@]}"}" &
     CHILD_PID=$!
     wait "$CHILD_PID"
     CHILD_PID=""
@@ -267,7 +278,8 @@ else
         --seed-base "$RUN_SEED_BASE" \
         --episode-id-offset "$RUN_EPISODE_ID_OFFSET" \
         "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" \
-        "${REASSIGNMENT_ARGS[@]+"${REASSIGNMENT_ARGS[@]}"}" &
+        "${REASSIGNMENT_ARGS[@]+"${REASSIGNMENT_ARGS[@]}"}" \
+        "${SEPARATION_ARGS[@]+"${SEPARATION_ARGS[@]}"}" &
     CHILD_PID=$!
     wait "$CHILD_PID"
     CHILD_PID=""

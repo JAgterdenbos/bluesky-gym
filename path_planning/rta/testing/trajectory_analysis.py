@@ -58,7 +58,86 @@ def get_default_heading(rwy_name):
     heading = int(match.group(1)) * 10
     return 360 if heading == 0 else heading
 
-# ── 2. Main Plotting Routine ──────────────────────────────────────────────────
+# ── 2. Spawn-bearing × RTA failure-rate heatmap grid ───────────────────────────
+def _episode_bearing_rta_success(df, rwy):
+    """Per-episode spawn bearing, RTA, and success flag for one runway, binned
+    the same way as the heatmap panel inside plot_runway_analysis()."""
+    d = df[df["runway"] == rwy]
+    first_steps = d.groupby("episode").first().reset_index()
+
+    ep = first_steps[["episode", "x", "y"]].copy()
+    ep["bearing"] = np.degrees(np.arctan2(ep["x"], ep["y"])) % 360
+    ep["rta"] = d.groupby("episode")["rta"].first().values
+    ep["is_success"] = d.groupby("episode")["is_success"].first().values
+
+    ep["bearing_bin"] = (ep["bearing"] // 30 * 30).astype(int)
+    rta_bins = np.linspace(ep["rta"].min(), ep["rta"].max(), 9)
+    ep["rta_bin"] = pd.cut(ep["rta"], bins=rta_bins, labels=np.round(rta_bins[:-1], 3))
+    return ep
+
+
+def plot_bearing_rta_failure_grid(runways, data_path, out_dir=".", algo="No-HER (with Heading)", dpi=300):
+    """Standalone, thesis-styled small-multiple of the spawn-bearing x RTA
+    failure-rate heatmap (same quantity as the ax_heat panel in
+    plot_runway_analysis) across several runways side by side."""
+    _, ext = os.path.splitext(data_path.lower())
+    df = pd.read_parquet(data_path, engine="pyarrow") if ext in [".parquet", ".pq"] else pd.read_csv(data_path)
+
+    bear_bins = np.arange(0, 391, 30)
+
+    with plt.rc_context({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif", "Computer Modern Roman"],
+        "axes.linewidth": 0.7,
+    }):
+        fig, axes = plt.subplots(1, len(runways), figsize=(4.6 * len(runways), 4.2), facecolor=BG)
+        if len(runways) == 1:
+            axes = [axes]
+
+        im = None
+        for ax, rwy in zip(axes, runways):
+            ep = _episode_bearing_rta_success(df, rwy)
+            ep_f = ep[ep["is_success"] == False]
+
+            pivot_fail = ep_f.groupby(["rta_bin", "bearing_bin"]).size().unstack(fill_value=0)
+            pivot_total = ep.groupby(["rta_bin", "bearing_bin"]).size().unstack(fill_value=0)
+            pivot_fail = pivot_fail.reindex(index=pivot_total.index, columns=pivot_total.columns, fill_value=0)
+            pivot_rate = (pivot_fail / pivot_total.replace(0, np.nan)).fillna(0)
+
+            im = ax.imshow(
+                pivot_rate.values, aspect="auto", cmap="RdYlGn_r", vmin=0, vmax=1,
+                extent=[bear_bins[0], bear_bins[-2],
+                        float(str(pivot_rate.index[-1])), float(str(pivot_rate.index[0]))],
+                origin="upper",
+            )
+            ax.set_facecolor(BG)
+            ax.tick_params(colors=TEXT_MUTED, labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#cccccc")
+            ax.set_title(rwy, color=TEXT_DARK, fontsize=11, fontweight="bold", pad=6)
+            ax.set_xlabel("Spawn bearing bin (°)", fontsize=9, color=TEXT_MUTED)
+            ax.set_xticks(bear_bins[::2])
+            ax.set_xticklabels([f"{b}°" for b in bear_bins[::2]], fontsize=7)
+            ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+
+        axes[0].set_ylabel("RTA (normalised)", fontsize=9, color=TEXT_MUTED)
+
+        cbar = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02)
+        cbar.set_label("Failure rate", color=TEXT_MUTED, fontsize=9)
+        cbar.ax.yaxis.set_tick_params(color=TEXT_MUTED, labelsize=8)
+        plt.setp(cbar.ax.yaxis.get_ticklabels(), color=TEXT_MUTED)
+        cbar.outline.set_edgecolor("#cccccc")
+
+        fig.suptitle(f"Failure Rate: Spawn Bearing x RTA ({algo})",
+                     color=TEXT_DARK, fontsize=13, fontweight="bold", y=1.02)
+
+        os.makedirs(out_dir, exist_ok=True)
+        filename = os.path.join(out_dir, "spawn_bearing_rta_failure_heatmap.png")
+        plt.savefig(filename, dpi=dpi, bbox_inches="tight", facecolor=BG)
+        print(f"Saved spawn-bearing x RTA failure heatmap grid: {filename}")
+
+
+# ── 3. Main Plotting Routine ──────────────────────────────────────────────────
 def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=".", dpi=150):
     """
     Plots trajectory analysis driven by CLI arguments.
@@ -359,21 +438,32 @@ def plot_runway_analysis(rwy, algo, data_path, heading=None, scale=300, out_dir=
     plt.savefig(filename, dpi=300, bbox_inches="tight", facecolor=BG)
     print(f"Saved publication-quality vector plot: {filename}")
 
-# ── 3. CLI Execution ──────────────────────────────────────────────────────────
+# ── 4. CLI Execution ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate runway trajectory analysis plots.")
-    
-    parser.add_argument("-r", "--rwy", type=str, required=True, help="Runway identifier.")
+
+    parser.add_argument("--mode", choices=["dashboard", "heatmap-grid"], default="dashboard",
+                         help="'dashboard' (default): full 9-panel per-runway analysis. "
+                              "'heatmap-grid': standalone spawn-bearing x RTA failure-rate heatmap across --rwy runways.")
+    parser.add_argument("-r", "--rwy", type=str, nargs="+", required=True,
+                         help="Runway identifier(s). Single value for --mode dashboard; one or more for --mode heatmap-grid.")
     parser.add_argument("-a", "--algo", type=str, required=True, help="Algorithm name.")
     parser.add_argument("-d", "--data", type=str, required=True, help="Full data file path.")
-    parser.add_argument("--heading", type=int, default=None, help="Target runway heading.")
-    parser.add_argument("--scale", type=int, default=300, help="Scale factor (default: 300 km).")
+    parser.add_argument("--heading", type=int, default=None, help="Target runway heading (dashboard mode only).")
+    parser.add_argument("--scale", type=int, default=300, help="Scale factor (default: 300 km, dashboard mode only).")
     parser.add_argument("-o", "--out-dir", type=str, default=".", help="Output directory.")
     parser.add_argument("--dpi", type=int, default=300, help="DPI resolution for rendering.")
 
     args = parser.parse_args()
 
-    plot_runway_analysis(
-        rwy=args.rwy, algo=args.algo, data_path=args.data, heading=args.heading,
-        scale=args.scale, out_dir=args.out_dir, dpi=args.dpi
-    )
+    if args.mode == "heatmap-grid":
+        plot_bearing_rta_failure_grid(
+            runways=args.rwy, data_path=args.data, out_dir=args.out_dir, algo=args.algo, dpi=args.dpi
+        )
+    else:
+        if len(args.rwy) != 1:
+            parser.error("--mode dashboard requires exactly one --rwy value.")
+        plot_runway_analysis(
+            rwy=args.rwy[0], algo=args.algo, data_path=args.data, heading=args.heading,
+            scale=args.scale, out_dir=args.out_dir, dpi=args.dpi
+        )

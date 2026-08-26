@@ -9,7 +9,7 @@ from matplotlib.patches import Patch
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import numpy as np
 import pandas as pd
-from scipy.stats import gaussian_kde, norm, skew, kurtosis
+from scipy.stats import gaussian_kde, skew, kurtosis
 
 matplotlib.rcParams.update({
     'figure.dpi': 300,
@@ -29,7 +29,6 @@ TEXT_MAIN = "#111111"
 TEXT_MUTED = "#444444"
 TOLERANCE_FILL = "#f4f9f4"
 VIOLATION_FILL = "#fdf2f2"
-FLAG_COLOR = "#a83232"
 DATASET_COLORS = ["#004488", "#bb5566", "#44aa99", "#d95f02", "#999933"]
 
 DELAY_THRESHOLD = 60.0   # seconds = 1 minute tolerance
@@ -38,9 +37,6 @@ MAX_TIME = 3600 * 6      # normalised window: 6 hours
 TAIL_PERCENTILE = 99.0   # x-axis sized to capture this much mass of the WIDEST dataset
 TAIL_HEADROOM = 1.15
 Y_AXIS_FLOOR = 1e-3       # log-scale floor for density axis
-
-SKEW_FLAG = 1.0           # |skew| beyond this is flagged as non-normal
-KURTOSIS_FLAG = 3.0       # |excess kurtosis| beyond this is flagged
 
 SYMLOG_LINSCALE = 1.5     # higher = more screen width given to the linear (within-tolerance) zone
 
@@ -75,7 +71,7 @@ def process_dataset(data_path: Path, rwy: Optional[str] = None) -> np.ndarray:
     return episode_summary['delay'].dropna().to_numpy(np.float32) * MAX_TIME
 
 
-def render_metrics_table(ax_table: plt.Axes, table_rows: List[List[str]], flag_cells: set) -> None:
+def render_metrics_table(ax_table: plt.Axes, table_rows: List[List[str]]) -> None:
     ax_table.axis('off')
     col_headers = [
         "Dataset Source", "N", "On-Time Rate", "Delayed Rate",
@@ -118,13 +114,8 @@ def render_metrics_table(ax_table: plt.Axes, table_rows: List[List[str]], flag_c
         cell.set_linewidth(1.0)
         cell.set_edgecolor(TEXT_MAIN)
 
-        if (r, c) in flag_cells:
-            cell.set_text_props(color=FLAG_COLOR, fontweight='bold', fontfamily='serif')
-        elif r > 0:
+        if r > 0:
             cell.set_text_props(color=TEXT_MAIN, fontfamily='serif')
-
-    ax_table.text(0.0, -0.1, f"Bold red: |S| > {SKEW_FLAG:g} or |K| > {KURTOSIS_FLAG:g} (deviation from normality).",
-                  transform=ax_table.transAxes, fontsize=7, color=TEXT_MUTED, ha='left', style='italic')
 
 
 def generate_multi_plot(
@@ -135,7 +126,7 @@ def generate_multi_plot(
     show_zone_labels: bool = True,
 ) -> None:
     if not figure_title:
-        figure_title = "Arrival Delay Distribution Analysis with Normality Diagnostics"
+        figure_title = "Arrival Delay Distribution Analysis"
 
     fig = plt.figure(figsize=(12.0, 7.4), facecolor=BG_WHITE)
     ax = fig.add_axes([0.07, 0.42, 0.66, 0.46])
@@ -184,7 +175,6 @@ def generate_multi_plot(
 
     global_max_y = Y_AXIS_FLOOR * 10
     table_rows = []
-    flag_cells = set()
 
     for idx, (label, delays_sec, delays_min) in enumerate(dataset_cache):
         abs_delays_sec = np.abs(delays_sec)
@@ -212,22 +202,12 @@ def generate_multi_plot(
             ax.plot(x_vals, y_vals, color=color, linewidth=1.5, label=label, zorder=4)
             ax.fill_between(x_vals, Y_AXIS_FLOOR, y_vals, color=color, alpha=0.06, zorder=3)
 
-            mu, sigma = np.mean(delays_min), np.std(delays_min)
-            y_normal = np.clip(norm.pdf(x_vals, mu, sigma), Y_AXIS_FLOOR, None)
-            ax.plot(x_vals, y_normal, color=color, linestyle=(0, (3, 4)), linewidth=0.8, alpha=0.5, zorder=3)
-
-            global_max_y = max(global_max_y, float(np.max(y_vals)), float(np.max(y_normal)))
+            global_max_y = max(global_max_y, float(np.max(y_vals)))
         else:
             counts, _, _ = ax.hist(delays_min, bins=30, range=(-x_limit, x_limit), density=True,
                                     color=color, alpha=0.4, zorder=4, label=label)
             if len(counts) > 0:
                 global_max_y = max(global_max_y, float(np.max(counts)))
-
-        row_idx = idx + 1
-        if abs(sk) > SKEW_FLAG:
-            flag_cells.add((row_idx, 8))
-        if abs(kt) > KURTOSIS_FLAG:
-            flag_cells.add((row_idx, 9))
 
         table_rows.append([
             label,
@@ -264,7 +244,6 @@ def generate_multi_plot(
         Patch(facecolor=TOLERANCE_FILL, edgecolor='#cccccc', linestyle=':', label=f'Within Tolerance ($|\\Delta t| \\leq {threshold_min:g}$m)'),
         Patch(facecolor=VIOLATION_FILL, edgecolor='#cccccc', linestyle=':', label=f'Outside Tolerance ($|\\Delta t| > {threshold_min:g}$m)'),
         plt.Line2D([0], [0], color=TEXT_MUTED, linestyle='-', linewidth=1.5, label='Empirical KDE Curve'),
-        plt.Line2D([0], [0], color=TEXT_MUTED, linestyle=(0, (3, 4)), linewidth=1.0, label='Theoretical Normal Fit'),
     ]
     for idx, (label, _, _) in enumerate(dataset_cache):
         color = DATASET_COLORS[idx % len(DATASET_COLORS)]
@@ -273,7 +252,7 @@ def generate_multi_plot(
     ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.04, 0.5),
               frameon=False, fontsize=8, labelcolor=TEXT_MUTED)
 
-    render_metrics_table(ax_table, table_rows, flag_cells)
+    render_metrics_table(ax_table, table_rows)
 
     fig.suptitle(figure_title, fontsize=12, fontweight='bold', color=TEXT_MAIN, y=0.96, x=0.5, ha='center')
 
