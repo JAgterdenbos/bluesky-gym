@@ -24,6 +24,30 @@ Same source data for both (1.72M rows / 100k episodes), same selection
 hyperparameters/random_state — a clean matched comparison, not a different
 training run.
 
+**Caveat (added 2026-09-01, found during thesis V&V):** the table above uses
+`select_surrogate_features.py`'s scout CV, which defaults to `n_estimators=50`.
+The model that actually shipped (`eta_surrogate.pkl`) is trained via
+`train_surrogate.py` with `n_estimators=15` (same memory-vs-accuracy tradeoff
+as the DTG sampler, see `chapter4_more_results.md`'s Production Feature Sets
+section) — so the table's "current production" row does **not** reflect the
+shipped model's actual accuracy. It's still a valid, matched comparison of the
+*feature decision* (`naive_eta_remaining` in vs. out, both at 50 trees), just
+not the deployed model's held-out performance.
+
+Re-running `validate_surrogate.py`'s held-out CV directly against the shipped
+`eta_surrogate.pkl` (its real 15-tree config, same data, same
+`GroupKFold(n_splits=5, random_state=42)`) gives:
+
+| | shipped model (15 trees, real held-out CV) |
+|---|---|
+| R² | 0.9908 |
+| MAE | 57.1s |
+| RMSE | 76.4s |
+
+This is the number that should be cited as the ETA surrogate's actual
+predictive accuracy — reproducible via `python
+cps_coordination/testing/validate_surrogate.py --skip-condition3`.
+
 ## Files in this directory
 
 - `eta_surrogate.pkl`, `surrogate_feature_selection.yaml` — **current
