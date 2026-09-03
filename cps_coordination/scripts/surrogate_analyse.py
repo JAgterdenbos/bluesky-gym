@@ -1294,6 +1294,7 @@ def select_best_transformation(
         y_te_oof   = np.concatenate(fold_y_te)
         y_pred_oof = np.concatenate(fold_y_pred)
         metrics    = _et_metrics(y_te_oof, y_pred_oof)
+        bias       = float(np.mean(y_pred_oof - y_te_oof))
         results.append({
             "name":    name,
             "fwd":     fwd,
@@ -1301,9 +1302,10 @@ def select_best_transformation(
             "y_test":  y_te_oof,
             "y_pred":  y_pred_oof,
             "metrics": metrics,
+            "bias":    bias,
         })
         print(f"  {name:<12} {metrics['R²']:>10.4f} {metrics['MAE']:>10.4f} "
-              f"{metrics['RMSE']:>10.4f}")
+              f"{metrics['RMSE']:>10.4f}  bias={bias:>+9.1f}")
         print(f"    MAE = {_tolerance_ratio_str(metrics['MAE'])}")
 
     identity_mae = results[0]["metrics"]["MAE"]
@@ -1337,6 +1339,9 @@ def select_best_transformation(
         X_full_r, winner["fwd"](y_full)
     )
     winner["feature_names"] = names_r
+    # All three transforms' OOF metrics (incl. the new per-transform `bias`),
+    # not just the winner's -- needed to report the full comparison table.
+    winner["all_results"]   = results
 
     return winner
 
