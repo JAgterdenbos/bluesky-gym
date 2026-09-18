@@ -389,6 +389,14 @@ def _get_args():
     p.add_argument("--start-bearing-deg", type=float, default=0.0,
                     help="Phase offset for the evenly-spaced full-circle spawn grid.")
     p.add_argument("--slack-km", type=float, nargs="+", default=[0.0, 33.0, 67.0, 100.0])
+    p.add_argument("--inset-xlim", type=float, nargs=2, default=[-150.0, -50.0],
+                    metavar=("XMIN", "XMAX"),
+                    help="Manoeuvring-detail inset bounds (km, easting). The dense "
+                         "holding-loop knot moves with runway/corridor geometry, so "
+                         "this is not a good default across runways — inspect the "
+                         "full map first and pick a box for the runway being plotted.")
+    p.add_argument("--inset-ylim", type=float, nargs=2, default=[-50.0, 50.0],
+                    metavar=("YMIN", "YMAX"), help="Manoeuvring-detail inset bounds (km, northing).")
     p.add_argument("--out", type=str, default="figures/spatio_temporal/trajectory_rta_sweep.png")
     p.add_argument("--pop-data", type=str, default="bluesky_gym/envs/data/population_1km.csv")
     p.add_argument("--x-grid", type=str, default="bluesky_gym/envs/data/x_array.csv")
@@ -426,6 +434,7 @@ def main():
     plot_sweep(
         trajectories, spawn_points, bearings, args.runway, args.slack_km, args.out,
         args.pop_data, args.x_grid, args.y_grid,
+        inset_xlim=tuple(args.inset_xlim), inset_ylim=tuple(args.inset_ylim),
     )
 
 
